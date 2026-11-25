@@ -213,7 +213,7 @@ def test_run_agent_threads_planning_context_to_planner(
     monkeypatch.setattr(
         ctx,
         "_call_agent_with_retry",
-        # **kwargs absorbs the fw.agent.execute trace parameters (trace_input,
+        # **kwargs absorbs the agent loop's trace parameters (trace_input,
         # resumed) this test does not care about.
         lambda agent_call, lm=None, **kwargs: SimpleNamespace(final_answer="done"),
     )

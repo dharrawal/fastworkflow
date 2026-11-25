@@ -564,13 +564,14 @@ def test_the_classifier_layer_records_its_engine_on_the_trace(on_a_book, monkeyp
     trace = predictor.trace
     assert intent.command == "Book/show_book"
     assert trace["matcher_layer"] == "classifier"
-    assert trace["engine"] == "classifier" and trace["engine_fallback"] is False
+    # span contract v63: the engine that decided is `decided_by` on fw.intent ("local" for the local model)
+    assert trace["decided_by"] == "local" and trace["engine_fallback"] is False
 
-    # A layer above the classifier answers without an engine, and says nothing about one.
+    # A layer above the classifier answers without an engine: the name decided, and no engine is named.
     predictor.predict("show_book")
     trace = predictor.trace
     assert trace["matcher_layer"] == "exact_prefix"
-    assert "engine" not in trace and "engine_fallback" not in trace
+    assert trace["decided_by"] == "name" and "engine_fallback" not in trace and "engine_chain" not in trace
 
 
 # ---------------------------------------------------------------------------

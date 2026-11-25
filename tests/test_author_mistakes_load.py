@@ -91,11 +91,11 @@ def test_a_signature_with_no_generator_at_all_is_the_same_problem(tmp_path):
 
 
 def test_the_rule_leaves_real_commands_and_non_commands_alone(tmp_path):
-    """A generator with no Signature (a startup command), a helper whose name starts with an underscore and a planning
+    """A generator with no Signature (a startup command), a helper module in _commands/_shared/ and a planning
     command are all fine. A file that imports its ResponseGenerator is not (the load-check sweep: a generator is a
     class defined in the command file; it was accepted before)."""
     folder = _build_workflow(tmp_path, "wf_fine", extra_commands={
-        "Library/_helper": _SIGNATURE_ONLY.split("class {generator}")[0],                       # a helper: skipped
+        "_shared/helper": _SIGNATURE_ONLY.split("class {generator}")[0],                        # a helper: never read
         "Library/greet": _SIGNATURE_ONLY.replace("{generator}", "ResponseGenerator"),           # the exact name
         "Library/greet_again": ("from .greet import ResponseGenerator, Signature  # noqa: F401\n"),   # imported
         "no_signature": ("import fastworkflow\n\n\nclass ResponseGenerator:\n"
@@ -314,7 +314,9 @@ def _todo_app(tmp_path, *, edit_item_class=None, edit_list_class=None, root=True
 
 
 _NO_GET_PARENT = "class Context:\n    pass\n"
-_NONE_PARENT = "class Context:\n    @classmethod\n    def get_parent(cls, record):\n        return None\n"
+# a context with get_parent declares its parents (bd fix-qjne.36); returning None stays allowed at run time
+_NONE_PARENT = ("class Context:\n    parents = [\"TodoList\"]\n\n    @classmethod\n    def get_parent(cls, record):\n"
+                "        return None\n")
 
 
 def _lookup_twice(app):

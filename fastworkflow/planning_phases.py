@@ -125,7 +125,7 @@ How the runner (``WorkflowExecutionContext``) runs a phased planning command cal
    list of the per-item outputs, in item order.
 8. A callable ``when`` is evaluated when the runner reaches the phase (never again on a
    resume after ask_user). A skipped phase runs nothing, fills nothing and writes no
-   answer; its ``fw.skill.phase`` span has ``skipped``. A ``when`` that raises, or a
+   answer; its ``fw.phase`` span has ``skipped``. A ``when`` that raises, or a
    parameter with nothing to bind, fails the phase. When the last phase is skipped, the
    answer is that of the last phase that ran.
 9. ``until`` (``Phase(..., over=..., until=callable)``) is called after each item's
@@ -155,7 +155,7 @@ How the runner (``WorkflowExecutionContext``) runs a phased planning command cal
    answer call of a phase whose answer is shown (the last phase, the extra-steps phase).
    Never for planner-written steps or on a resume.
 
-Each phase run is a ``fw.skill.phase`` span (see ``tracing.SPAN_CONTRACTS``).
+Each phase run is a ``fw.phase`` span (see ``tracing.SPAN_CONTRACTS``).
 """
 from __future__ import annotations
 

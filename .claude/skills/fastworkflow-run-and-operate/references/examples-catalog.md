@@ -23,7 +23,7 @@ Read them in this order — each introduces exactly one new concept.
 
 ## 2. messaging_app_1 — smallest hand-written workflow
 - App: `application/send_message.py` (plain function).
-- Commands: `_commands/send_message.py` (global) + `context_inheritance_model.json`.
+- Commands: `_commands/send_message.py` (global).
 - Teaches: writing a command by hand instead of `fastworkflow build`.
 
 ## 3. messaging_app_2 — class-based command context
@@ -34,8 +34,8 @@ Read them in this order — each introduces exactly one new concept.
 
 ## 4. messaging_app_3 — context inheritance
 - Commands: `_commands/User/send_message.py`, `_commands/PremiumUser/send_priority_message.py`,
-  global `_commands/initialize_user.py`; `context_inheritance_model.json` declares
-  `PremiumUser` extends `User`.
+  global `_commands/initialize_user.py`; `_commands/PremiumUser/_PremiumUser.py` declares
+  `inherits = ["User"]`.
 - Teaches: a `PremiumUser` context sees BOTH `send_message` (inherited) and
   `send_priority_message`.
 

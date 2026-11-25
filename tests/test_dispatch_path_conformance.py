@@ -143,8 +143,9 @@ def test_prose_path_via_process_turn(
             sink=sink,
             turn_outputs=ctx._turn_outputs,
             turn_result=sink.turn_records[-1],
-            outer_span_name=tracing.SPAN_AGENT_TOOL_CALL,
-            inner_span_name=tracing.SPAN_COMMAND_EXECUTE,
+            # One dispatch, one span (bd fix-qjne.34: the "/" path opens no tool-call span of its own).
+            outer_span_name=tracing.SPAN_COMMAND,
+            inner_span_name=None,
         )
     finally:
         with suppress(Exception):
@@ -162,7 +163,7 @@ def test_direct_action_path_via_process_action_turn(
             sink=sink,
             turn_outputs=ctx._turn_outputs,
             turn_result=sink.turn_records[-1],
-            outer_span_name=tracing.SPAN_AGENT_TOOL_CALL,
+            outer_span_name=tracing.SPAN_COMMAND,
             inner_span_name=None,
         )
     finally:
@@ -209,8 +210,9 @@ def test_agent_tool_path_via_execute_workflow_query(hello_initialized):
         sink=sink,
         turn_outputs=ctx._turn_outputs,
         turn_result=turn_result,
-        outer_span_name=tracing.SPAN_AGENT_TOOL_CALL,
-        inner_span_name=tracing.SPAN_COMMAND_EXECUTE,
+        # The agent's tool call is recorded on its step (none is open here) and the command on fw.command.
+        outer_span_name=tracing.SPAN_COMMAND,
+        inner_span_name=None,
     )
 
     ctx.pop_active_workflow()

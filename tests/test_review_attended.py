@@ -120,10 +120,10 @@ def test_the_ask_user_span_of_a_review_carries_every_reply_in_order(gated, monke
     assert record.state == CONFIRMED
 
     closed = [span for span in gated.sink.spans
-              if span.name == tracing.SPAN_ASK_USER and span.end_ns is not None]
+              if span.name == tracing.SPAN_QUESTION and span.end_ns is not None]
     assert len(closed) == 1
     attributes = closed[0].attributes
     assert attributes["user_responses"] == [edit, "accept"]
     assert attributes["user_response"] == "accept"           # the existing attribute keeps the final reply
     assert closed[0].attributes[tracing.ATTR_SPAN_CONTRACT_VERSION] == tracing.SPAN_CONTRACTS[
-        tracing.SPAN_ASK_USER].version
+        tracing.SPAN_QUESTION].version

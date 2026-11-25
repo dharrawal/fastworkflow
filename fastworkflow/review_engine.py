@@ -1819,6 +1819,7 @@ class ProposalReplyPolicy:
 
         folder = getattr(self._app_workflow, "folderpath", None)
         self._read_nothing = False
+        self.read_by = "code"       # who read the reply (the fw.review.reply span): code, the review head, a model
         notes = _reader_notes.set([])
         try:
             with workflow_scope(folder):
@@ -1858,6 +1859,7 @@ class ProposalReplyPolicy:
                 if sub_task_review:
                     return ReplyDecision(Verdict.REPROMPT, "not read as edits", message=SUB_TASK_UNREADABLE_REPLY)
                 return ReplyDecision(Verdict.REPROMPT, "not read as edits", message=f"{exc} {PROMPT_HINT}")
+            self.read_by = "model"
             try:
                 edits = list(reader(text, proposal))
             except EditRefused as refused:
@@ -1971,6 +1973,7 @@ class ProposalReplyPolicy:
 
         _prepare_plan_workflow(self, proposal)
         slot_question = _slot_question(proposal)
+        self.read_by = "head"
         cme_out = CommandExecutor.perform_action(
             self._plan_cme,
             fastworkflow.Action(command_name="wildcard", command=text),
@@ -2220,6 +2223,7 @@ class ProposalReplyPolicy:
 
         _clear_plan_cme_continuation(self._plan_cme)
         _prepare_plan_workflow(self, proposal)
+        self.read_by = "model"
         cmd_out = CommandExecutor.perform_action(
             self._plan_workflow,
             fastworkflow.Action(command_name="ProposalReview/edit", command=text),
@@ -2238,6 +2242,21 @@ class ProposalReplyPolicy:
             _clear_plan_cme_continuation(self._plan_cme)
             return self._drop_decision(proposal, text, preserve_drop_items)
         return decision
+
+
+#: ``fw.review.reply``'s ``read_as``, by the decision's verdict.
+_READ_AS = {Verdict.CONFIRM: "accept", Verdict.DECLINE: "decline", Verdict.EDIT: "edit", Verdict.REFUSE: "refused",
+            Verdict.REPROMPT: "unclear", Verdict.ALWAYS: "accept"}
+
+
+def _explicit_yes_required(proposal: Proposal, workflow: Any) -> Optional[bool]:
+    """Whether only an explicit yes accepts this review (a part changes data); None when it cannot be told."""
+    from fastworkflow.review_proposals import SubTaskProposal
+
+    try:
+        return isinstance(proposal, SubTaskProposal) and bool(proposal.changes_data(getattr(workflow, "folderpath", None)))
+    except Exception:  # noqa: BLE001 - a recorded fact never fails the reply
+        return None
 
 
 def reply_policy(
@@ -2318,6 +2337,21 @@ def open_review(host: Any, store: ReviewStore, proposal: Proposal, *, surface: S
     return record
 
 
+def _revised(host: Any, proposal: Proposal, decision: ReplyDecision, round_number: int) -> Proposal:
+    """*proposal* with the reply's edits applied and its items checked again, in one ``fw.review.revision`` span."""
+    span = tracing.start_span(host, tracing.SPAN_REVIEW_REVISION, attributes={"round": round_number})
+    try:
+        edited = apply_edits(proposal, list(decision.edits)).revised(host, proposal)
+    except BaseException as exc:
+        tracing.end_span(host, span, status=tracing.status_for_dispatch_exception(exc), attributes={"rechecked": False})
+        raise
+    before, after = proposal.binding().get("items") or [], edited.binding().get("items") or []
+    tracing.end_span(host, span, attributes={
+        "items_changed": sum(1 for old, new in zip(before, after) if old != new) + abs(len(after) - len(before)),
+        "rechecked": True})
+    return edited
+
+
 def reply_to_proposal(
     host: Any,
     store: ReviewStore,
@@ -2331,14 +2365,28 @@ def reply_to_proposal(
     surface = store.surface
     answering_q3_or_later = record.turns_seen >= 2
     producing_q3_or_later = record.turns_seen >= 1
-    decision = reply_policy(
+    policy = reply_policy(
         record.kind,
         store.edit_reader,
         plan_cme=getattr(store, "plan_cme", None),
         plan_workflow=getattr(store, "plan_workflow", None),
         app_workflow=_prompt_workflow(host, store),
         structured_fallback=answering_q3_or_later,
-    ).decide(proposal, message)
+    )
+    # How the reply read is the review's own record (bd fix-qjne.34 step 5), not a command decision: the review head's
+    # routing writes no fw.intent / fw.parameters of its own (``quiet``), and its model calls are this span's children.
+    span = tracing.start_span(host, tracing.SPAN_REVIEW_REPLY)
+    try:
+        decision = policy.decide(proposal, message)
+    except BaseException as exc:
+        tracing.end_span(host, span, status=tracing.status_for_dispatch_exception(exc),
+                         attributes={"by": getattr(policy, "read_by", "code"), "reason": type(exc).__name__})
+        raise
+    if span is not None:
+        tracing.end_span(host, span, attributes={
+            "read_as": "wait" if decision.reason == "slot wait" else _READ_AS.get(decision.verdict, decision.verdict.value),
+            "by": getattr(policy, "read_by", "code"), "reason": decision.reason,
+            "explicit_yes_required": _explicit_yes_required(proposal, _prompt_workflow(host, store))})
     if cap_turn and decision.verdict not in (Verdict.CONFIRM, Verdict.DECLINE):
         transition(host, store, record, EXPIRED, reason="ttl", surface=surface, outcome="expired")
         propagate(host, store, record, surface=surface)
@@ -2361,7 +2409,7 @@ def reply_to_proposal(
     if decision.verdict is Verdict.EDIT:
         if producing_q3_or_later and getattr(store, "plan_cme", None) is not None:
             _clear_plan_cme_continuation(store.plan_cme)
-        edited = apply_edits(proposal, list(decision.edits)).revised(host, proposal)
+        edited = _revised(host, proposal, decision, record.revision + 1)
         record.binding = {**record.binding, "items": edited.binding()["items"]}
         record.fingerprint = fingerprint(record.binding)   # the record's fingerprint covers its channel and task too
         record.revision += 1

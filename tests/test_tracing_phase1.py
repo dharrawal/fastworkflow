@@ -24,6 +24,7 @@ from fastworkflow.observability import store as obs
 from fastworkflow.utils.react import AskUserSuspend, fastWorkflowReAct
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 from tests.test_turn_result_capture import no_review_gate  # noqa: F401 - the review gate is off for these turns
+from tests import span_tree
 from tests.todo_list_workflow.application.todo_manager import TodoListManager
 
 
@@ -156,30 +157,16 @@ def _set_agents(ctx, agent):
 
 
 class TestTaxonomyAndProtocol:
-    def test_v1_span_names(self):
-        assert tracing.V1_SPAN_NAMES == {
-            "fw.turn",
-            "fw.planner.plan",
-            "fw.planner.replan",
-            "fw.agent.tool_call",
-            "fw.command.execute",
-            "fw.ask_user",
-        }
-
-    def test_agent_loop_span_names(self):
-        assert tracing.AGENT_LOOP_SPAN_NAMES == {"fw.agent.execute", "fw.agent.step"}
-        # fw.agent.execute is the whole loop; fw.command.execute is one command
-        # inside one tool call. Two levels, two names — collapsing them would
-        # put the executor and a single command at the same depth.
-        assert tracing.SPAN_AGENT_EXECUTE != tracing.SPAN_COMMAND_EXECUTE
-        assert not (tracing.AGENT_LOOP_SPAN_NAMES & tracing.V1_SPAN_NAMES)
-        assert not (tracing.AGENT_LOOP_SPAN_NAMES & tracing.RESERVED_V2_SPAN_NAMES)
-
-    def test_reserved_v2_names_modeled_not_emitted(self):
-        assert "fw.nlu.intent" in tracing.RESERVED_V2_SPAN_NAMES
-        assert "fw.nlu.param_extraction" in tracing.RESERVED_V2_SPAN_NAMES
-        assert "fw.llm.call" in tracing.RESERVED_V2_SPAN_NAMES
-        assert not (tracing.V1_SPAN_NAMES & tracing.RESERVED_V2_SPAN_NAMES)
+    def test_the_contract_s_names_say_what_happened_not_who_did_it(self):
+        """Span contract 63 (bd fix-qjne.34; replaces the tests of the v1, agent-loop and reserved-v2 name sets, which
+        are removed with their old names): the stages, their parts, and neutral names for the work."""
+        assert tracing.STAGE_SPAN_NAMES == ("fw.split", "fw.resolve", "fw.review", "fw.run", "fw.answer")
+        assert {tracing.SPAN_PLAN, tracing.SPAN_PHASE, tracing.SPAN_STEP, tracing.SPAN_COMMAND, tracing.SPAN_INTENT,
+                tracing.SPAN_PARAMETERS, tracing.SPAN_QUESTION, tracing.SPAN_LLM_CALL} <= set(tracing.SPAN_CONTRACTS)
+        assert not [name for name in tracing.SPAN_CONTRACTS
+                    if name.startswith(("fw.agent.", "fw.skill.", "fw.planner.", "fw.nlu."))]
+        assert tracing.SPAN_TRAIN_PREFIX == "fw.train." and not [
+            name for name in tracing.SPAN_CONTRACTS if name.startswith(tracing.SPAN_TRAIN_PREFIX)]
 
     def test_sinks_satisfy_protocols(self):
         assert isinstance(tracing.NoOpTraceSink(), tracing.TraceSink)
@@ -189,9 +176,9 @@ class TestTaxonomyAndProtocol:
         assert isinstance(RecordingMetricsSink(), metrics.MetricsSink)
 
     def test_deterministic_span_ids(self):
-        a0 = tracing.deterministic_span_id("K", tracing.SPAN_ASK_USER, 0)
-        a1 = tracing.deterministic_span_id("K", tracing.SPAN_ASK_USER, 1)
-        assert a0 == tracing.deterministic_span_id("K", tracing.SPAN_ASK_USER, 0)
+        a0 = tracing.deterministic_span_id("K", tracing.SPAN_QUESTION, 0)
+        a1 = tracing.deterministic_span_id("K", tracing.SPAN_QUESTION, 1)
+        assert a0 == tracing.deterministic_span_id("K", tracing.SPAN_QUESTION, 0)
         assert a0 != a1
         assert tracing.root_span_id("K") == tracing.deterministic_span_id(
             "K", tracing.SPAN_TURN, 0
@@ -211,11 +198,11 @@ class TestTaxonomyAndProtocol:
         # No sink at all (default no-op): start_span declines, end_span of a
         # None span is silent — nothing raises.
         host = SimpleNamespace(trace_sink=tracing.NoOpTraceSink(), current_turn_key="K")
-        assert tracing.start_span(host, tracing.SPAN_AGENT_TOOL_CALL) is None
+        assert tracing.start_span(host, tracing.SPAN_STEP) is None
         tracing.end_span(host, None)
         # Real sink but no open turn: also declines.
         host2 = SimpleNamespace(trace_sink=RecordingTraceSink(), current_turn_key=None)
-        assert tracing.start_span(host2, tracing.SPAN_AGENT_TOOL_CALL) is None
+        assert tracing.start_span(host2, tracing.SPAN_STEP) is None
 
 
 # ----------------------------------------------------------------------
@@ -224,7 +211,7 @@ class TestTaxonomyAndProtocol:
 
 
 class TestAssistantPathEmission:
-    def test_turn_and_tool_call_spans(
+    def test_turn_and_stage_spans(
         self, initialized_fastworkflow, todo_workflow_path, monkeypatch
     ):
         sink = RecordingTraceSink()
@@ -247,17 +234,15 @@ class TestAssistantPathEmission:
         assert closed_root.status == TurnStatus.COMPLETED.value
         assert closed_root.attributes["success"] is True
 
-        tool_calls = sink.named(tracing.SPAN_AGENT_TOOL_CALL)
-        assert len(tool_calls) == 1
-        tool_call = tool_calls[0]
-        assert tool_call.trace_id == turn_output.turn_key
-        assert tool_call.parent_span_id == closed_root.span_id
-        assert tool_call.kind == tracing.KIND_TOOL
-        assert tool_call.attributes["raw_command"] == "add_todo buy milk"
-        assert tool_call.attributes["success"] is True
-        assert tool_call.command_name == "add_todo"
-        assert tool_call.end_ns is not None
-        assert tool_call.channel_id == "chan-1"
+        # The direct path opens no tool-call span of its own (bd fix-qjne.34): the dispatch's record is the command's
+        # fw.command (``invoke_command``, faked here; its placement is tests/test_turn_stage_spans.py's), and the turn's
+        # one part is resolved under the resolve stage.
+        assert not [s for s in sink.spans if s.name.startswith(("fw.agent.", "fw.skill."))]
+        (part,) = span_tree.named(sink, tracing.SPAN_RESOLVE_PART)
+        assert span_tree.path_of(part, sink) == [tracing.SPAN_TURN, tracing.SPAN_RESOLVE, tracing.SPAN_RESOLVE_PART]
+        assert part.attributes["request"] == "add_todo buy milk" and part.attributes["command"] == "add_todo"
+        assert part.trace_id == turn_output.turn_key and part.end_ns is not None
+        assert part.channel_id == "chan-1"
 
     def test_turn_record_emitted_with_identity(
         self, initialized_fastworkflow, todo_workflow_path, monkeypatch
@@ -342,7 +327,7 @@ class TestAssistantPathEmission:
 
 
 # ----------------------------------------------------------------------
-# fw.command.execute at the real invoke_command boundary
+# fw.command at the real invoke_command boundary
 # ----------------------------------------------------------------------
 
 
@@ -351,8 +336,8 @@ class TestCommandExecuteSpan:
         self, initialized_fastworkflow, todo_workflow_path, monkeypatch
     ):
         """Real invoke_command with only perform_action (the wildcard/NLU
-        boundary) faked: the fw.command.execute span nests under the
-        fw.agent.tool_call span via the WEC span stack."""
+        boundary) faked: the CME handled the message and bound no command, so the
+        fw.command span is filed under the direct path's resolve part (no run began)."""
         sink = RecordingTraceSink()
         wf = fastworkflow.Workflow.create(
             todo_workflow_path,
@@ -377,11 +362,11 @@ class TestCommandExecuteSpan:
         turn_output = ctx.process_turn("what_can_i_do")
         assert turn_output.success
 
-        executes = sink.named(tracing.SPAN_COMMAND_EXECUTE)
+        executes = span_tree.named(sink, tracing.SPAN_COMMAND)
         assert len(executes) == 1
         execute = executes[0]
-        tool_call = sink.named(tracing.SPAN_AGENT_TOOL_CALL)[0]
-        assert execute.parent_span_id == tool_call.span_id
+        assert span_tree.path_of(execute, sink) == [
+            tracing.SPAN_TURN, tracing.SPAN_RESOLVE, tracing.SPAN_RESOLVE_PART, tracing.SPAN_COMMAND]
         assert execute.trace_id == turn_output.turn_key
         assert execute.kind == tracing.KIND_TOOL
         assert execute.attributes["raw_command"] == "what_can_i_do"
@@ -404,26 +389,26 @@ class TestAskUserSpans:
         ctx._begin_turn("do something")
 
         ctx.append_ask_user_entry("Which list?")
-        opened = sink.named(tracing.SPAN_ASK_USER)
+        opened = sink.named(tracing.SPAN_QUESTION)
         assert len(opened) == 1
         assert opened[0].kind == tracing.KIND_HUMAN_WAIT
         assert opened[0].status == tracing.STATUS_OPEN
         assert opened[0].end_ns is None
         assert opened[0].span_id == tracing.deterministic_span_id(
-            ctx.current_turn_key, tracing.SPAN_ASK_USER, 0
+            ctx.current_turn_key, tracing.SPAN_QUESTION, 0
         )
         assert opened[0].parent_span_id == tracing.root_span_id(ctx.current_turn_key)
-        assert opened[0].attributes["agent_query"] == "Which list?"
+        assert opened[0].attributes["asked"] == "Which list?"
 
         ctx.complete_ask_user_entry("the groceries list")
-        ask_spans = sink.named(tracing.SPAN_ASK_USER)
+        ask_spans = sink.named(tracing.SPAN_QUESTION)
         assert len(ask_spans) == 2
         closed = ask_spans[1]
         assert closed.span_id == opened[0].span_id  # idempotent-upsert identity [R6]
         assert closed.end_ns is not None
         assert closed.status == tracing.STATUS_OK
         assert closed.attributes["user_response"] == "the groceries list"
-        assert closed.attributes["agent_query"] == "Which list?"
+        assert closed.attributes["asked"] == "Which list?"
 
     def test_second_ask_user_gets_new_attempt_id(
         self, initialized_fastworkflow, todo_workflow_path, monkeypatch
@@ -437,10 +422,10 @@ class TestAskUserSpans:
         ctx.append_ask_user_entry("Q2?")
         ctx.complete_ask_user_entry("A2")
 
-        ids = {s.span_id for s in sink.named(tracing.SPAN_ASK_USER)}
+        ids = {s.span_id for s in sink.named(tracing.SPAN_QUESTION)}
         assert ids == {
-            tracing.deterministic_span_id(ctx.current_turn_key, tracing.SPAN_ASK_USER, 0),
-            tracing.deterministic_span_id(ctx.current_turn_key, tracing.SPAN_ASK_USER, 1),
+            tracing.deterministic_span_id(ctx.current_turn_key, tracing.SPAN_QUESTION, 0),
+            tracing.deterministic_span_id(ctx.current_turn_key, tracing.SPAN_QUESTION, 1),
         }
 
 
@@ -472,7 +457,7 @@ class TestSuspensionRootSpan:
         assert roots[1].status == TurnStatus.AWAITING_USER.value
         assert roots[1].end_ns is None
         # ask_user human-wait span opened at suspension
-        assert len(sink.named(tracing.SPAN_ASK_USER)) == 1
+        assert len(sink.named(tracing.SPAN_QUESTION)) == 1
         # the suspended turn's record is already visible [R2]
         assert len(sink.turn_records) == 1
         assert sink.turn_records[0].turn_output.status == TurnStatus.AWAITING_USER
@@ -488,7 +473,7 @@ class TestSuspensionRootSpan:
         assert final_root.status == TurnStatus.COMPLETED.value
         assert final_root.end_ns is not None
         # ask_user span closed with the user's answer
-        ask_spans = sink.named(tracing.SPAN_ASK_USER)
+        ask_spans = sink.named(tracing.SPAN_QUESTION)
         assert len(ask_spans) == 2
         assert ask_spans[1].end_ns is not None
         assert ask_spans[1].attributes["user_response"] == "the urgent one"
@@ -577,14 +562,14 @@ class TestPlannerSpans:
         result = self._plan(ctx, wf, monkeypatch)
         assert "step one" in result
 
-        plans = sink.named(tracing.SPAN_PLANNER_PLAN)
+        plans = sink.named(tracing.SPAN_PLAN)
         assert len(plans) == 1
         assert plans[0].kind == tracing.KIND_LLM
         assert plans[0].attributes["model"] == "test-model"
-        assert plans[0].attributes["replan_trigger"] is None
+        assert plans[0].attributes["trigger"] == "initial"
         assert "step one" in plans[0].attributes["plan"]
         assert plans[0].attributes["plan_source"] == "text"
-        assert not sink.named(tracing.SPAN_PLANNER_REPLAN)
+        assert not sink.named("fw.planner.plan") and not sink.named("fw.planner.replan")
 
     def test_replan_span_carries_trigger(
         self, initialized_fastworkflow, todo_workflow_path, monkeypatch
@@ -595,14 +580,14 @@ class TestPlannerSpans:
 
         self._plan(ctx, wf, monkeypatch, trace_trigger="ask_user_response")
 
-        replans = sink.named(tracing.SPAN_PLANNER_REPLAN)
+        replans = sink.named(tracing.SPAN_PLAN)
         assert len(replans) == 1
-        assert replans[0].attributes["replan_trigger"] == "ask_user_response"
-        assert not sink.named(tracing.SPAN_PLANNER_PLAN)
+        assert replans[0].attributes["trigger"] == "ask_user_response"
+        assert not sink.named("fw.planner.replan")
 
 
 # ----------------------------------------------------------------------
-# fw.agent.execute + fw.agent.step: the agent loop's own structure
+# fw.step: the agent loop's own structure (was fw.agent.execute + fw.agent.step + fw.agent.tool_call)
 # ----------------------------------------------------------------------
 
 
@@ -615,10 +600,11 @@ class _NullDSPyContext:
 
 
 class TestAgentLoopSpans:
-    """The executor phase and its per-iteration steps, as real spans.
+    """The loop's per-iteration steps, as real spans (bd fix-qjne.34: one fw.step per step, whoever ran it, with the
+    command it dispatched; the loop's own facts go to the part or phase it ran for, so there is no fw.agent.execute).
 
     Only ReAct's two LLM modules are scripted — the loop, the tool dispatch,
-    the tool-call span and the parenting stack are all production code, which
+    the step span and the parenting stack are all production code, which
     is the point: these spans exist so the turn's shape stops being something
     a reader has to infer from module names and timestamps.
     """
@@ -637,7 +623,7 @@ class TestAgentLoopSpans:
         agent.extract = lambda trajectory, **kw: {"final_answer": "42"}
         return agent
 
-    def test_execute_wraps_steps_which_wrap_their_tool_calls(
+    def test_each_step_records_who_ran_it_and_the_command_it_dispatched(
         self, initialized_fastworkflow, todo_workflow_path, monkeypatch, tmp_path
     ):
         import dspy
@@ -694,22 +680,17 @@ class TestAgentLoopSpans:
         )
         assert result.final_answer == "42"
 
-        executes = sink.named(tracing.SPAN_AGENT_EXECUTE)
-        assert len(executes) == 1
-        execute = executes[0]
-        # The executor is a sibling of planning under the turn, not a child of
-        # whatever span happened to be open.
-        assert execute.parent_span_id == tracing.root_span_id(ctx.current_turn_key)
-        assert execute.attributes["agent_input"] == "add two numbers"
-        assert execute.attributes["resumed"] is False
-        assert execute.attributes["final_answer"] == "42"
-        assert execute.attributes["suspended"] is False
-        assert execute.attributes["attempts"] == 1
-        assert execute.end_ns is not None
+        # No span names who did the work: the loop's facts are kept for the part or phase it ran for.
+        assert not [s for s in sink.spans if s.name.startswith(("fw.agent.", "fw.skill."))]
+        assert ctx._agent_run_facts["agent_input"] == "add two numbers"
+        assert ctx._agent_run_facts["final_answer"] == "42" and ctx._agent_run_facts["attempts"] == 1
 
-        steps = sink.named(tracing.SPAN_AGENT_STEP)
+        steps = sink.named(tracing.SPAN_STEP)
         assert len(steps) == 2
-        assert [s.parent_span_id for s in steps] == [execute.span_id, execute.span_id]
+        # No run part is open (the turn was begun by hand), so the steps hang off the turn.
+        assert [s.parent_span_id for s in steps] == [tracing.root_span_id(ctx.current_turn_key)] * 2
+        assert [s.attributes["run_by"] for s in steps] == ["agent", "agent"]
+        assert [s.attributes["kind"] for s in steps] == ["command", "finish"]
         assert steps[0].attributes["thought"] == "run the command"
         assert steps[0].attributes["tool_name"] == "execute_workflow_query"
         assert steps[0].attributes["tool_args"] == {"command": "create_todo_list milk"}
@@ -718,13 +699,46 @@ class TestAgentLoopSpans:
         assert steps[1].attributes["tool_name"] == "finish"
         assert all(s.end_ns is not None for s in steps)
 
-        # The whole point of the step span: the tool call belongs to a step,
-        # rather than being a flat sibling a reader has to re-associate.
-        tool_calls = sink.named(tracing.SPAN_AGENT_TOOL_CALL)
-        assert len(tool_calls) == 1
-        assert tool_calls[0].parent_span_id == steps[0].span_id
+        # The command the step dispatched is the step's own record (was its fw.agent.tool_call child).
+        assert steps[0].attributes["raw_command"] == "create_todo_list milk"
+        assert steps[0].attributes["response_text"] == "ok:create_todo_list milk"
+        assert steps[0].attributes["success"] is True
+        assert "raw_command" not in steps[1].attributes
+        assert not sink.named("fw.agent.tool_call")
 
         assert ctx.trace_span_stack == []
+
+    def test_an_agent_step_s_model_call_is_its_child(
+        self, initialized_fastworkflow, todo_workflow_path, monkeypatch
+    ):
+        """A step the agent model chose (``run_by`` agent): its reasoning call is a real DSPy model call, recorded as a
+        ``fw.llm.call`` child of the step, never of the turn."""
+        import dspy
+        from dspy.utils import DummyLM
+
+        from fastworkflow.utils.dspy_logger import observe_dspy_host
+
+        sink = RecordingTraceSink()
+        ctx, _wf = _make_agent_ctx(todo_workflow_path, monkeypatch, sink=sink)
+        ctx._begin_turn("think once")
+        monkeypatch.setattr(ctx, "_agent_dspy_context",
+                            lambda: (DummyLM([{"answer": "finish"}] * 2), None))
+        agent = self._agent([{"next_thought": "done", "next_tool_name": "finish", "next_tool_args": {}}],
+                            {"finish": lambda: "Completed."})
+        scripted = agent.react
+
+        def reasoning(trajectory, **kw):
+            dspy.Predict("question -> answer")(question="what next?")    # the step's model call
+            return scripted(trajectory, **kw)
+
+        agent.react = reasoning
+        with observe_dspy_host(ctx):
+            ctx._call_agent_with_retry(lambda: agent.forward(user_query="think once"), trace_input="think once")
+
+        (step,) = sink.named(tracing.SPAN_STEP)
+        assert step.attributes["run_by"] == "agent" and step.attributes["kind"] == "finish"
+        calls = sink.named(tracing.SPAN_LLM_CALL)
+        assert calls and all(call.parent_span_id == step.span_id for call in calls)
 
     def test_suspended_step_closes_rather_than_leaking(
         self, initialized_fastworkflow, todo_workflow_path, monkeypatch
@@ -757,7 +771,7 @@ class TestAgentLoopSpans:
             result = agent._run_loop({}, 0, {"q": "x"}, max_iters=5, exception_count=0)
 
         assert result.suspended is True
-        steps = sink.named(tracing.SPAN_AGENT_STEP)
+        steps = sink.named(tracing.SPAN_STEP)
         assert len(steps) == 1
         assert steps[0].status == tracing.STATUS_AWAITING_USER
         assert steps[0].end_ns is not None
@@ -778,7 +792,7 @@ class TestAgentLoopSpans:
         with tracing.host_scope(ctx):
             agent._run_loop({}, 0, {"q": "x"}, max_iters=5, exception_count=0)
 
-        steps = sink.named(tracing.SPAN_AGENT_STEP)
+        steps = sink.named(tracing.SPAN_STEP)
         assert steps, "a step that failed to select a tool left no span"
         assert all(s.status == tracing.STATUS_ERROR for s in steps)
         assert all("Agent failed to select a valid tool" in s.attributes["observation"]
@@ -917,7 +931,7 @@ class TestStepSpanExceptionSafety:
             with pytest.raises(RuntimeError):
                 agent._run_loop({}, 0, {"q": "x"}, max_iters=5, exception_count=0)
 
-        steps = sink.named(tracing.SPAN_AGENT_STEP)
+        steps = sink.named(tracing.SPAN_STEP)
         assert len(steps) == 1
         assert steps[0].status == tracing.STATUS_ERROR
         assert steps[0].end_ns is not None
@@ -952,7 +966,7 @@ class TestStepSpanExceptionSafety:
             with pytest.raises(CommandCancelledError):
                 agent._run_loop({}, 0, {"q": "x"}, max_iters=5, exception_count=0)
 
-        steps = sink.named(tracing.SPAN_AGENT_STEP)
+        steps = sink.named(tracing.SPAN_STEP)
         assert len(steps) == 1
         assert steps[0].status == tracing.STATUS_CANCELLED
         assert steps[0].end_ns is not None

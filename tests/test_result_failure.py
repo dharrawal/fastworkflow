@@ -132,10 +132,11 @@ def test_a_failing_result_shows_on_a_span_as_an_error_with_its_type(library_env,
     command = _build_planning_command(_plan_of(_raises))
     _run(library_env, command)
 
-    (span,) = library_env.sink.named(tracing.SPAN_PLANNING_COMMAND_ANSWER)
+    # The call's answer step (``fw.step`` kind answer, bd fix-qjne.34; was fw.skill.answer), run by code: no model call.
+    (span,) = [s for s in library_env.sink.named(tracing.SPAN_STEP) if s.attributes.get("kind") == "answer"]
     assert span.status == tracing.STATUS_ERROR
     assert span.attributes["error_type"] == "RuntimeError"
-    assert span.attributes["skill"] == command.name
+    assert span.attributes["command"] == command.name and span.attributes["run_by"] == "code"
 
 
 def test_refused_in_result_is_a_refusal_with_its_message(library_env, answered):

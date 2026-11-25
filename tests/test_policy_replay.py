@@ -2,8 +2,8 @@
 
 A real ObservabilityStore in tmp_path, seeded with one recorded attempt the way
 a live turn writes it: the turn row (labelled with its experiment, task and
-attempt) and its spans - fw.turn, the agent's steps, the tool call and the
-command execution under it, and an fw.ask_user carrying the user's reply.
+attempt) and its spans - fw.turn, the agent's steps (fw.step), the command each
+dispatched (fw.command, the step's child), and an fw.question carrying the user's reply.
 """
 
 from __future__ import annotations
@@ -73,19 +73,17 @@ class _Spans:
 
     def command(self, index: int, text: str, name: str, params: dict, response: str,
                 *, blocked_by: str | None = None) -> None:
-        step = self.add(tracing.SPAN_AGENT_STEP, {
-            "step_index": index, "tool_name": "execute_workflow_query",
+        step = self.add(tracing.SPAN_STEP, {
+            "step_index": index, "run_by": "agent", "kind": "command", "tool_name": "execute_workflow_query",
             "tool_args": {"command": text}, "observation": response,
-            **({"policy_source": blocked_by} if blocked_by else {}),
+            **({"policy_source": blocked_by} if blocked_by else
+               {"raw_command": text, "response_text": response, "success": True}),
         })
         if blocked_by:
             return
-        call = self.add(tracing.SPAN_AGENT_TOOL_CALL,
-                        {"raw_command": text, "response_text": response, "success": True},
-                        parent=step)
-        self.add(tracing.SPAN_COMMAND_EXECUTE,
+        self.add(tracing.SPAN_COMMAND,
                  {"raw_command": text, "parameters": params, "response_text": response},
-                 parent=call, command_name=name)
+                 parent=step, command_name=name)
 
 
 def _store_with(tmp_path, turns: list[tuple[dict, _Spans]]):
@@ -107,12 +105,12 @@ def _recorded_attempt(attempt: int, *, list_first: bool) -> tuple[dict, _Spans]:
     if list_first:
         spans.command(i, "list_tickets", "list_tickets", {}, "T-1, T-2")
         i += 1
-    spans.add(tracing.SPAN_AGENT_STEP, {"step_index": i, "tool_name": "ask_user",
+    spans.add(tracing.SPAN_STEP, {"step_index": i, "tool_name": "ask_user",
                                         "tool_args": {"clarification_request": "Close T-1?"},
                                         "clarification": "Close T-1?"})
-    spans.add(tracing.SPAN_ASK_USER, {"agent_query": "Close T-1?", "user_response": "yes"})
+    spans.add(tracing.SPAN_QUESTION, {"kind": "agent", "asked": "Close T-1?", "user_response": "yes"})
     spans.command(i + 1, "close_ticket <id>T-1</id>", "close_ticket", {"id": "T-1"}, "closed")
-    spans.add(tracing.SPAN_AGENT_STEP, {"step_index": i + 2, "tool_name": "finish"})
+    spans.add(tracing.SPAN_STEP, {"step_index": i + 2, "tool_name": "finish"})
     return _turn_row(key, 1, "close T-1", "T-1 is closed.", attempt), spans
 
 
@@ -127,9 +125,9 @@ def test_a_good_attempt_replays_silently_and_a_bad_one_fires_where_it_went_wrong
 
 
 def test_the_replay_uses_the_recorded_reply_to_the_question(tmp_path):
-    """The confirmation the user gave (fw.ask_user) is what lets the write through."""
+    """The confirmation the user gave (fw.question) is what lets the write through."""
     row, spans = _recorded_attempt(1, list_first=True)
-    spans.spans = [s for s in spans.spans if s.name != tracing.SPAN_ASK_USER]
+    spans.spans = [s for s in spans.spans if s.name != tracing.SPAN_QUESTION]
     store = _store_with(tmp_path, [(row, spans)])
     replayed = replay_attempt(store, EXPERIMENT, TASK, 1, TABLE, FACTS)
     assert [s.replayed for s in replayed.steps] == ["CONFIRM"]
@@ -167,22 +165,21 @@ def test_the_report_names_each_intervention_and_the_totals(tmp_path):
 
 
 def test_distillation_does_not_count_a_blocked_command_as_an_action(tmp_path):
-    """A blocked command still has its dispatch span (fw.command.execute, failed),
+    """A blocked command still has its dispatch span (fw.command, failed),
     but it never ran: the trace distillation compares leaves it out."""
     from fastworkflow import distillation_trace as dtrace
 
     key = "turn-7"
     spans = _Spans(key, 7)
     spans.add(tracing.SPAN_TURN, {"user_message": "close T-1"})
-    step = spans.add(tracing.SPAN_AGENT_STEP, {
+    step = spans.add(tracing.SPAN_STEP, {
         "step_index": 0, "tool_name": "execute_workflow_query",
         "tool_args": {"command": "close_ticket"}, "policy_source": "READ-FIRST",
-        "observation": "List the tickets first."})
-    call = spans.add(tracing.SPAN_AGENT_TOOL_CALL, {"raw_command": "close_ticket"}, parent=step)
-    spans.add(tracing.SPAN_COMMAND_EXECUTE,
+        "observation": "List the tickets first.", "raw_command": "close_ticket"})
+    spans.add(tracing.SPAN_COMMAND,
               {"raw_command": "close_ticket", "parameters": {"id": "T-1"},
                "response_text": "List the tickets first.", "success": False},
-              parent=call, command_name="close_ticket")
+              parent=step, command_name="close_ticket")
     spans.command(1, "list_tickets", "list_tickets", {}, "T-1")
     store = _store_with(tmp_path, [(_turn_row(key, 1, "close T-1", "", 7), spans)])
     attempt = dtrace.read_attempt(store, EXPERIMENT, TASK, 7)

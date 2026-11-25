@@ -313,14 +313,16 @@ class OpenedWorkflow:
 
 
 def inheritance_bases(folder: Path) -> dict[str, frozenset[str]]:
-    """Each context's transitive base contexts (``_commands/context_inheritance_model.json``). A base's commands are
-    listed under each context that inherits them (Book and Member list Record's commands)."""
-    path = Path(folder) / "_commands" / "context_inheritance_model.json"
-    raw = json.loads(path.read_text()) if path.is_file() else {}
+    """Each context's transitive base contexts (each context's declared ``inherits``,
+    ``CommandContextModel.declared_bases``). A base's commands are listed under each context that inherits them
+    (Book and Member list Record's commands)."""
+    from fastworkflow.command_context_model import CommandContextModel
+
+    raw = CommandContextModel.declared_bases(folder)
 
     def walk(name: str, seen: frozenset[str]) -> set[str]:
         out: set[str] = set()
-        for base in raw.get(name, {}).get("base", []):
+        for base in raw.get(name, []):
             if base not in seen:
                 out.add(base)
                 out |= walk(base, seen | {base})

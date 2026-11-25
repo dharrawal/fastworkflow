@@ -17,6 +17,7 @@ import pytest
 
 from fastworkflow import run_listing
 from fastworkflow.train import score_listing as sl
+from tests.context_declarations import declare_inherits
 
 ROOT = Path(__file__).resolve().parent
 TEST_SETS = ROOT / "planning_test_sets"
@@ -167,12 +168,11 @@ def test_inherited_commands_count_as_reachable_but_not_as_strict_entries():
 
 
 def test_the_inheritance_declaration_is_read_transitively_from_the_workflow(tmp_path):
-    (tmp_path / "_commands").mkdir()
-    (tmp_path / "_commands" / "context_inheritance_model.json").write_text(json.dumps({
-        "Book": {"base": ["Media"]}, "Media": {"base": ["Record"]}, "Record": {}}))
+    (tmp_path / "_commands" / "Record").mkdir(parents=True)
+    declare_inherits(tmp_path, {"Book": ["Media"], "Media": ["Record"]})
     bases = sl.inheritance_bases(tmp_path)
     assert bases["Book"] == frozenset({"Media", "Record"})
-    assert bases["Record"] == frozenset()
+    assert bases.get("Record", frozenset()) == frozenset()   # a context with no inherits declaration has no bases
     assert sl.inheritance_bases(tmp_path / "missing") == {}
 
 

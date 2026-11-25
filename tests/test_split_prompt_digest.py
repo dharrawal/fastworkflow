@@ -1,7 +1,7 @@
 """The split record names the splitter prompt that produced it (bd fix-qjne.26 stage 0; recording only).
 
-``subtask_split.prompt_digest`` (12 hex characters of the SHA-256 of the splitter signature's instructions and field
-descriptions, and of the declared examples) and ``subtask_split.prompt_source`` (``built_in``, or ``built_in+workflow``
+``prompt_digest`` on the ``fw.split`` span (12 hex characters of the SHA-256 of the splitter signature's instructions and field
+descriptions, and of the declared examples) and ``prompt_source`` (``built_in``, or ``built_in+workflow``
 when the ``class Context`` of ``_commands/_workflow.py`` declares ``split_examples``; a replacement prompt, a ``Signature`` in that file, is a load
 error, so the value ``workflow`` is never written), so later replays and rounds can tell which prompt produced a split. Real
 components, no mocks: the planner's model is the scripted ``DummyLM`` the neighbouring split tests use.
@@ -118,12 +118,13 @@ def test_the_digest_is_of_the_prompt_text_only(tmp_path):
 
 
 def test_the_span_attribute_carries_the_prompt_and_the_contract_says_so():
-    assert tracing.SPAN_CONTRACT_VERSION >= 61 and tracing.SPAN_CONTRACTS[tracing.SPAN_TURN].version >= 8
-    attribute = tracing.split_record_attribute(_recorded(LIBRARY))
+    assert tracing.SPAN_CONTRACT_VERSION >= 61
+    assert {"prompt_digest", "prompt_source"} <= tracing.SPAN_CONTRACTS[tracing.SPAN_SPLIT].attributes
+    attribute = tracing.split_stage_attributes(_recorded(LIBRARY))
     assert attribute["prompt_digest"] == workflow_agent.split_prompt(None)["digest"]
     assert attribute["prompt_source"] == "built_in"
-    no_prompt = tracing.split_record_attribute({"request": "r", "raw": [], "merged": ["r"], "attempts": 1})
-    assert "prompt_digest" not in no_prompt and "prompt_source" not in no_prompt
+    no_prompt = tracing.split_stage_attributes({"request": "r", "raw": [], "merged": ["r"], "attempts": 1})
+    assert no_prompt["prompt_digest"] is None and no_prompt["prompt_source"] is None
 
 
 def test_a_split_turn_carries_the_prompt_on_its_span(gated, monkeypatch, no_draft_extraction):
@@ -131,7 +132,7 @@ def test_a_split_turn_carries_the_prompt_on_its_span(gated, monkeypatch, no_draf
     gated.ctx._current_planner_lm = _lm(PARTS)
     gated.script.steps = _finish() * 4
     gated.ctx.process_turn(REQUEST, unattended=True)
-    recorded = [span for span in gated.sink.spans if span.name == tracing.SPAN_TURN][-1].attributes["subtask_split"]
+    recorded = [span for span in gated.sink.spans if span.name == tracing.SPAN_SPLIT][-1].attributes
     assert recorded["prompt_source"] == "built_in"
     assert recorded["prompt_digest"] == workflow_agent.split_prompt(None)["digest"]   # no shipped workflow has a _workflow.py
     json.dumps(recorded)

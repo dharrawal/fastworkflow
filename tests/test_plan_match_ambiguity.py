@@ -297,8 +297,8 @@ def test_an_unattended_turn_binds_only_a_match_so_an_ambiguous_part_goes_to_the_
     assert _marker(gated) == "not_reviewed"
     plan = gated.ctx._turn_subtask_plan
     assert plan.items[0].means == Means()
-    span = [each for each in gated.sink.spans if each.name == tracing.SPAN_TURN][-1]
-    assert span.attributes["subtask_plan_ambiguity"] is None
+    span = [each for each in gated.sink.spans if each.name == tracing.SPAN_RESOLVE][-1]
+    assert span.attributes["plan_ambiguity"] is None     # on the resolve stage since span contract 63
 
 
 def test_an_unambiguous_request_opens_the_same_review_and_records_nothing(gated, no_heads, monkeypatch):
@@ -311,8 +311,8 @@ def test_an_unambiguous_request_opens_the_same_review_and_records_nothing(gated,
     assert all("alternatives" not in item for item in review["items"])
     assert [form["kind"] for form in review["reply_forms"]] == ["accept", "edit"]
     assert all("alternatives" not in item for item in record.binding["items"])
-    span = [each for each in gated.sink.spans if each.name == tracing.SPAN_TURN][-1]
-    assert span.attributes["subtask_plan_ambiguity"] is None
+    span = [each for each in gated.sink.spans if each.name == tracing.SPAN_RESOLVE][-1]
+    assert span.attributes["plan_ambiguity"] is None     # on the resolve stage since span contract 63
 
 
 @pytest.mark.parametrize("reply", ["yes", "accept", "looks good"])

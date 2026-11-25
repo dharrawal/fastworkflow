@@ -164,6 +164,25 @@ def test_the_span_is_attached_to_the_turn_when_its_key_is_sent(client, headers, 
     assert tracing.SPAN_COMPOSE in [span["name"] for span in spans]
 
 
+def test_a_question_form_span_is_filed_under_the_question_it_composes(client, headers, composer, app_module):
+    """bd fix-qjne.34: the form composes the question the turn waits on, so its span is that ``fw.question``'s child."""
+    turn_key = _real_turn(client, headers)
+    sink = _sink(app_module)
+    question_id = tracing.deterministic_span_id(turn_key, tracing.SPAN_QUESTION, 1)
+    sink.emit_span(tracing.Span(
+        span_id=question_id, trace_id=turn_key, name=tracing.SPAN_QUESTION,
+        parent_span_id=tracing.root_span_id(turn_key), kind=tracing.KIND_HUMAN_WAIT, status=tracing.STATUS_AWAITING_USER,
+        start_ns=time.time_ns(), attributes={"kind": "agent", "asked": "Which payment method?"}))
+    sink.flush()
+    composer([{"fields": [{"name": "payment_method", "label": "Refund to", "kind": "choice",
+                           "options": ["paypal_5521", "credit_card_4421890"]}]}])
+    resp = client.post("/compose_question_form", json=_form_body(turn_key=turn_key), headers=headers)
+    assert resp.status_code == 200
+    rows = _compose_spans(app_module, trace_id=turn_key)
+    assert len(rows) == 1
+    assert rows[0]["parent_span_id"] == question_id
+
+
 def test_the_span_is_still_recorded_unattached_without_a_key_or_with_a_foreign_one(client, headers, composer, app_module):
     composer(_CARD * 2)
     assert client.post("/compose_answer_card", json=_card_body(), headers=headers).status_code == 200

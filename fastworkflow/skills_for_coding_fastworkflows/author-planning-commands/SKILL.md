@@ -80,8 +80,11 @@ planner's call has no arguments (`planning_commands.py` `planning_command_from_p
 
 - Name: the file stem is the planning command's name, a Python identifier (`member_report.py`;
   `workflow_agent.py` `_read_planning_command_file`). A `.py` file or folder whose name starts with
-  `_` or `.` is not a planning command: `_<name>.py` is a helper module that planning command files
-  import (shared lookup tables and phrases, never code that chooses steps); `_workflow.py` holds the
+  `_` or `.` is not a planning command: a helper module that command files import (shared lookup tables
+  and phrases, never code that chooses steps) lives in the helper package `_commands/_shared/`
+  (`from ._shared.x import Y` from a root command, `from .._shared.x import Y` from a context folder), and
+  any other underscore `.py` file or folder of `_commands/` or a context folder, other than `_workflow.py`
+  and a context's own `_<Context>.py`, stops the workflow, naming `_commands/_shared/`; `_workflow.py` holds the
   workflow's settings as the class attributes of its `class Context` (`split_examples`, `identifier_patterns`,
   `subject_hints`, nothing else), read only from `_commands/_workflow.py` (one in a context folder is a load
   problem, and a `_split.py`, the removed spelling, stops the workflow); an `identifier_patterns` entry anchored with `^` or `$` is a load problem too (the patterns
@@ -520,10 +523,10 @@ need the `table` hint to be drawn as one table. `fastworkflow command preview <w
 `notice:` for an `Output` with two or more visible list-of-scalar fields in no `table` group; it never
 fails the check.
 
-## Reuse: inherit from `_` modules only
+## Reuse: inherit from helper modules only
 
-- A `PlanGenerator` may subclass a `PlanGenerator` defined in a `_` helper module
-  (`from ._lookup import PlanGenerator as Base`). `self` reaches the base's phases, helpers and fact
+- A `PlanGenerator` may subclass a `PlanGenerator` defined in a helper module of `_commands/_shared/`
+  (`from ._shared.lookup import PlanGenerator as Base`). `self` reaches the base's phases, helpers and fact
   models; a method of the same name overrides a base phase and may extend its steps with
   `super().<phase>(...)`. A subclass that only overrides keeps the base's plan; one that adds phases
   writes `__phases__` (`planning.py` `_order_problem`).
@@ -615,7 +618,7 @@ Consequences worth designing for:
 - Make the last phase answer-only when its steps can carry every fact, so code (or one call without
   tools) writes the answer; keep a judgement step only where a judgement is needed.
 - Repeat a step with a loop over `range()` bounded by an int field's `le`, and share steps through a
-  helper module.
+  helper module of `_commands/_shared/`.
 
 ## Approval annotation (`@user_approval_for_execution`)
 
@@ -696,7 +699,7 @@ as in step 5 at the top.
 
 ## Related
 
-- Reading a phased planning command call in a trace (`fw.skill.phase` spans, `code_stop`,
+- Reading a phased planning command call in a trace (`fw.phase` spans, `code_stop`,
   `answer_by_code`, `facts_error`, `fw_not_run`): the `debug-workflow-conversations` skill.
 - The commands a planning command's steps name, and their `Output` fields its facts copy: the
   `integrate-chat-agent` skill's reference for command files.

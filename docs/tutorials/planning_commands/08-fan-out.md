@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 
 from fastworkflow.planning import phase, run
 
-from ._wording import copies
+from .._shared.wording import copies
 from .find_book import Signature as FindBook
 from .open_book import Signature as OpenBook
 
@@ -79,7 +79,7 @@ class PlanGenerator:
 - **`def __result__(self, input, book)`**: named after the fan-out, `book` is the **list**
   of the items' facts, in item order: here, one `open_book` `Output` per book. It is empty
   when the find listed nothing, so `if not book` says that no book was found. `copies` is
-  the `_wording.py` helper `book_by_title` uses too (page 4).
+  the `_shared/wording.py` helper `book_by_title` uses too (page 4).
 
 The template the planner reads for `author_books`:
 

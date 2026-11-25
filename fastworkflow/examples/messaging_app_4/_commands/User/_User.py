@@ -7,6 +7,8 @@ from ...application.user import User
 
 
 class Context:
+    parents = ["ChatRoom"]
+
     state_version = 1
 
     @classmethod

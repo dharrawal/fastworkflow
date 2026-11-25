@@ -6,6 +6,9 @@ from ...application.library import Book, Library
 
 
 class Context:
+    inherits = ["Record"]
+    parents = ["Library"]
+
     state_version = 1
 
     @classmethod

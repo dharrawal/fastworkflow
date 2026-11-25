@@ -84,27 +84,32 @@ A turn's spans nest like this (`parent_span_id` links them; names and full
 attribute catalogs in [reference.md](reference.md)):
 
 ```
-fw.turn                          the whole logical turn: how the request was split
-│                                (subtask_split), which parts were asked which command
-│                                (subtask_plan_ambiguity), the review (subtask_review),
-│                                context_mutations
-├── fw.planner.plan/.replan      the plan; a planning command's typed call and its
-│   └── fw.llm.call              arguments (skill, skill_args, skill_fallback)
-├── fw.skill.phase               one phase run of a planning command (steps run by code,
-│   └── fw.agent.execute         code_stop, facts filled or facts_error)
-└── fw.agent.execute             the ReAct loop as a whole (attempts, final answer)
-    └── fw.agent.step            one reasoning step: thought, tool choice, observation
-        ├── fw.llm.call          the step's LM call (role, timeout, outcome, cache_hit)
-        └── fw.agent.tool_call   the agent invoking a command (raw_command)
-            └── fw.command.execute       resolution + execution
-                ├── fw.nlu.intent            the one intent decision (engine, engine_chain)
-                └── fw.nlu.param_extraction  extraction + validation, structured
-                    └── fw.llm.call          the LM extraction call, when one ran
-fw.ask_user                      a clarifying question + the human wait
+fw.turn                          the whole logical turn (path plan|direct, mode agent|no_agent,
+│                                context_mutations, subtask_bindings)
+├── fw.split                     how the request was split (raw, merged, rules)
+│   └── fw.split.gate | .splitter | .merge | .referent   each with its fw.llm.call
+├── fw.resolve                   which parts were asked which command (plan_ambiguity)
+│   └── fw.resolve.part          one part (part, outcome bound|ad_hoc|dropped|asked)
+│       ├── fw.intent            the one intent decision (decided_by, engine_chain)
+│       ├── fw.parameters        extraction + validation, structured (> fw.llm.call)
+│       └── fw.question          which command / its values (kind)
+├── fw.review                    the review (outcome, rounds, items)
+│   └── fw.question | fw.review.reply | fw.review.edit | fw.review.revision | fw.approval
+├── fw.run
+│   └── fw.run.part              one part (means, outcome ran|not_run|refused, reason)
+│       ├── fw.plan              the text plan of an ad hoc part (trigger) > fw.llm.call
+│       ├── fw.phase             one phase run of a planning command (steps by code,
+│       │   └── fw.step          code_stop, facts) > fw.step (run_by code|agent)
+│       ├── fw.step              one step: thought, tool choice, observation, the
+│       │   ├── fw.llm.call      dispatched command's facts; its agent call (role ...)
+│       │   └── fw.command       resolution + execution (resolved_by, parameters_read_by)
+│       └── fw.question          an agent's question, a decision step (kind)
+└── fw.answer                    who wrote the answer > fw.llm.call (conversation summary)
 
-Deterministic "/"-mode turns skip the planner/agent layers (fw.command.execute
-directly under fw.turn); assistant-mode tool_call/command.execute pairs sit
-under fw.turn without agent.step.
+Deterministic "/"-mode turns have fw.resolve > fw.resolve.part and fw.run > fw.run.part
+> fw.command, no split and no review. A command's own fw.intent / fw.parameters are
+written only when they decided something. A store written before span contract 63
+holds other names and is not read by the framework's tools.
 ```
 
 ## 5. The triage tree
@@ -113,30 +118,31 @@ Inspect the recorded causal order. The checks below help locate the first wrong 
 a bad plan can precede routing, and a provider or backend failure may be environmental.
 Treat a human comment as a lead to verify, not proof of the cause.
 
+
 **A. Did routing pick the right command?** Every request is decided by ONE intent loop
 (`fastworkflow/intent_loop.py`, `resolve`): exact name, foreign-name guard, fuzzy name, the
 local model over the whole context walk, then the remote model (`JEV_API_KEY`), then a
-which-command question. The deterministic path records that decision as ONE `fw.nlu.intent`
+which-command question. The deterministic path records that decision as ONE `fw.intent`
 span (`stage: INTENT_DETECTION`), and each reply to the question as another
-(`matcher_layer: question_reply`, `engine: user`). Compare `fw.command.execute`'s `raw_command`
+(`matcher_layer: question_reply`, `decided_by: reply`). Compare `fw.command`'s `raw_command`
 (what was asked) with its `command_name` (what ran), then read the span:
 
 | Observation | Diagnosis | Fix with |
 |---|---|---|
 | `resolved: false`, no `candidates` | The request routes nowhere: vocabulary gap, or the command is not reachable from this context | Seed utterances (`plain_utterances`, ~8 varied phrasings) · `design-context-models` |
 | `matcher_layer: known_name_foreign_context` | A command name that no scope on the path owns; the hint names its owners | `design-context-models` (navigation to that context) |
-| `engine: question` with `candidates` | No link was confident: `classifier.confidence` below `classifier.ambiguous_threshold` and, when asked, `matcher.confidence` below `matcher.threshold`; near-misses mean starved or colliding seeds | `detect-duplicate-capabilities` · seeds · `design-context-models` |
+| `decided_by: question` with `candidates` | No link was confident: `classifier.confidence` below `classifier.ambiguous_threshold` and, when asked, `matcher.confidence` below `matcher.threshold`; near-misses mean starved or colliding seeds | `detect-duplicate-capabilities` · seeds · `design-context-models` |
 | `classifier.handed_on` present | The local model ranked a command of another scope ahead and added it to the candidates | `design-context-models` (context surfaces / `base` inheritance) |
-| Wrong `command_name`, `engine: classifier` | A confident local mis-route: the wrong command's training rows claim this phrasing | `detect-duplicate-capabilities` · `evaluate-intent-routing` (measure before/after) · seeds |
-| Wrong `command_name`, `engine: matcher` | The remote model was confident and wrong | Command docstrings and seeds · `evaluate-intent-routing` |
+| Wrong `command_name`, `decided_by: local` | A confident local mis-route: the wrong command's training rows claim this phrasing | `detect-duplicate-capabilities` · `evaluate-intent-routing` (measure before/after) · seeds |
+| Wrong `command_name`, `decided_by: remote` | The remote model was confident and wrong | Command docstrings and seeds · `evaluate-intent-routing` |
 | Wrong `command_name`, `matcher_layer: fuzzy_prematch` | The request resembles another command's name | Rename the colliding command |
 | `remote_failed` present | The remote call failed (`error_class`, `status_code`); the local answer or the question stood in | Environment (key, network), not workflow design |
 
 The turn's resolution, which decides each part of a request before the review, uses the
 same loop and writes the same span per decision (span contract v58, one writer for both paths), with the part's
 number as the attribute `part` (a memo read writes none; a pinned plan is not detected, so it writes none): filter
-`fw.nlu.intent` by `part` to see which part's decision needs attention. Also read `fw.turn`'s `subtask_split` (was the
-request split correctly?) and `subtask_plan_ambiguity` (parts whose command was asked). Every settled part is also a row of
+`fw.intent` by `part` (under its `fw.resolve.part`) to see which part's decision needs attention. Also read `fw.split` (was the
+request split correctly?) and `fw.resolve`'s `plan_ambiguity` (parts whose command was asked). Every settled part is also a row of
 the intent-learning store (`fastworkflow learned list <workflow>`): `how` it was settled, the
 head's facts, and `rejected_label` when a reply corrected it. A local model that turned
 confidently wrong after a refit (`fastworkflow learn`, or the background refit) may have learned
@@ -147,8 +153,8 @@ wrong confirmations: remove them with `fastworkflow learned remove` (see
 command arguments go through ONE parameter pipeline (`fastworkflow/parameters/`: fill, guard,
 validate, one second fill) and ONE asking rule: a question names every missing or refused value,
 and two replies in a row that fill nothing stop it. An execution command's extraction is
-`fw.nlu.param_extraction` (on the plan path too, for a part's own command, with the attribute `part`); a planning command's arguments are on `fw.planner.plan` (`skill_args`,
-`skill_notes`, `skill_fallback`, `skill_refusal_asked`).
+`fw.parameters` (on the plan path too, for a part's own command, with the attribute `part`); a planning command's arguments are on `fw.plan` (`command_args`,
+`command_notes`, `command_fallback`, `command_refusal_asked`).
 
 | Observation | Diagnosis | Fix with |
 |---|---|---|
@@ -157,14 +163,14 @@ and two replies in a row that fill nothing stop it. An execution command's extra
 | `validation_hook` with `changed_fields` naming the field, but wrong result downstream | The fuzzy matcher rewrote the value incorrectly (auto-apply too loose, or label/uid mixup) | `validate-command-parameters` ("Resolve a value against live keys"): `auto_apply_threshold`, and return the value the *field* holds, not the label matched on |
 | `validation_hook.is_valid: false` | The command's `Input` model validators refused the call: `message` says why, `refused_fields` names the fields reset to missing; `raised` means a validator crashed with an exception that is not a `Refused` or a `ValueError` | `validate-command-parameters` |
 | `argument_check_refusals` / `argument_check_refusals_final` | A guard refused a value the model produced (a placeholder, or on a field marked `copied_from_command_text` a value not written in the request); one second fill ran, and `_final` is what stayed refused | Field description; unmark a field whose value is legitimately converted from the request |
-| `argument_check_not_in_request` (a list of field names; on `fw.nlu.param_extraction`, and on `fw.planner.plan` / `fw.planner.replan` where it is null when empty) | Advisory, nothing was refused: these UNMARKED `str` / `int` fields hold a value the request does not write | Read it for fields that may need `copied_from_command_text` (a name, a title, an id the user must write); ignore it for a converted value |
+| `argument_check_not_in_request` (a list of field names; on `fw.parameters`, and on `fw.plan` where it is null when empty) | Advisory, nothing was refused: these UNMARKED `str` / `int` fields hold a value the request does not write | Read it for fields that may need `copied_from_command_text` (a name, a title, an id the user must write); ignore it for a converted value |
 | `argument_refusal` | A refusal of the whole call that names no input: not asked, the command ended as a failed output | `validate-command-parameters` (name the field in `Refused`) |
 | `retry_round: true` on successive turns (`retry_round_ordinal` counts them) | The user is answering the parameter question; two replies in a row with no progress end it as a failed output | `validate-command-parameters` (error-message quality) + field descriptions |
 | `extraction_method: llm` and the nested `fw.llm.call` shows `cache_hit: true` with a wrong completion | Cached output; the cache hit alone does not prove staleness | Verify request/model/cache provenance; use an isolated fresh cache for an authorized comparison |
 | A nested `fw.llm.call` with `status: error` and an `exception` (auth, timeout) | Environment problem (keys, env files), not workflow design | Fix the env/passwords files; nothing to change in the workflow |
 
-**C. Did the agent plan a workable sequence?** `fw.planner.replan` spans carry
-their trigger: repeated `parameter_extraction_error` replans mean the agent
+**C. Did the agent plan a workable sequence?** `fw.plan` spans carry
+their `trigger` (`initial` for the first plan): repeated `parameter_extraction_error` replans mean the agent
 cannot discover where a handle comes from → `declare-parameter-producers`.
 Repeated `ask_user_response` replans point at ambiguous command surfaces or
 missing context navigation → `design-context-models`.
@@ -174,7 +180,7 @@ missing context navigation → `design-context-models`.
 artifacts: `question_kind` (`agent`, `plan_choice`, `planning_parameter`, `phase_step`, `review`,
 `approval`) with its payload while the turn is `awaiting_user`; in a "/" (deterministic) session,
 `parameter_request` or `plan_choice` on the failed output. Multiple
-`fw.ask_user` spans in one turn (each records `agent_query` and `user_responses`): review whether
+`fw.question` spans in one turn (each records `kind`, `asked` and `user_responses`): review whether
 each question was needed. A reply answers its question and nothing else, so a request typed as a
 reply is not run. Separate repeated asks after a valid answer from necessary clarification or
 retries after invalid answers; inspect state retention as well as B.
@@ -192,7 +198,7 @@ a step code cannot run, or an ad hoc part, ends as a COMPLETED turn whose comman
 planning command (`author-planning-commands`).
 
 **G. Everything above clean?** Then the failure is the command implementation:
-`fw.command.execute` has `status: error` or `success: false` with the
+`fw.command` has `status: error` or `success: false` with the
 `response_text`; the full `CommandResponse` (and, when
 `FW_OBS_CAPTURE_TRACEBACKS=1` was set, the traceback artifact) is in the
 turn's `record_json`. Read the command's `_commands/<name>.py` source next.
@@ -210,7 +216,7 @@ name the feature, and load the companion skill before writing the change:
 | `from_command_output` producer edges (shown in the runtime as `available_from`) | `declare-parameter-producers` |
 | Value correction or "did you mean" in the validation hook (`changed_fields`, `refused_fields`) | `validate-command-parameters` ("Resolve a value against live keys") |
 | a model validator on `Input` (its facts are the `validation_hook` span) | `validate-command-parameters` |
-| Planning commands (`_commands/<name>.py`): phases, facts, step wording (`fw.skill.phase` failures, `fw_not_run`) | [author-planning-commands](../author-planning-commands/SKILL.md) |
+| Planning commands (`_commands/<name>.py`): phases, facts, step wording (`fw.phase` failures, `fw_not_run`) | [author-planning-commands](../author-planning-commands/SKILL.md) |
 | Training utterance realism | `supply-training-personas` |
 | Retraining mechanics after any of the above | `train-and-publish-models` |
 | Publishing a regression task and creating a comparison experiment | [create-workflow-benchmarks](../create-workflow-benchmarks/SKILL.md) |

@@ -36,7 +36,7 @@ Library/greet: _commands/Library/greet.py: has a Signature but no ResponseGenera
 ```
 
 **Fix:** spell the class `ResponseGenerator` (or `PlanGenerator`). A file with a generator and no `Signature`
-(a startup command) and a `_` helper are not reported.
+(a startup command) and a helper module in `_commands/_shared/` are not reported.
 
 **A context class not named `Context`.** The callback file `_commands/<Context>/_<Context>.py` must define
 `class Context`:
@@ -75,8 +75,20 @@ the command: a phase hands on a command's `Output`, a union of `Output`s, or a f
 
 **A record with no enclosing record.** When the workflow has a root object and a record that is not the root has a
 context with no `_<Context>.py` or no `get_parent`, the first climb from it raises `MissingGetParentError`, and a
-command that moves onto such a record fails: write `get_parent` in `_commands/<Context>/_<Context>.py` (`return None`
-sends the lookup straight to the global commands, silently).
+command that moves onto such a record fails: write `get_parent` in `_commands/<Context>/_<Context>.py`, with
+`parents = ["<Context>", ...]` beside it naming every context whose records it returns (`return None` sends the
+lookup straight to the global commands, silently). A `get_parent` that returns a record of a context its `parents`
+do not name raises `MissingGetParentError` too, naming the context, its `parents` and the record returned.
+
+**`get_parent` and `parents` apart.** The workflow does not load when a context class has one without the other:
+
+```text
+_commands/Member/_Member.py: CommandContextModelError: context 'Member' does not load: get_parent is written but no parents is declared: list every context a record of this context can sit in, parents = ["<Context>", ...] (the contexts get_parent returns records of; remove get_parent instead when it only returns None)
+```
+
+**Fix:** declare `parents` in the class body, or remove `get_parent` when it only returns `None`. A navigation
+command whose `@descends_to` target's `parents` do not name the command's context fails its own load, saying to
+add that context to the target's `parents`.
 
 **A `_skills/` folder.** It is no longer read, and a workflow that has one fails to load
 with:
@@ -86,10 +98,10 @@ _skills/ is no longer read; move these files into _commands/ (first make sure an
 ```
 
 **Fix:** move each root file to the `_commands/` root and each context folder into the
-matching `_commands/<Context>/`, `_` helpers with the files that import them. A file that
-moves one folder deeper needs one more dot in its relative imports (`from ._facts` becomes
-`from .._facts`). If a script of yours regenerates `_commands/`, first make it keep every
-file that defines a top-level `PlanGenerator`, and the `_` files they import.
+matching `_commands/<Context>/`, and each helper module into `_commands/_shared/`. A file
+that moves one folder deeper needs one more dot in its relative imports (`from ._facts` becomes
+`from .._shared.facts` in a context folder). If a script of yours regenerates `_commands/`, first
+make it keep every file that defines a top-level `PlanGenerator`, and `_commands/_shared/`.
 `fastworkflow build` already never overwrites one.
 
 **`__call__` on a `PlanGenerator`.** The phases a call runs are `__phases__`; `__call__`
@@ -767,10 +779,10 @@ _commands/Library/book_by_title.py: Signature.Output is declared, but nothing bu
 ```
 
 **A `PlanGenerator` that subclasses another command's.** Reuse its whole job by calling it,
-or share phases through a base class in a `_` module (page 13):
+or share phases through a base class in a helper module (page 13):
 
 ```text
-_commands/Library/book_and_loans.py: PlanGenerator inherits from Library/book_by_title's PlanGenerator; to reuse its whole job, call book_by_title in a step; to share phases, move them to a base class in a _ module
+_commands/Library/book_and_loans.py: PlanGenerator inherits from Library/book_by_title's PlanGenerator; to reuse its whole job, call book_by_title in a step; to share phases, move them to a base class in a module of _commands/_shared/
 ```
 
 ## Steps
@@ -930,8 +942,11 @@ revokes one, and `/cancel_pending` cancels the approval that is waiting (see
 **The workflow will not load after an upgrade.** "Retrain with `fastworkflow train`" means its
 classifiers were trained by an earlier release. Retrain it. The first train after the upgrade is a
 full retrain, and for a workflow with planning commands it generates their training utterances,
-which costs LLM calls. A warning that `context_hierarchy_model.json` is ignored means the file is no
-longer read and can be deleted (page 14 says where parents come from).
+which costs LLM calls. "context_inheritance_model.json is removed and not read" names a file that no
+longer declares anything: run `fastworkflow migrate-contexts <workflow>`, which writes each context's
+`inherits` from it, deletes it and lists the contexts with a `get_parent`; write their `parents` by hand,
+naming every context whose records each `get_parent` can return (page 14). A warning that
+`context_hierarchy_model.json` is ignored means the file is no longer read and can be deleted.
 
 ## A fact named like a `str` method
 

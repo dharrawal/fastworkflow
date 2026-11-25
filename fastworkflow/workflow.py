@@ -122,7 +122,8 @@ _RETIRED_CONTEXT_ATTRIBUTES = {
 
 class MissingGetParentError(AttributeError):
     """A workflow with a root stands on a record that is not the root, and the record's context does not say what
-    encloses it: no ``_commands/<Context>/_<Context>.py`` or no ``get_parent`` in its ``class Context``. Raised on the
+    encloses it: no ``_commands/<Context>/_<Context>.py`` or no ``get_parent`` in its ``class Context``; or its
+    ``get_parent`` returned a record of a context its declared ``parents`` do not name. Raised on the
     climb (``Workflow.get_parent``); a command that moves onto such a record fails instead (``command_executor``)."""
 
 
@@ -372,7 +373,26 @@ class Workflow:
             raise MissingGetParentError(problem)
         if context_class is None or not hasattr(context_class, "get_parent"):
             return None
-        return context_class.get_parent(record)
+        parent = context_class.get_parent(record)
+        if parent is not None and (problem := self._wrong_parent(record, parent)):
+            raise MissingGetParentError(problem)
+        return parent
+
+    def _wrong_parent(self, record: object, parent: object) -> Optional[str]:
+        """Why *parent*, what *record*'s ``get_parent`` returned, cannot enclose it, or None: its context is neither
+        one of the context's declared ``parents`` nor a context that inherits one (a PremiumUser is a User)."""
+        model = fastworkflow.CommandContextModel.load(self._folderpath)
+        context_name = Workflow.get_command_context_name(record)
+        declared = model.parents(context_name)
+        if declared is None:
+            return None   # a get_parent with no parents is a load error of the context class
+        parent_context = Workflow.get_command_context_name(parent)
+        if {parent_context, *model.inherited_base_contexts(parent_context)} & set(declared):
+            return None
+        return (f"the get_parent of context {context_name} returned a {parent_context} record, but {context_name} "
+                f"declares parents = {declared!r} in _commands/{context_name}/_{context_name}.py: a {context_name} "
+                f"record sits only in those contexts (or one that inherits one). Return the enclosing record, or add "
+                f"{parent_context!r} to parents")
 
     def missing_get_parent(self, record: Optional[object]) -> Optional[str]:
         """Why the climb from *record* cannot go on, or None: the workflow has a root, *record* is not it, its class is

@@ -63,7 +63,7 @@ CHILD_ALIAS = "/book_by_title#1"
 NESTED_COMMANDS = (
     "_commands/Library/book_by_title.py",
     "_commands/Library/book_loans.py",
-    "_commands/Library/_wording.py",
+    "_commands/_shared/__init__.py", "_commands/_shared/wording.py",
 )
 BOOK_LOANS_ANSWER = "Dune is on loan to 2 borrowers (Ann Lee, Raj Patel)."
 BOOK_BY_TITLE_RESPONSE = "Dune is by Frank Herbert; the library owns 3 copies."
@@ -108,8 +108,8 @@ def _run_book_loans(state, title: str = "Dune"):
 
 
 def _phase_spans(state, planning_command: str):
-    return [s for s in state.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
-            if s.attributes.get("skill") == planning_command]
+    return [s for s in state.sink.named(tracing.SPAN_PHASE)
+            if s.attributes.get("command") == planning_command]
 
 
 def test_a_agent_step_runs_book_loans_and_its_nested_book_by_title(nested_env):
@@ -124,7 +124,7 @@ def test_a_agent_step_runs_book_loans_and_its_nested_book_by_title(nested_env):
     assert child_output.command_response.output.found is True
     assert child_output.command_response.output.book_uid == "b1"
     # The child's two phases ran in its own frame; the parent's phases ran in the turn frame.
-    child_phases = [s.attributes["phase"] for s in nested_env.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
+    child_phases = [s.attributes["phase"] for s in nested_env.sink.named(tracing.SPAN_PHASE)
                     if s.attributes.get(tracing.ATTR_FRAME_ALIAS) == CHILD_ALIAS]
     assert child_phases == ["find", "book"]
     book_span, loans_span = _phase_spans(nested_env, BOOK_LOANS)
@@ -234,10 +234,10 @@ def test_f_nested_spans_name_their_frame_and_the_root_names_none(nested_env):
     closed_root = roots[-1]
     assert closed_root.end_ns is not None
     assert {r.attributes[tracing.ATTR_FRAME_ALIAS] for r in roots} == {""}
-    child = [s for s in nested_env.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
+    child = [s for s in nested_env.sink.named(tracing.SPAN_PHASE)
              if s.attributes.get(tracing.ATTR_FRAME_ALIAS) == CHILD_ALIAS]
     assert len(child) == 2
-    assert all(s.attributes["skill"] == BOOK_BY_TITLE for s in child)
+    assert all(s.attributes["command"] == BOOK_BY_TITLE for s in child)
 
 
 def test_g_a_bad_turn_budget_warns_once_however_often_it_is_read(
@@ -315,7 +315,7 @@ def test_h_the_budget_stops_a_call_partway_and_the_turn_goes_on(budget_env, no_t
     refused = [o for o in ctx._turn_outputs if o.command_name == BOOK_BY_TITLE]
     assert [(o.success, o.command_response.response) for o in refused] == [
         (False, NESTED_BUDGET_SPENT_MESSAGE)]
-    assert not [s for s in state.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
+    assert not [s for s in state.sink.named(tracing.SPAN_PHASE)
                 if s.attributes.get(tracing.ATTR_FRAME_ALIAS) == "/book_by_title#1"]
     assert len(ctx._frame_stack()) == 1
 
@@ -439,7 +439,7 @@ def test_i_a_guard_refusal_is_the_invalid_value_response_and_pushes_no_frame(
         # The guard came before the hook and the Input: neither ran, and no frame was pushed.
         assert state.wf.context.get(HOOK_CALLS) is None
         assert entered == []
-        assert not [s for s in state.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
+        assert not [s for s in state.sink.named(tracing.SPAN_PHASE)
                     if s.attributes.get(tracing.ATTR_FRAME_ALIAS) == CHILD_ALIAS]
         assert len(state.ctx._frame_stack()) == 1
     finally:
@@ -1018,7 +1018,7 @@ def test_ad_facts_from_archive_leaves_out_a_child_range_when_given_it(nested_env
     store = archive_for_path(observability_db_path(ctx))
     scope = scope_for_host(ctx)
     # The child's own steps are its find (1) and its open (2), as its phase spans name them.
-    child_steps = [s.attributes["first_step"] for s in nested_env.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
+    child_steps = [s.attributes["first_step"] for s in nested_env.sink.named(tracing.SPAN_PHASE)
                    if s.attributes.get(tracing.ATTR_FRAME_ALIAS) == CHILD_ALIAS]
     ranges = [[min(child_steps), max(child_steps)]]
 
@@ -1367,7 +1367,8 @@ class PlanGenerator:
             tmp_path,
             extra_planning_commands={"Library/plan_calls_book": calls_child,
                           "Library/plan_described_book": described},
-            extra_commands=(BOOK_BY_TITLE_FILE, "_commands/Library/_wording.py"),
+            extra_commands=(BOOK_BY_TITLE_FILE, "_commands/_shared/__init__.py",
+                            "_commands/_shared/wording.py"),
         )
     res = planning_commands.resolve_field_sources(folder)
 
@@ -1534,7 +1535,7 @@ def test_real_library_loads_with_no_error_and_book_loans_runs_book_by_title_nest
     assert pushed == [(BOOK_BY_TITLE, CHILD_ALIAS)]
     assert entered == [(BOOK_BY_TITLE, "book_by_title title=Dune")]
     # book_by_title's own phases ran inside that frame; its steps were run by code.
-    child_phases = [s.attributes["phase"] for s in real_library_env.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
+    child_phases = [s.attributes["phase"] for s in real_library_env.sink.named(tracing.SPAN_PHASE)
                     if s.attributes.get(tracing.ATTR_FRAME_ALIAS) == CHILD_ALIAS]
     assert child_phases == ["find", "book"]
     book_span, loans_span = _phase_spans(real_library_env, BOOK_LOANS)

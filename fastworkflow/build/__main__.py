@@ -9,7 +9,8 @@ from fastworkflow.build.command_file_generator import validate_python_syntax_in_
 from fastworkflow.build import ast_class_extractor
 from fastworkflow.command_directory import declares_signature
 from fastworkflow.build.command_file_generator import generate_command_files as real_generate_command_files
-from fastworkflow.build.context_model_generator import generate_context_model as real_generate_context_model
+from fastworkflow.build.context_model_generator import (
+    derive_inherits, existing_context_files, generate_context_model as real_generate_context_model)
 from fastworkflow.build.context_folder_generator import ContextFolderGenerator
 from fastworkflow.build.command_stub_generator import CommandStubGenerator
 from fastworkflow.build.navigator_stub_generator import NavigatorStubGenerator
@@ -80,8 +81,10 @@ def run_command_generation(args):
     # Resolve inherited properties for all classes
     ast_class_extractor.resolve_inherited_properties(all_classes)
 
-    # Generate context model
-    context_model_data = real_generate_context_model(all_classes, args.workflow_folderpath)
+    # Each context's inherits, derived from the class hierarchy. No file is written for it: the _<Context>.py files
+    # that exist now are hand-written and never edited; the ones created below get the derived line.
+    hand_written = existing_context_files(args.workflow_folderpath)
+    context_model_data = {name: {"base": bases} for name, bases in derive_inherits(all_classes).items()}
 
     # Generate startup command file (unless --no-startup flag is used)
     if not args.no_startup:
@@ -91,11 +94,7 @@ def run_command_generation(args):
             logger.warning("Failed to generate startup command file")
 
     # Generate context folders based on the model
-    context_model_path = os.path.join(commands_dir, 'context_inheritance_model.json')
-    folder_generator = ContextFolderGenerator(
-        commands_root=commands_dir,
-        model_path=context_model_path
-    )
+    folder_generator = ContextFolderGenerator(commands_root=commands_dir, model=context_model_data)
     try:
         created_folders = folder_generator.generate_folders()
         logger.info(f"Created context folders: {', '.join(created_folders.keys())}")
@@ -103,12 +102,13 @@ def run_command_generation(args):
         logger.error(f"Error generating context folders: {e}")
         # Continue with command generation even if folder generation fails
 
+    # Print each context's inherits line and where it belongs; write it only into the files created above
+    real_generate_context_model(all_classes, args.workflow_folderpath, hand_written)
+
     # Always generate command stubs if stub_commands is provided
     if args.stub_commands:
         try:
-            generate_command_stubs_for_contexts(
-                args, context_model_path, context_model_data
-            )
+            generate_command_stubs_for_contexts(args, context_model_data)
         except Exception as e:
             logger.error(f"Error generating command stubs: {e}")
             # Continue with command generation even if stub generation fails
@@ -116,10 +116,7 @@ def run_command_generation(args):
     # Always generate navigator stubs
     try:
         navigators_dir = os.path.join(args.workflow_folderpath, "navigators")
-        navigator_generator = NavigatorStubGenerator(
-            navigators_root=navigators_dir,
-            model_path=context_model_path
-        )
+        navigator_generator = NavigatorStubGenerator(navigators_root=navigators_dir, model=context_model_data)
 
         # Generate navigators for all contexts
         generated_files = navigator_generator.generate_navigator_stubs(force=args.overwrite)
@@ -138,18 +135,15 @@ def run_command_generation(args):
     return all_classes, context_model_data
 
 
-def generate_command_stubs_for_contexts(args, context_model_path, context_model_data):
+def generate_command_stubs_for_contexts(args, context_model_data):
     commands_dir = os.path.join(args.workflow_folderpath, "_commands")
-    stub_generator = CommandStubGenerator(
-        commands_root=commands_dir,
-        model_path=context_model_path
-    )
+    stub_generator = CommandStubGenerator(commands_root=commands_dir, model=context_model_data)
 
     # Parse command names
     command_names = [name.strip() for name in args.stub_commands.split(',')]
 
     # Generate stubs for each context
-    contexts = list(context_model_data.get('inheritance', {}).keys())
+    contexts = list(context_model_data)
     generated_files = {}
 
     for context in contexts:
@@ -189,18 +183,10 @@ def run_validation(args, all_classes, context_model_dict):
     else:
         errors.append(f"Error: No command files were generated in {commands_dir}. Aborting.")
     
-    # Check for context model file - ensure we're looking for context_inheritance_model.json
-    context_model_path = os.path.join(commands_dir, 'context_inheritance_model.json')
-    if not os.path.isfile(context_model_path):
-        errors.append(f"Error: Context inheritance model JSON was not generated at {context_model_path}. Aborting.")
-    else:
-        commands_ok = verify_commands_against_context_model(
-            context_model_dict,
-            commands_dir,
-            all_classes
-        )
-        if isinstance(commands_ok, list) and commands_ok:
-            errors.extend(commands_ok)
+    # The context folders against the contexts derived from the classes (build writes no context model file)
+    commands_ok = verify_commands_against_context_model(context_model_dict, commands_dir, all_classes)
+    if isinstance(commands_ok, list) and commands_ok:
+        errors.extend(commands_ok)
     
     # Check for startup.py file (if not explicitly skipped)
     if not args.no_startup and not os.path.isfile(os.path.join(commands_dir, 'startup.py')):

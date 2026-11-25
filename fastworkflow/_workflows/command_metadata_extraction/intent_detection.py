@@ -295,6 +295,18 @@ def _labels_of(intent: intent_loop.Intent) -> list[str]:
     return [str(label) for label in deciding.labels] if deciding is not None else []
 
 
+#: ``decided_by`` on an ``fw.intent`` span: who decided, by the chain's engine or the intent loop's layer.
+DECIDED_BY = {
+    intent_detector.ENGINE_CLASSIFIER: "local", intent_detector.ENGINE_MATCHER: "remote",
+    intent_detector.ENGINE_QUESTION: "question", intent_loop.BY_EXACT_NAME: "name", intent_loop.BY_FUZZY_NAME: "fuzzy",
+    intent_loop.BY_FOREIGN_NAME: "foreign_name", intent_loop.BY_PINNED: "pinned", intent_loop.BY_CHOICE: "choice",
+}
+
+
+#: ``fw.command``'s ``resolved_by``, by the decision's ``decided_by`` (any other is its own value).
+RESOLVED_BY = {"name": "exact_name", "fuzzy": "fuzzy", "local": "model", "remote": "model"}
+
+
 def _facts_of(app_workflow, intent: intent_loop.Intent) -> dict:
     """The span facts of a decision, read off its engine answers (the keys the span contract names)."""
     trace: dict = {"escalation_outcome": ESCALATION_OUTCOME_NOT_EVALUATED}
@@ -356,7 +368,7 @@ def _facts_of(app_workflow, intent: intent_loop.Intent) -> dict:
         trace["remote_failed"] = {
             "error_class": errored.get("error_class") or errored.get("matcher_error_class"),
             "status_code": errored.get("status_code") or errored.get("matcher_status_code")}
-    trace["engine"] = deciding.engine
+    trace["decided_by"] = DECIDED_BY.get(deciding.engine, deciding.engine)
     trace["engine_fallback"] = deciding.fallback
     trace["matcher_layer"] = "matcher" if deciding.engine == intent_detector.ENGINE_MATCHER else "classifier"
     if intent.decided_by == intent_loop.BY_QUESTION:
@@ -365,7 +377,7 @@ def _facts_of(app_workflow, intent: intent_loop.Intent) -> dict:
         # The runtime is about to ask, and the answer resolves this: requirements §4.14's reducible uncertainty,
         # recorded where the asking happens.
         trace["reducible"] = True
-        trace["engine"] = intent_detector.ENGINE_QUESTION
+        trace["decided_by"] = DECIDED_BY[intent_loop.BY_QUESTION]
     return trace
 
 
@@ -386,7 +398,8 @@ def _predict_impl(app_workflow, text: str, core: bool, nlu_trace: dict) -> inten
 
 def traced_decision(app_workflow, text: str, *, core: bool, part: Optional[int] = None) -> tuple[intent_loop.Intent, dict]:
     """``(intent, span facts)``: the decision ``intent_loop.resolve`` makes for *text* from where *app_workflow* stands, in
-    ONE ``fw.nlu.intent`` span. THE writer of that span: the CME's intent stage (``CommandNamePrediction.predict``,
+    ONE ``fw.intent`` span (a child of the part it decides: the plan path's caller opens the part's span, the direct
+    path's part is found by ``tracing.direct_part_id``). THE writer of that span: the CME's intent stage (``CommandNamePrediction.predict``,
     ``core`` True) and the plan path's decision for a part of a turn (``resolution.part_intent``, ``core`` False, with
     *part*, its 1-based number) both call it.
 
@@ -401,13 +414,15 @@ def traced_decision(app_workflow, text: str, *, core: bool, part: Optional[int] 
         nlu_trace["part"] = part     # the part's number is a fact of the decision like the rest: it goes out with the bag
     span = tracing.start_span(
         host,
-        tracing.SPAN_NLU_INTENT,
+        tracing.SPAN_INTENT,
         attributes={
             "context": app_workflow._current_command_context_name,
-            "stage": "INTENT_DETECTION",
+            "reads_reply": False,
+            "question_kind": None,
             "utterance": text,
             **nlu_trace,
         },
+        parent_span_id=tracing.direct_part_id(host) if part is None else None,
     )
     try:
         intent = _predict_impl(app_workflow, text, core, nlu_trace)
@@ -416,6 +431,16 @@ def traced_decision(app_workflow, text: str, *, core: bool, part: Optional[int] 
         # The raw facts gathered so far still go out.
         tracing.end_span(host, span, status=tracing.STATUS_ERROR, attributes=nlu_trace)
         raise
+    # A name layer decided with no engine asked: the layer says who decided.
+    nlu_trace.setdefault("decided_by", DECIDED_BY.get(intent.decided_by))
+    decided_by = nlu_trace["decided_by"]
+    # The command this decision is for records how it was resolved (bd fix-qjne.34 step 6); a command's decision that
+    # decided nothing (its exact name, no model call, one command), on any path, is not written: the command's span says it.
+    tracing.note(tracing.SPAN_COMMAND, resolved_by=RESOLVED_BY.get(decided_by, decided_by))
+    if (decided_by == "name" and intent.command is not None and intent.outcome != intent_loop.AMBIGUOUS
+            and not tracing.had_children(span) and tracing.is_command_decision(host, span)):
+        tracing.discard_span(host, span)
+        return intent, nlu_trace
     tracing.end_span(
         host,
         span,
@@ -436,7 +461,7 @@ def traced_decision(app_workflow, text: str, *, core: bool, part: Optional[int] 
 
 
 class CommandNamePrediction:
-    """The CME's intent stage: ``intent_loop.resolve`` for the request, wrapped in the ``fw.nlu.intent`` span.
+    """The CME's intent stage: ``intent_loop.resolve`` for the request, wrapped in the ``fw.intent`` span.
 
     The decision is the intent loop's (one decision for the whole walk, the same one the plan path makes: exact name,
     foreign-name guard, fuzzy name, the local model over the whole walk, then the chain). What is this class's: the CME
@@ -451,7 +476,7 @@ class CommandNamePrediction:
         self.trace: dict = {}
 
     def predict(self, command: str) -> intent_loop.Intent:
-        """The intent of *command* from where the application workflow stands, in one ``fw.nlu.intent`` span
+        """The intent of *command* from where the application workflow stands, in one ``fw.intent`` span
         (``traced_decision``, the one writer: the plan path's decisions are written by it too). The CME may answer the
         framework's core commands (``core=True``).
 
@@ -482,18 +507,18 @@ class CommandNamePrediction:
 
     def read_reply(self, record: dict, reply: str) -> tuple[intent_loop.Answer, Optional[intent_loop.Intent]]:
         """The reply to the pending which-command question, read by the intent loop's one reader, in one
-        ``fw.nlu.intent`` span (stage ``INTENT_AMBIGUITY_CLARIFICATION`` or ``INTENT_MISUNDERSTANDING_CLARIFICATION``).
+        ``fw.intent`` span (``reads_reply`` True, ``question_kind`` ``ambiguity`` or ``misunderstanding``).
         The span says how the reply read (``matcher_layer`` ``question_reply``) and which command it picked. Returns the
         answer and, for a pick, where the command lives (``intent_loop.choose``; None for any other answer, and for a
         command no scope of the path has). A command of another scope than the current one is recorded on the span as
         ``chosen_command_elsewhere``: it runs on that scope's record, as a climb would."""
-        stage = ("INTENT_MISUNDERSTANDING_CLARIFICATION" if record.get("misunderstood")
-                 else "INTENT_AMBIGUITY_CLARIFICATION")
+        question_kind = "misunderstanding" if record.get("misunderstood") else "ambiguity"
         host = tracing.current_host()
         span = tracing.start_span(
-            host, tracing.SPAN_NLU_INTENT,
-            attributes={"context": self.app_workflow._current_command_context_name, "stage": stage,
-                        "utterance": reply})
+            host, tracing.SPAN_INTENT,
+            attributes={"context": self.app_workflow._current_command_context_name, "reads_reply": True,
+                        "question_kind": question_kind, "utterance": reply},
+            parent_span_id=tracing.direct_part_id(host))
         nlu_trace: dict = {}
         try:
             answered = intent_loop.answer(record, reply, aliases=intent_loop.core_aliases())
@@ -509,7 +534,7 @@ class CommandNamePrediction:
         nlu_trace["candidate_count"] = len(record.get("choices") or ())
         tracing.end_span(
             host, span, status=tracing.STATUS_OK,
-            attributes={**nlu_trace, "engine": "user", "command_name": answered.name,
+            attributes={**nlu_trace, "decided_by": "reply", "command_name": answered.name,
                         "resolved": answered.name is not None, "ambiguous": answered.kind == intent_loop.ASK_AGAIN,
                         "is_cme_command": chosen is not None and chosen.kind == intent_loop.KIND_CORE,
                         "decision_uncertainty": _recorded_command_identity_uncertainty(span, nlu_trace)})

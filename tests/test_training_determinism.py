@@ -590,11 +590,7 @@ def test_inherited_command_generation_is_cached_by_fully_qualified_name(tmp_path
     # every context is a folder; Child's holds only its context class, its one command is inherited
     (commands / "Child").mkdir()
     (commands / "Child" / "_Child.py").write_text(
-        "class Context:\n    @classmethod\n    def get_parent(cls, record):\n        return None\n",
-        encoding="utf-8",
-    )
-    (commands / "context_inheritance_model.json").write_text(
-        json.dumps({"Child": {"base": ["Parent"]}}),
+        "class Context:\n    inherits = [\"Parent\"]\n",
         encoding="utf-8",
     )
     (parent / "shared_command.py").write_text(

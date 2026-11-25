@@ -139,7 +139,7 @@ def observation_row(key: str, text: str) -> dict[str, Any]:
     ``sha256`` is the PROMPT SLOT exactly as the model received
     it, header and all, and is what a reader has to hash to prove what was
     sent. ``response_sha256`` is the command response inside that slot, with
-    the offloading package's handle line stripped. ``fw.agent.step`` records the
+    the offloading package's handle line stripped. ``fw.step`` records the
     tool return, which for an execute step already carries that line, so the
     slot digest is the one that matches it.
 
@@ -246,7 +246,7 @@ def classify_against_steps(
     """Each step's recorded observation digest against the manifest's rows.
 
     ``step_sha256_by_index`` is the digest of the tool return from
-    ``fw.agent.step``. Residency is decided against the slot or the response
+    ``fw.step``. Residency is decided against the slot or the response
     inside it, whichever the step's own bytes equal.
 
     ``mismatched`` therefore means the evidence genuinely differs, and it still

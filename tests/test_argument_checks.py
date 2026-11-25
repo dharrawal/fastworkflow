@@ -249,8 +249,8 @@ def test_the_typed_call_fills_a_list_and_a_float_and_the_turn_frame_expands_them
                    "steps_before": [], "steps_after": []}])
     result = _plan_planning_command(ctx, wf, lm, request, command)
 
-    span = sink.named(tracing.SPAN_PLANNER_PLAN)[-1]
-    assert span.attributes["plan_source"] == "skill_call" and span.attributes["skill"] == ROUTE
+    span = sink.named(tracing.SPAN_PLAN)[-1]
+    assert span.attributes["plan_source"] == "skill_call" and span.attributes["command"] == ROUTE
     assert span.attributes["plan"].splitlines()[:2] == ["1. find_group query=Dune", "2. find_group query=Emma"]
     assert "Execute these next steps:\n1. find_group query=Dune" in result
     assert ("stock_check(titles: list[str], ratio: float = 0.5, checked: bool = true, tags: list[str] = [])"
@@ -295,8 +295,8 @@ def test_a_list_and_float_planning_command_is_called_at_the_turn_frame_and_its_l
     assert result.status == TurnStatus.COMPLETED
     # the list's one element is the nested book_by_title call's title (Emma, b3)
     assert _nested_book_uids(stock_env) == ["b3"]
-    [span] = [s for s in stock_env.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
-              if s.attributes.get("skill") == "Library/stock_check"]
+    [span] = [s for s in stock_env.sink.named(tracing.SPAN_PHASE)
+              if s.attributes.get("command") == "Library/stock_check"]
     assert span.attributes["steps"] == "1. book_by_title title=Emma"
     assert span.attributes["steps_by_code"] == 1
     assert stock_env.model.asked == [] and stock_env.nested.asked == []

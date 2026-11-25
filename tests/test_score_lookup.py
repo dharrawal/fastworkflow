@@ -14,6 +14,7 @@ from typing import Sequence
 
 import pytest
 
+from tests.context_declarations import declare_inherits
 from fastworkflow.train import score_lookup as s
 from fastworkflow.train import not_here_step1 as step1
 from fastworkflow.train import score_not_here as scorer
@@ -561,10 +562,8 @@ def _write_workflow(root: Path, head_scope: str = "scoped") -> None:
         "Explorer": {"parent": ["*"]},
         "Alpha": {"parent": ["Explorer"]},
     }))
-    (root / "_commands" / "context_inheritance_model.json").write_text(json.dumps({
-        "Alpha": {"base": ["Zeta"]},
-        "Zeta": {"base": []},
-    }))
+    (root / "_commands" / "Zeta").mkdir()
+    declare_inherits(root, {"Alpha": ["Zeta"]})
     snapshot = {"map_command_2_metadata": {
         "Alpha/show_owner": {"is_planning": False},
         "Zeta/list_items": {"is_planning": False},

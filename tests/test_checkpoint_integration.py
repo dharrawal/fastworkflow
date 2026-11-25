@@ -214,9 +214,7 @@ def _count_calls(call_log: str) -> int:
 
 NO_HOOK_CONTEXT = '''
 class Context:
-    @classmethod
-    def get_parent(cls, record) -> None:
-        return None
+    pass
 '''
 
 POKE_COMMAND = '''
@@ -248,7 +246,6 @@ def _write_scratch_workflow(tmp_path: Path) -> str:
     context_folder.mkdir(parents=True)
     (context_folder / "_Widget.py").write_text(NO_HOOK_CONTEXT)
     (context_folder / "poke.py").write_text(POKE_COMMAND)
-    (folderpath / "_commands" / "context_inheritance_model.json").write_text("{}")
     return str(folderpath)
 
 

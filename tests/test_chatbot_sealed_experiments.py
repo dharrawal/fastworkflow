@@ -52,7 +52,7 @@ def _recorded(server, store, *, complete=True, turn="exp-turn"):
         conn.execute(
             "INSERT INTO spans(span_id,trace_id,name,kind,start_ns,end_ns,status,"
             "attributes,experiment_id) VALUES(?,?,?,?,?,?,?,?,?)",
-            (f"span-{turn}", turn, "fw.planner.plan", "internal", 1, 1000, "ok", "{}", eid),
+            (f"span-{turn}", turn, "fw.plan", "internal", 1, 1000, "ok", "{}", eid),
         )
         conn.execute(
             "INSERT INTO artifacts(artifact_id,turn_key,key,content_type,inline_value,"

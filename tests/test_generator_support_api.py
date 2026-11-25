@@ -193,7 +193,7 @@ def two_kinds_of_span(tmp_path):
     sink = obs.SQLiteTraceSink(db)
     keys = [f"20261123T{index:06d}-turn" for index in range(3)]
     for turn, key in enumerate(keys):
-        for index, name in enumerate(("fw.turn", "fw.command.execute", "fw.llm.call", "fw.command.execute")):
+        for index, name in enumerate((tracing.SPAN_TURN, tracing.SPAN_COMMAND, "fw.llm.call", tracing.SPAN_COMMAND)):
             sink.emit_span(tracing.Span(span_id=f"{key}-s{index}", trace_id=key, name=name,
                                         start_ns=10_000 + turn * 100 + index, status="ok",
                                         attributes={"seq": index}))
@@ -205,11 +205,11 @@ def two_kinds_of_span(tmp_path):
 def test_spans_for_turns_reads_one_span_name(two_kinds_of_span):
     db, keys = two_kinds_of_span
     store = obs.ReadOnlyObservabilityStore(db)
-    named = store.spans_for_turns([*keys, "never-recorded", keys[0]], name="fw.command.execute")
+    named = store.spans_for_turns([*keys, "never-recorded", keys[0]], name=tracing.SPAN_COMMAND)
     assert list(named) == [*keys, "never-recorded"]
     assert named["never-recorded"] == []
     for key in keys:
-        expected = [row for row in store.get_spans(key) if row["name"] == "fw.command.execute"]
+        expected = [row for row in store.get_spans(key) if row["name"] == tracing.SPAN_COMMAND]
         assert named[key] == expected and [row["span_id"] for row in expected] == [f"{key}-s1", f"{key}-s3"]
     assert store.spans_for_turns(keys, name="no.such.span") == {key: [] for key in keys}
     # without a name: every span, as before
@@ -246,17 +246,17 @@ def test_count_spans_without_turn_counts_only_spans_no_turn_row_names(two_kinds_
     store = obs.ReadOnlyObservabilityStore(db)
     # no turn rows yet: every span belongs to no turn
     assert store.count_spans_without_turn() == 12
-    assert store.count_spans_without_turn(name="fw.command.execute") == 6
+    assert store.count_spans_without_turn(name=tracing.SPAN_COMMAND) == 6
     _record_turn(db, keys[0])
     assert store.get_turn(keys[0]) is not None
     assert store.count_spans_without_turn() == 8
-    assert store.count_spans_without_turn(name="fw.command.execute") == 4
+    assert store.count_spans_without_turn(name=tracing.SPAN_COMMAND) == 4
     assert store.count_spans_without_turn(name="fw.llm.call") == 2
     assert store.count_spans_without_turn(name="no.such.span") == 0
     for key in keys[1:]:
         _record_turn(db, key)
     assert store.count_spans_without_turn() == 0
-    assert store.count_spans_without_turn(name="fw.command.execute") == 0
+    assert store.count_spans_without_turn(name=tracing.SPAN_COMMAND) == 0
 
 
 def test_count_spans_without_turn_on_an_empty_store(tmp_path):
@@ -264,4 +264,4 @@ def test_count_spans_without_turn_on_an_empty_store(tmp_path):
     obs.ObservabilityStore(db)
     store = obs.ReadOnlyObservabilityStore(db)
     assert store.count_spans_without_turn() == 0
-    assert store.count_spans_without_turn(name="fw.command.execute") == 0
+    assert store.count_spans_without_turn(name=tracing.SPAN_COMMAND) == 0

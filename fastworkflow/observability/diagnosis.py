@@ -155,7 +155,8 @@ PHASE_ASK_USER = "ask_user"
 BASIS_SPANS = "spans"
 BASIS_SPANS_AND_RECORD = "spans+record"
 
-# Span names this build declares a contract for. A span outside it is counted in
+# Span names this build declares a contract for (span contract 63; a store written
+# before it is not read by this build's tools). A span outside it is counted in
 # `coverage.unrecognized_span_names` rather than ignored: the pilot store holds
 # `fw.context.checkpoint`, `fw.evidence.read` and `fw.context.checkpoint_probe`
 # spans that no emitter in this tree writes, and a reader deserves to know its
@@ -169,9 +170,8 @@ KNOWN_SPAN_NAMES: frozenset[str] = frozenset(tracing.SPAN_CONTRACTS)
 _TERMINAL_ERROR_STATUSES: frozenset[str] = frozenset({tracing.STATUS_ERROR, "failed"})
 _OPEN_STATUSES: frozenset[str] = frozenset({"open"})
 
-_DISPATCH_SPAN_NAMES: frozenset[str] = frozenset(
-    {tracing.SPAN_COMMAND_EXECUTE, tracing.SPAN_AGENT_TOOL_CALL}
-)
+# A command run.
+_DISPATCH_SPAN_NAMES: frozenset[str] = frozenset({tracing.SPAN_COMMAND})
 
 # How many supporting spans a marker carries inline before it reports a count
 # instead. A list row must stay small enough to page 200 of them; the detail
@@ -386,12 +386,11 @@ DEFAULT_LOOP_POLICY = LoopPolicy()
 class PhaseEvent:
     """One recorded nested decision, and the executor step it belongs to.
 
-    `owner_span_id` is the nearest `fw.command.execute` / `fw.agent.tool_call`
-    ANCESTOR, found by walking recorded parent links -- not guessed from timing.
-    In the pilot store every `fw.nlu.intent` and `fw.nlu.param_extraction` span
-    has such an ancestor and every `fw.ask_user` span has none (the agent loop
-    asks, not a dispatch), so `owner_span_id is None` is a real and ordinary
-    state meaning "recorded outside any dispatch", not a lookup failure.
+    `owner_span_id` is the nearest `fw.command` ANCESTOR, found by walking
+    recorded parent links -- not guessed from timing. A part's own `fw.intent` /
+    `fw.parameters` (under `fw.resolve.part`) and a `fw.question` have none, so
+    `owner_span_id is None` is a real and ordinary state meaning "recorded
+    outside any dispatch", not a lookup failure.
 
     `detail` holds only keys the span actually recorded. An absent key is absent
     here too.
@@ -700,7 +699,7 @@ def _dispatch_markers(
 def _intent_markers(
     status: Optional[str], attributes: Mapping[str, Any]
 ) -> tuple[list[str], dict[str, Any]]:
-    """Markers and reported detail for one `fw.nlu.intent` span.
+    """Markers and reported detail for one `fw.intent` span.
 
     `resolved=false` deliberately produces NO marker (see rule 1 in the module
     docstring); it is reported in `detail` so the parent-chain walk stays
@@ -717,7 +716,9 @@ def _intent_markers(
     detail = {
         key: attributes[key]
         for key in (
-            "stage",
+            "reads_reply",
+            "question_kind",
+            "decided_by",
             "context",
             "matcher_layer",
             "escalation_outcome",
@@ -735,7 +736,7 @@ def _intent_markers(
 def _param_markers(
     status: Optional[str], attributes: Mapping[str, Any]
 ) -> tuple[list[str], dict[str, Any]]:
-    """Markers and reported detail for one `fw.nlu.param_extraction` span.
+    """Markers and reported detail for one `fw.parameters` span.
 
     `parameters_valid=false` is the recorded verdict; `missing_fields` /
     `invalid_fields` are its supporting detail and also stand alone, because a
@@ -788,11 +789,11 @@ def _phase_events(tree: _SpanTree, spans: Sequence[Mapping[str, Any]]) -> list[P
     events: list[PhaseEvent] = []
     for span in spans:
         name = span.get("name")
-        if name == tracing.SPAN_NLU_INTENT:
+        if name == tracing.SPAN_INTENT:
             kind = PHASE_INTENT
-        elif name == tracing.SPAN_NLU_PARAM_EXTRACTION:
+        elif name == tracing.SPAN_PARAMETERS:
             kind = PHASE_PARAM
-        elif name == tracing.SPAN_ASK_USER:
+        elif name == tracing.SPAN_QUESTION:
             kind = PHASE_ASK_USER
         else:
             continue

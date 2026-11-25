@@ -717,6 +717,14 @@ Nothing changes for the app developer.
 
 ## Tracing
 
+Since span contract 63 (bd fix-qjne.34) the names below are `fw.phase` (was `fw.skill.phase`; `skill` is
+`command`), `fw.step` (was `fw.agent.step` with its `fw.agent.tool_call`; `run_by` `code` replaces `by_code`;
+the deferred answer is `fw.step` with `kind` `answer`, was `fw.skill.answer`), `fw.command` (was
+`fw.command.execute`) and `fw.parameters` (was `fw.nlu.param_extraction`); `fw.agent.execute` is gone (its
+`attempts` and `clarification` are on `fw.phase`), and a phase is a child of its part's `fw.run.part`. This
+section describes the spans as contract 62 wrote them; a store written before contract 63 is not read by the
+framework's tools.
+
 The deferred answer of a phased call (one model call with the phases' facts, made only when `__result__`
 returns `ANSWER_BY_MODEL`) is one `fw.skill.answer` span
 (span contract v34, `fw.skill.answer` v1) with `skill`, `phase`, `phase_index` and `phase_count`. A failing

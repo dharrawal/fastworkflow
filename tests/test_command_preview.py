@@ -310,7 +310,8 @@ def test_render_is_byte_stable_across_processes(workflow, tmp_path):
     env = {**os.environ, "PYTHONHASHSEED": "12345"}
     subprocess.run([sys.executable, "-m", "fastworkflow.cli", "command", "preview", workflow,
                     "--out", str(out)], check=True, env=env, capture_output=True)
-    assert {f: (out / f).read_text(encoding="utf-8") for f in os.listdir(out)} == first
+    # the object model is written beside the previews in _object_models/ (bd fix-qjne.37.2)
+    assert {f: (out / f).read_text(encoding="utf-8") for f in os.listdir(out) if f != "_object_models"} == first
 
 
 def test_default_out_dir_is_docs_next_to_the_workflow(workflow):
@@ -578,7 +579,8 @@ def test_the_new_settings_render_byte_stable(checks_workflow, tmp_path):
     env = {**os.environ, "PYTHONHASHSEED": "777"}
     subprocess.run([sys.executable, "-m", "fastworkflow.cli", "command", "preview", checks_workflow,
                     "--out", str(out)], check=True, env=env, capture_output=True)
-    assert {f: (out / f).read_text(encoding="utf-8") for f in os.listdir(out)} == first
+    # the object model is written beside the previews in _object_models/ (bd fix-qjne.37.2)
+    assert {f: (out / f).read_text(encoding="utf-8") for f in os.listdir(out) if f != "_object_models"} == first
 
 
 # ---------------------------------------------------------------- the readability fixes
@@ -1249,7 +1251,7 @@ def test_the_command_group_replaces_planning_command_with_no_alias(tmp_path, mon
     folder = _planning_commands_workflow(tmp_path, "rename_wf", {"close_out": CLOSE_OUT})
     out = str(tmp_path / "rename_previews")
     assert _run_cli(monkeypatch, "command", "preview", folder, "--out", out) == 0
-    assert os.listdir(out) == ["close_out.md"]
+    assert sorted(os.listdir(out)) == ["_object_models", "close_out.md"]   # the object model beside (fix-qjne.37.2)
     capsys.readouterr()
     assert _run_cli(monkeypatch, "skill", "preview", folder, "--out", out) == 2
     assert "invalid choice: 'skill'" in capsys.readouterr().err

@@ -27,6 +27,7 @@ import contextvars
 import hashlib
 import logging
 import os
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -67,6 +68,26 @@ def host_scope(host: Any) -> Iterator[None]:
         yield
     finally:
         _current_host.reset(token)
+
+
+# A worker thread's own parenting stack. The host's stack is one plain list shared by every thread, so work run in a
+# pool (the per-part stages, the argument checks) would push onto and parent under each other's spans. ``traced_call``
+# gives each submitted call ``(host_stack, own_stack)``: while the host's stack is ``host_stack``, ``_get_stack``
+# answers ``own_stack``, a copy of the caller's stack taken at submission. The call's spans then parent to the span
+# that was current when it was submitted, its pushes are seen by no sibling and not by the caller, and the copy ends
+# with the call's context.
+_forked_stack: contextvars.ContextVar = contextvars.ContextVar("fw_trace_forked_stack", default=None)
+
+
+def traced_call(fn: Any, *args: Any) -> Any:
+    """A no-argument callable that runs ``fn(*args)`` under a copy of this thread's context with its own parenting
+    stack seeded from the current one. Build it in the submitting thread: ``pool.submit(tracing.traced_call(f, x))``."""
+    context = contextvars.copy_context()
+    host_stack = _host_stack(current_host())
+    if host_stack is not None:
+        own = list(_get_stack(current_host()) or [])
+        context.run(_forked_stack.set, (host_stack, own))
+    return lambda: context.run(fn, *args)
 
 
 # ----------------------------------------------------------------------
@@ -528,64 +549,51 @@ def call_scope(call_id: str, *, command_name: Optional[str] = None) -> Iterator[
 # when it was not (no remote decision model, the gate `off`, a failed call, a `use_plan` turn). A request the gate kept
 # whole is recorded with `raw` empty, `merged` the request, `attempts` 0 and no `prompt_digest` or `prompt_source`
 # (they are present only when the splitter's prompt was built). A span recorded before this carries no such key.
-SPAN_CONTRACT_VERSION = 62
-
-# v1 — emitted at the agent↔workflow boundary (decision D3).
-SPAN_TURN = "fw.turn"
-SPAN_PLANNER_PLAN = "fw.planner.plan"
-SPAN_PLANNER_REPLAN = "fw.planner.replan"
-SPAN_AGENT_TOOL_CALL = "fw.agent.tool_call"
-SPAN_COMMAND_EXECUTE = "fw.command.execute"
-SPAN_ASK_USER = "fw.ask_user"
-
-V1_SPAN_NAMES = frozenset(
-    {
-        SPAN_TURN,
-        SPAN_PLANNER_PLAN,
-        SPAN_PLANNER_REPLAN,
-        SPAN_AGENT_TOOL_CALL,
-        SPAN_COMMAND_EXECUTE,
-        SPAN_ASK_USER,
-    }
-)
-
-# The agent loop's own structure. Without these two, a turn's shape has to be
-# INFERRED by a reader — the planner and the ReAct calls are flat siblings of
-# fw.turn, and "which tool call belongs to which reasoning step" is only
-# recoverable from DSPy module names plus timestamps. They make the two levels
-# a developer actually thinks in — the executor ran, and it took these steps —
-# structural facts instead of a heuristic.
 #
-# fw.agent.execute is the executor as a phase, sibling to fw.planner.plan. It
-# is NOT fw.command.execute: that one is a single command inside a tool call,
-# this one is the whole loop.
-SPAN_AGENT_EXECUTE = "fw.agent.execute"
-SPAN_AGENT_STEP = "fw.agent.step"
+# v63 (bd fix-qjne.34, one revision): the span tree follows the turn's stages. Under `fw.turn` (v10) every turn has, in
+# order, the stages it went through, each ONE span with a deterministic id (`stage_span_id`) that a turn waiting on a
+# person closes with status `awaiting_user` and reopens when it resumes, in any process (`resumed`, `segments`):
+# `fw.split` (new; the record that was the turn's `subtask_split`, `changed_by` now `rules`) with `fw.split.gate`,
+# `fw.split.splitter` (one per model attempt), `fw.split.merge` and `fw.split.referent` (all new); `fw.resolve` (new;
+# `plan_ambiguity`, was the turn's `subtask_plan_ambiguity`) with one `fw.resolve.part` per part (new); `fw.review`
+# (new; `outcome`, was the turn's `subtask_review`; it replaces the review's fake `fw.skill.phase phase=review` and its
+# agent loop) with `fw.review.reply`, `fw.review.edit` and `fw.review.revision` (new; the reply's read replaces the
+# review router's `fw.nlu.intent` / `fw.nlu.param_extraction`) and the review record's `fw.approval`; `fw.run` (new)
+# with one `fw.run.part` per part (new; `means`, `outcome` ran / not_run / refused, `reason`, `answered_by`, and the
+# agent loop's facts that were `fw.agent.execute`'s; a part dropped at resolve is a run part not run, reason
+# `dropped_at_resolve: ...`, numbered as the split numbered it); `fw.answer` (new; `written_by`, `chars`). The direct
+# ("/") path has `fw.resolve` and `fw.run` with one part each and no split or review. `fw.turn` gains `path` (`plan`,
+# `direct`) and `mode` (`agent`, `no_agent`) and loses `subtask_split`, `subtask_review` and `subtask_plan_ambiguity`.
+# Renamed (every key kept unless said): `fw.nlu.intent` -> `fw.intent` (v14; `stage` -> `reads_reply` +
+# `question_kind`, `engine` -> `decided_by`: name, fuzzy, foreign_name, local, remote, question, reply);
+# `fw.nlu.param_extraction` -> `fw.parameters` (v16; + `reads_reply`); `fw.ask_user` -> `fw.question` (v3; every wait
+# for a person, `kind` which_command / parameters / review / approval / decision / agent, `part`, `agent_query` ->
+# `asked`; under the resolve part, the review or the run part it asks for); `fw.planner.plan` and `fw.planner.replan`
+# -> `fw.plan` (v11; under the run part it plans for, `replan_trigger` -> `trigger` with `initial`, `skill*` ->
+# `command*`); `fw.skill.phase` -> `fw.phase` (v8; `skill` -> `command`, + the agent loop's `attempts` and
+# `clarification`); `fw.agent.step` with its `fw.agent.tool_call`, and `fw.skill.answer` -> `fw.step` (v9; `run_by`
+# code / agent / model, `kind` command / ask / finish / tool / answer, `plan_span_id`, the dispatch's facts; `by_code`
+# gone); `fw.command.execute` -> `fw.command` (v6; + `resolved_by`, `parameters_read_by`, `parameters_valid`).
+# Removed: `fw.agent.execute` (its facts are on the run part or the phase) and `fw.agent.tool_call` (on the step; its
+# command is the step's child). A command's `fw.intent` / `fw.parameters` that decided nothing (its exact name, a typed
+# call read in code, no model call, nothing missing or refused), on any path, is no longer written: the command's
+# span says it. `fw.llm.call` (v3) always has `role` (`JEV` for the remote decision model) and may have `purpose`
+# (`conversation_summary`, under `fw.answer`). `fw.compose` hangs under `fw.answer` (answer card) or the `fw.question`
+# it composes (question form). The parents of the spans a pooled worker opens were corrected before this bump (each
+# worker has its own parenting stack, `traced_call`): part N's spans no longer nest under part N-1's. No legacy path
+# (owner decision): the framework has no old-to-new name map, its old name constants are removed, and a store written
+# before contract 63 is not read by the framework's tools (the diagnosis, the comparisons, the debug page, the replay
+# and distillation readers read the names above only). The support API answers the new names only: `SPAN_CONTRACTS`
+# has no entry for an old name, and the store's `spans_for_turns(keys, name=)` / `count_spans_without_turn(name=)`
+# match the name given, so a caller outside the framework that asks for `fw.command.execute` (a shared-utterance
+# harvest) must ask for `SPAN_COMMAND` (`fw.command`).
+SPAN_CONTRACT_VERSION = 63
 
-AGENT_LOOP_SPAN_NAMES = frozenset({SPAN_AGENT_EXECUTE, SPAN_AGENT_STEP})
-
-# One phase of a phased planning command call (``fastworkflow.planning_phases``): a bounded
-# sub-plan run by a fresh executor. Its fw.agent.execute span is its child, so a
-# grader reads each phase's steps, budget and filled facts in one place.
-SPAN_PLANNING_COMMAND_PHASE = "fw.skill.phase"
-
-# The deferred answer of a planning command call (3.16): one model call with the phases' facts,
-# made only when the call's __result__ returned None, or when the call has no __result__ answer
-# to give. It is the answer's own step, not a phase, so it is its own span.
-SPAN_PLANNING_COMMAND_ANSWER = "fw.skill.answer"
-
-# Originally reserved-for-v2 so the schema needed no migration when the deeper
-# emitters landed. They have (D3 amendment, 2026-08-26): fw.nlu.* emit inside
-# the CME pipeline and fw.llm.call at the DSPy callback level; only fw.train.*
-# is still reserved. The set name is historical and kept for stability.
-SPAN_NLU_INTENT = "fw.nlu.intent"
-SPAN_NLU_PARAM_EXTRACTION = "fw.nlu.param_extraction"
+# The turn's root span, and one span per model call (written at the DSPy callback level).
+SPAN_TURN = "fw.turn"
 SPAN_LLM_CALL = "fw.llm.call"
+# A reserved prefix with no emitter.
 SPAN_TRAIN_PREFIX = "fw.train."
-
-RESERVED_V2_SPAN_NAMES = frozenset(
-    {SPAN_NLU_INTENT, SPAN_NLU_PARAM_EXTRACTION, SPAN_LLM_CALL, SPAN_TRAIN_PREFIX}
-)
 
 # ----------------------------------------------------------------------
 # Recorded passes within one turn (fix-txxy)
@@ -615,6 +623,54 @@ SPAN_APPROVAL = "fw.approval"
 # One span per compose call of the run_chatbot page (the answer card and the question form). Written by the
 # server after the turn finished; see ``fastworkflow.run_fastapi_mcp.compose_trace``.
 SPAN_COMPOSE = "fw.compose"
+
+# The turn's stages (bd fix-qjne.34, design section 4): one span per stage and per part of a stage, each with a
+# deterministic id (``stage_span_id``), so a turn that waits for the user keeps ONE span per stage and part across the
+# wait and across processes. A stage span's parent is the turn root, a part span's its stage's span. Opened by
+# ``enter_stage`` and ``part_span`` below; closed through the host's rebuilders (``close_stage_span``).
+SPAN_SPLIT = "fw.split"
+SPAN_RESOLVE = "fw.resolve"
+SPAN_REVIEW = "fw.review"
+SPAN_RUN = "fw.run"
+SPAN_ANSWER = "fw.answer"
+SPAN_RESOLVE_PART = "fw.resolve.part"
+SPAN_RUN_PART = "fw.run.part"
+STAGE_SPAN_NAMES = (SPAN_SPLIT, SPAN_RESOLVE, SPAN_REVIEW, SPAN_RUN, SPAN_ANSWER)
+#: The stages pushed on the parenting stack while open, so the spans their work opens are their children.
+PUSHED_STAGES = frozenset(STAGE_SPAN_NAMES)
+#: The stage a part span belongs to.
+STAGE_OF_PART = {SPAN_RESOLVE_PART: SPAN_RESOLVE, SPAN_RUN_PART: SPAN_RUN}
+
+# The split stage's own steps: the one-job gate, the splitter's call, the merge of its list, a part's referent.
+SPAN_SPLIT_GATE = "fw.split.gate"
+SPAN_SPLIT_SPLITTER = "fw.split.splitter"
+SPAN_SPLIT_MERGE = "fw.split.merge"
+SPAN_SPLIT_REFERENT = "fw.split.referent"
+
+# A decision of which command (was fw.nlu.intent), a reading of a command's values (was fw.nlu.param_extraction), and
+# every wait for a person (was fw.ask_user), with its ``kind``.
+SPAN_INTENT = "fw.intent"
+SPAN_PARAMETERS = "fw.parameters"
+SPAN_QUESTION = "fw.question"
+
+# The run's own records (bd fix-qjne.34 step 6): a phase of a planning command (was fw.skill.phase), one step of a run,
+# whoever ran it (`run_by` code, agent or model; was fw.agent.step with its fw.agent.tool_call, and fw.skill.answer as
+# `kind` answer), one command run (was fw.command.execute), and a plan the text planner made (was fw.planner.plan and
+# fw.planner.replan). fw.agent.execute is gone: its facts are on the part or the phase it ran for.
+SPAN_PHASE = "fw.phase"
+SPAN_STEP = "fw.step"
+SPAN_COMMAND = "fw.command"
+SPAN_PLAN = "fw.plan"
+
+# The review's own records (step 5): how a reply read, the free-text edit read, a revision of the reviewed items.
+SPAN_REVIEW_REPLY = "fw.review.reply"
+SPAN_REVIEW_EDIT = "fw.review.edit"
+SPAN_REVIEW_REVISION = "fw.review.revision"
+
+#: The spans of the work a run does, which are not recorded while the framework's own planning command (the turn's
+#: review) runs: the review is recorded as the ``fw.review`` stage and its own spans, never as a phase, a step or a
+#: command (``quiet``).
+WORK_SPAN_NAMES = frozenset({SPAN_PHASE, SPAN_STEP, SPAN_COMMAND, SPAN_INTENT, SPAN_PARAMETERS, SPAN_PLAN})
 
 # The attribute a pass-stamping producer records, and the one
 # `comparison.discover_pass_selectors` / `selection_api.DEFAULT_PASS_ATTRIBUTE`
@@ -675,8 +731,11 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
     # v9: `subtask_split.prompt_source` value `built_in+workflow` (SPAN_CONTRACT_VERSION v62): split_examples as demos,
     #     and `workflow` (a replacement prompt) is no longer written;
     #     `subtask_split.gate`: the one-job gate's verdict, and a split the gate skipped (`attempts` 0).
+    # v10 (SPAN_CONTRACT_VERSION v63): `subtask_split` moved to `fw.split`, `subtask_review` to `fw.review`'s
+    #     `outcome`, `subtask_plan_ambiguity` to `fw.resolve`'s `plan_ambiguity`; new `path` (`plan` or `direct`)
+    #     and `mode` (`agent` or `no_agent`).
     SPAN_TURN: SpanContract(
-        version=9,
+        version=10,
         attributes=frozenset(
             {
                 "turn_key",
@@ -689,10 +748,9 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
                 "failure_reason",
                 "suspended_ms",
                 "context_mutations",
-                "subtask_review",
                 "subtask_bindings",
-                "subtask_plan_ambiguity",
-                "subtask_split",
+                "path",
+                "mode",
             }
         ),
     ),
@@ -753,20 +811,91 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
         ),
     ),
     # v2: `user_responses` (SPAN_CONTRACT_VERSION v42): all replies of the question in order, the final one last.
-    SPAN_ASK_USER: SpanContract(
-        version=2,
+    # v3 (SPAN_CONTRACT_VERSION v63) was `fw.ask_user`: every wait for a person, with its `kind` (which_command,
+    # parameters, review, approval, decision, agent) and `part` (a resolve part's question); `agent_query` is `asked`.
+    SPAN_QUESTION: SpanContract(
+        version=3,
         attributes=frozenset(
-            {"agent_query", "attempt", "user_response", "user_responses", "human_wait_ms"}
+            {"kind", "part", "asked", "attempt", "user_response", "user_responses", "human_wait_ms"}
         ),
     ),
-    # v3: the four auto-navigation keys (v2) are gone with the
-    # two-step dispatch that wrote them. Every execute step is now a step the
-    # agent typed, so there is no composed-step shape to tell apart.
-    # v4: `context_before` / `context_after` change from a context-handle
-    # mapping to the plain context type name string.
-    # v5: `consequence` is no longer written (see SPAN_CONTRACT_VERSION v11).
-    SPAN_COMMAND_EXECUTE: SpanContract(
-        version=5,
+    # The turn's stages and parts (bd fix-qjne.34 steps 2 to 4). `resumed` and `segments` on each: how many times the
+    # span was opened (a turn that waits for the user reopens the same span when it resumes).
+    # fw.split: the split record (was the turn's `subtask_split`): the request, the model's list (`raw`), the list the
+    # turn runs (`merged`), the code rules that changed it (`rules`, was `changed_by`), `failed`, the model calls
+    # (`attempts`), the splitter prompt's `prompt_digest` and `prompt_source`, and `parts` (how many).
+    SPAN_SPLIT: SpanContract(
+        version=1,
+        attributes=frozenset(
+            {"request", "raw", "merged", "rules", "failed", "attempts", "prompt_digest", "prompt_source", "parts",
+             "resumed", "segments"}
+        ),
+    ),
+    # The one-job gate's verdict (was `subtask_split.gate`): p(one), the answer, the bar, whether the splitter was skipped.
+    SPAN_SPLIT_GATE: SpanContract(
+        version=1, attributes=frozenset({"score", "label", "threshold", "skipped"})),
+    # One model attempt of the splitter (the first, or its one retry): its number, the list it gave, why it gave none.
+    SPAN_SPLIT_SPLITTER: SpanContract(
+        version=1, attributes=frozenset({"attempt", "raw", "failed"})),
+    # The merge of the model's list: the list after it, the rules that changed it, the rewrites it did not make.
+    SPAN_SPLIT_MERGE: SpanContract(
+        version=1, attributes=frozenset({"merged", "rules", "doubts"})),
+    # A part's referent: the record it acts on without naming it, and the description that stands for it.
+    SPAN_SPLIT_REFERENT: SpanContract(
+        version=1, attributes=frozenset({"part", "subject", "description"})),
+    # fw.resolve: how many parts, how many which-command questions were answered, and the parts whose planning-command
+    # match was ambiguous (`plan_ambiguity`, was the turn's `subtask_plan_ambiguity`).
+    SPAN_RESOLVE: SpanContract(
+        version=1, attributes=frozenset({"parts", "asked", "plan_ambiguity", "resumed", "segments"})),
+    # fw.resolve.part: one part's resolution: its text, `outcome` (bound, ad_hoc, dropped, asked), `means`
+    # (planning_command, command, ad_hoc), the command, and `fast_path`: it runs with no review (the gate's fast path
+    # took it, or it is the turn's one part and the user picked its command: the turn's review mark was `fast_path`).
+    SPAN_RESOLVE_PART: SpanContract(
+        version=1,
+        attributes=frozenset(
+            {"part", "request", "outcome", "means", "command", "fast_path", "resumed", "segments"}
+        ),
+    ),
+    # fw.review: the review's outcome (was the turn's `subtask_review` while the review is out or after it).
+    SPAN_REVIEW: SpanContract(
+        version=1, attributes=frozenset({"outcome", "rounds", "items", "resumed", "segments"})),
+    # (step 5) How one reply to the review read: `read_as` (accept, decline, edit, unclear, refused, wait, ...), `by`
+    # (code, head: the review head's routing, model: the free-text edit reader), and whether only an explicit yes accepts
+    # the turn (`explicit_yes_required`). Replaces the review router's fw.intent / fw.parameters.
+    SPAN_REVIEW_REPLY: SpanContract(
+        version=1, attributes=frozenset({"read_as", "by", "reason", "explicit_yes_required"})),
+    # (step 5) The free-text edit reader's read of a reply: how many edits it read and kept, whether it read again to
+    # repair them, the means it named that are no command here.
+    SPAN_REVIEW_EDIT: SpanContract(
+        version=1, attributes=frozenset({"edits_read", "edits_applied", "repaired", "refused_names"})),
+    # (step 5) A revision of the reviewed items: its number, how many items changed, whether their checks ran again.
+    SPAN_REVIEW_REVISION: SpanContract(
+        version=1, attributes=frozenset({"round", "items_changed", "rechecked"})),
+    # fw.run: how many parts the run has, and how many ran, were not run, or were refused (step 6).
+    SPAN_RUN: SpanContract(
+        version=1, attributes=frozenset({"parts", "ran", "not_run", "refused", "resumed", "segments"})),
+    # (step 6) One part of the run: `means` (planning_command, command, ad_hoc), the `command`, `outcome` (ran, not_run,
+    # refused), who answered it (`answered_by`: code, agent), `reason` and `open_step` of a part not run or refused, and
+    # the agent loop's facts when an agent ran it (were fw.agent.execute's): `agent_input`, `model`, `attempts`,
+    # `final_answer`, `exhausted`, `error_type`; `decided_by` caller for a direct action.
+    SPAN_RUN_PART: SpanContract(
+        version=1,
+        attributes=frozenset(
+            {"part", "means", "command", "outcome", "answered_by", "reason", "open_step", "decided_by",
+             "agent_input", "model", "attempts", "final_answer", "exhausted", "error_type", "resumed", "segments"}
+        ),
+    ),
+    # (step 7) The turn's answer: who wrote it (`written_by` code, agent), its length (`chars`), and whether the
+    # conversation summary failed (`summary_failed`); the summary's model call is its child.
+    SPAN_ANSWER: SpanContract(
+        version=1, attributes=frozenset({"written_by", "chars", "summary_failed", "resumed", "segments"})),
+    # v6 (SPAN_CONTRACT_VERSION v63) One command run (was fw.command.execute, v5 keys): the command text, its parameters, its
+    # response and success, its call ids and contexts, and how it was resolved: `resolved_by` (exact_name, fuzzy, model,
+    # caller for a direct action, or the deciding layer), `parameters_read_by` (typed, none, model, or the extraction's
+    # method) and `parameters_valid`. For a command a step dispatched, its fw.intent / fw.parameters are written only when they decided
+    # something (a layer other than an exact name, a model call, missing or invalid values, an error).
+    SPAN_COMMAND: SpanContract(
+        version=6,
         attributes=frozenset(
             {
                 "raw_command",
@@ -774,6 +903,9 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
                 "response_text",
                 "success",
                 "error_type",
+                "resolved_by",
+                "parameters_read_by",
+                "parameters_valid",
                 ATTR_COMMAND_CALL_ID,
                 ATTR_PARENT_CALL_ID,
                 ATTR_CHILD_CALLS,
@@ -782,220 +914,54 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
             }
         ),
     ),
-    # Emitted from THREE sites — workflow_agent._execute_workflow_query and both
-    # WorkflowExecutionContext dispatch paths — which is why one version for this
-    # name would have been a lie until fix-ajv.3's capture reached the third.
-    # It now has, so the three write the same keys and one version is honest; the
-    # conformance test asserts that agreement rather than trusting this comment.
-    # The alternative, versioning the sites apart, was rejected: they describe the
-    # same thing (an agent asked the workflow to run one command) and a reader
-    # joining them would have had to learn which of three dialects each span was
-    # written in.
-    # v2: `context_before` / `context_after` change from a context-handle
-    # mapping to the plain context type name string.
-    # v3: `consequence` is no longer written (see SPAN_CONTRACT_VERSION v11).
-    SPAN_AGENT_TOOL_CALL: SpanContract(
-        version=3,
-        attributes=frozenset(
-            {
-                "raw_command",
-                "response_text",
-                "success",
-                "error_type",
-                ATTR_COMMAND_CALL_ID,
-                ATTR_CONTEXT_BEFORE,
-                ATTR_CONTEXT_AFTER,
-            }
-        ),
-    ),
-    # v2: `fast_path_refusal_asked` (SPAN_CONTRACT_VERSION v28): the fast path's refused call's
-    # question was put to the user, and the run suspended on it. None otherwise.
-    # v3: `fast_path_refusal_asked` is withdrawn with the Phase 6 arms (SPAN_CONTRACT_VERSION v30).
-    SPAN_AGENT_EXECUTE: SpanContract(
-        version=3,
-        attributes=frozenset(
-            {
-                "agent_input",
-                "resumed",
-                "model",
-                "attempts",
-                "final_answer",
-                "suspended",
-                "clarification",
-                "exhausted",
-                "error_type",
-            }
-        ),
-    ),
-    # One phase run of a phased planning command call. Opened with the phase (`skill`,
-    # `phase`, `phase_index` of `phase_count`, its executor `step_budget`, the
-    # `first_step` of its run, `resumed` after an ask_user); closed with `steps`
-    # (the phase's numbered plan), `steps_used`, whether it reached its budget
-    # (`exhausted`) or `suspended`, the `record` its output was filled on and the
-    # filled `facts`, or `facts_error` when the phase failed (its steps could not
-    # be built, or a fact could not be filled); `error_type` when the run raised.
-    # v2: `answer_only` (no executor run: one model call with no tools wrote the
-    # answer; its fw.agent.execute is the child); for one item of a fan-out phase
-    # `item`, `item_index` (0-based) of `item_count` (after the cap) of
-    # `items_total`, and `record_issues` (the item record check's flags, a list;
-    # `record` is then the record bound to the item).
-    # v3: `skipped` (its callable `when` was false when the phase was reached; the
-    # span has no child and carries only the opening attributes; `skipped` false
-    # with `facts_error` when deciding it failed) and, for an item of a fan-out
-    # phase with `until`, `stop_condition_met` (the fan-out stops after this item).
-    # v4 (fix-6llp): `steps_by_code` (the steps of the run code ran, before the agent:
-    # navigation included; model steps = `steps_used - steps_by_code`) and `code_stop`
-    # (why code stopped: "done", "open step N", "step N failed", "no path for step
-    # N", "more pages at step N" (until fix-ajir.36), "stopped" when the executor's
-    # step hook ended the run, or "off" when code ran nothing for the phase: the run
-    # has no steps of its own, as the phase of the planner's steps_before, or nothing
-    # could be read).
-    # Absent on an answer-only phase and on a resumed run.
-    # v5 (fix-hia1.30): `answer_by_code` on an answer-only phase only: true when code
-    # wrote its answer from its steps with no model call (`planning_phases.answer_by_code`).
-    # v6 (fix-3rsq.4.10): `uses_result`, written on an answer-only phase of a command with
-    # a result method when that phase is skipped (no executor, no model call). It was
-    # written from Phase 3 without being declared here.
-    # v1 (fix-3rsq.p14.6): the deferred answer of a planning command call (3.16). `skill`, `phase`
-    # and `phase_index` name the phase whose facts it writes from; `phase_count` the call's phases.
-    # `error_type` is written only when the model call raised, or when the call's `__result__` failed (fix-qjne.12:
-    # no model call is made then; the span has status error and the exception class).
-    SPAN_PLANNING_COMMAND_ANSWER: SpanContract(
-        version=1,
-        attributes=frozenset({"skill", "phase", "phase_index", "phase_count", "error_type"}),
-    ),
-    # v7: `reextracted` (SPAN_CONTRACT_VERSION v40): True on the phases of a call planned again after its first
-    # phase's lookup found nothing; None otherwise.
-    SPAN_PLANNING_COMMAND_PHASE: SpanContract(
-        version=7,
-        attributes=frozenset(
-            {
-                "answer_only",
-                "answer_by_code",
-                "uses_result",
-                "skipped",
-                "stop_condition_met",
-                "steps_by_code",
-                "code_stop",
-                "item",
-                "item_index",
-                "item_count",
-                "items_total",
-                "record_issues",
-                "skill",
-                "phase",
-                "phase_index",
-                "phase_count",
-                "step_budget",
-                "first_step",
-                "resumed",
-                "reextracted",
-                "steps",
-                "steps_used",
-                "exhausted",
-                "suspended",
-                "record",
-                "facts",
-                "facts_error",
-                "error_type",
-            }
-        ),
-    ),
-    # v2: `roster_nudge` marks the one step whose observation is
-    # not a tool result at all. A finish action taken while named items of the
-    # request were never the subject of a command has its "Completed."
-    # observation replaced by a bounded harness note and the loop continues, so
-    # a reader counting tool results would otherwise count that note as one.
-    # v3: the same marker, renamed `finish_check_note` (fix-4dsr); no longer set.
-    # v4: `repaired_tool_name` (fix-8q7a) is the workflow command the model named
-    # as its tool; `tool_name`/`tool_args` are the execute_workflow_query call the
-    # step ran instead.
-    # v5: `finish_check_note` (v3's rename) is no longer written; see
-    # SPAN_CONTRACT_VERSION v12.
-    # v6: `folded_command` (fix-5jss) is the command text the command tool built
-    # from parameters the model passed as tool arguments beside `command`;
-    # `tool_args` is still what the model sent.
-    # v7 (fix-6llp): `by_code` (true) on a step code ran (planning_phases.CodeSteps),
-    # not the model; `thought` then says "run by code".
-    # v8: written on a step the policy verifier rewrote (fastworkflow.policy_runtime):
-    # `policy_source` names the row that fired, `policy_outcome` / `policy_mode` /
-    # `policy_table_version` what it decided under which table, `policy_intent` /
-    # `policy_requests` the intent reader's state, `policy_judgement` the question
-    # judge's reason (ask_user only), and `answer` the answer a finish policy sent
-    # back; the step's `observation` is the rewrite the agent read.
-    SPAN_AGENT_STEP: SpanContract(
+    # v8 (SPAN_CONTRACT_VERSION v63) One phase run of a planning command (was fw.skill.phase, v7 keys; `skill` is
+    # `command`): the phase,
+    # its index of the call's phases, its step budget and first step, `resumed` after a wait; closed with its numbered
+    # `steps`, `steps_used`, `steps_by_code` and `code_stop`, `exhausted` or `suspended`, the `record` and `facts` it
+    # filled (`facts_error` when it failed), `answer_only` / `answer_by_code` / `uses_result` / `skipped`, the fan-out
+    # item keys, `stop_condition_met`, `reextracted`, `error_type`; and the agent loop's `attempts` and `clarification`
+    # (was its fw.agent.execute child's).
+    SPAN_PHASE: SpanContract(
         version=8,
         attributes=frozenset(
             {
-                "step_index",
-                "thought",
-                "tool_name",
-                "tool_args",
-                "observation",
+                "answer_only", "answer_by_code", "uses_result", "skipped", "stop_condition_met", "steps_by_code",
+                "code_stop", "item", "item_index", "item_count", "items_total", "record_issues", "command", "phase",
+                "phase_index", "phase_count", "step_budget", "first_step", "resumed", "reextracted", "steps",
+                "steps_used", "exhausted", "suspended", "record", "facts", "facts_error", "error_type", "attempts",
                 "clarification",
-                "recovered",
-                "tool_error",
-                "error_type",
-                "repaired_tool_name",
-                "folded_command",
-                "by_code",
-                "policy_mode",
-                "policy_outcome",
-                "policy_source",
-                "policy_table_version",
-                "policy_intent",
-                "policy_requests",
-                "policy_judgement",
-                "answer",
             }
         ),
     ),
-    # One emitter, two names: build_query_with_next_steps opens .replan instead of
-    # .plan when it was re-triggered mid-turn. Same keys, so same version, and
-    # `replan_trigger` is on both — None on a first plan says "this was the first
-    # plan", where an absent key would only say "older record".
-    # v2: `plan` is the structured plan rendered as a numbered list with
-    # "(optional)" / "(needs the user)" flags when structured planning was on;
-    # `plan_source` says which planner produced it ("structured", "text",
-    # "text_fallback" after a failed or empty structured call, "none" for no
-    # plan) and `subjects` holds the structured plan's subject names, redacted
-    # when recorded.
-    # Structured planning is disabled (2026-09-28): new spans carry only
-    # `plan_source` "text" or "none"; older records may still hold "structured"
-    # / "text_fallback" and a `subjects` list.
-    # v3: `subjects` is no longer written (see SPAN_CONTRACT_VERSION v12).
-    # v4: planning commands as parameterized commands. `plan_source` may be "skill_call" (the
-    # planner filled a planning command's typed parameters and code expanded its steps);
-    # `skill` names the matched planning command with params or phases (None otherwise, and on a replan),
-    # `skill_args` holds the arguments of a planning command call, `skill_fallback` why a
-    # planning command call fell back to the text planner.
-    # v5: `skill_notes`, the notes of a planning command call (``PlanningCommandCallPlan.notes``: an argument
-    # a guard or a sure verify verdict replaced, dropped extra steps); None otherwise.
-    # v6: `experiment_arm`, `fast_path` and `recipe_choice` (SPAN_CONTRACT_VERSION v25; Phase 6 arm
-    # selector). `plan_source` may be "recipe_choice" (arm B: the recipe covers the request, so the
-    # plan is its one call).
-    # v7: `skill_refusal_asked` (SPAN_CONTRACT_VERSION v26): True when the planner's refusal of a
-    # planning command call's arguments was put to the user, so the turn suspends on the question instead of
-    # falling back to the text planner; `plan_source` is then "none" and `skill_fallback` still
-    # says why. None otherwise.
-    # v8: the v6 keys `experiment_arm`, `fast_path` and `recipe_choice` are withdrawn: the Phase 6
-    # arms were removed by owner decision 2026-10-30 (SPAN_CONTRACT_VERSION v30). A span recorded at
-    # v6 or v7 still carries them.
-    # v9: `skill_notes` also carries each verify verdict read (SPAN_CONTRACT_VERSION v39). A span recorded
-    # at v8 carries only the notes of the changes.
-    # v10 (SPAN_CONTRACT_VERSION v57): `argument_check_not_in_request`, the unmarked fields whose value the request does not
-    # write, as names (see the v57 note). Null when there is none, and on a span recorded before this.
-    SPAN_PLANNER_PLAN: SpanContract(
-        version=10,
-        attributes=frozenset({"model", "replan_trigger", "plan", "plan_source",
-                              "skill", "skill_args", "skill_notes", "skill_fallback",
-                              "skill_refusal_asked", "argument_check_not_in_request"}),
+    # v9 (SPAN_CONTRACT_VERSION v63) One step of a run (was fw.agent.step with its fw.agent.tool_call, and
+    # fw.skill.answer): `run_by` code,
+    # agent (the agent model chose it; its model call is the step's child) or model (a planning command's deferred
+    # answer); `kind` command, ask, finish, tool or answer; `plan_span_id` the fw.plan it carries out, when a plan was
+    # made for its part; the agent step's v8 keys (minus `by_code`); the command it dispatched (`raw_command`,
+    # `response_text`, `success`, its call id and contexts, was the tool call's); for an answer step the `command` and
+    # `phase` whose facts it writes from. Every opener writes the one record (``step_record``).
+    SPAN_STEP: SpanContract(
+        version=9,
+        attributes=frozenset(
+            {
+                "step_index", "run_by", "kind", "plan_span_id", "thought", "tool_name", "tool_args", "observation",
+                "clarification", "recovered", "tool_error", "error_type", "repaired_tool_name", "folded_command",
+                "policy_mode", "policy_outcome", "policy_source", "policy_table_version", "policy_intent",
+                "policy_requests", "policy_judgement", "answer", "raw_command", "response_text", "success",
+                ATTR_COMMAND_CALL_ID, ATTR_CONTEXT_BEFORE, ATTR_CONTEXT_AFTER, "command", "phase", "phase_index",
+                "phase_count",
+            }
+        ),
     ),
-    SPAN_PLANNER_REPLAN: SpanContract(
-        version=10,
-        attributes=frozenset({"model", "replan_trigger", "plan", "plan_source",
-                              "skill", "skill_args", "skill_notes", "skill_fallback",
-                              "skill_refusal_asked", "argument_check_not_in_request"}),
+    # v11 (SPAN_CONTRACT_VERSION v63) A plan of the text planner (was fw.planner.plan and fw.planner.replan, v10 keys), a child of the part it
+    # plans for: `trigger` (initial, or what planned again: ask_user_response, parameter_extraction_error, ...; was
+    # `replan_trigger`), `command`, `command_args`, `command_notes`, `command_fallback`, `command_refusal_asked` (were
+    # `skill*`). The steps it led to are its siblings and carry its id (`plan_span_id`).
+    SPAN_PLAN: SpanContract(
+        version=11,
+        attributes=frozenset({"model", "trigger", "plan", "plan_source",
+                              "command", "command_args", "command_notes", "command_fallback",
+                              "command_refusal_asked", "argument_check_not_in_request"}),
     ),
     # One distillation pass. `fw.pass` is the membership stamp every descendant
     # inherits through ancestry; the rest is the pass's OWN content, recorded
@@ -1033,12 +999,16 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
     # and `handed_on` (see the v52 note above).
     # v11 (SPAN_CONTRACT_VERSION v53): `remote_failed`, the remote model's failed call (see the v53 note above).
     # v12 (SPAN_CONTRACT_VERSION v58): `part`, the 1-based part of the turn a plan-path decision is for (see the v58 note).
-    SPAN_NLU_INTENT: SpanContract(
-        version=13,
+    # v14 (SPAN_CONTRACT_VERSION v63) was `fw.nlu.intent`: `stage` is `reads_reply` (the span reads the reply to a which-command
+    # question) and `question_kind` (`ambiguity` or `misunderstanding` when it does); `engine` is `decided_by` (`name`,
+    # `fuzzy`, `foreign_name`, `local`, `remote`, `question`, `reply`).
+    SPAN_INTENT: SpanContract(
+        version=14,
         attributes=frozenset(
             {
                 "context",
-                "stage",
+                "reads_reply",
+                "question_kind",
                 "utterance",
                 "matcher_layer",
                 "known_name_foreign_context",
@@ -1052,7 +1022,7 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
                 "candidate_count",
                 "classifier",
                 "classifier_signal_version",
-                "engine",
+                "decided_by",
                 "engine_fallback",
                 "engine_chain",
                 "matcher",
@@ -1069,7 +1039,9 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
             }
         ),
     ),
-    SPAN_NLU_PARAM_EXTRACTION: SpanContract(
+    SPAN_PARAMETERS: SpanContract(
+        # v16 (SPAN_CONTRACT_VERSION v63) was `fw.nlu.param_extraction`; `reads_reply`: the extraction reads the
+        # reply to a parameter question (`retry_round`).
         # v2 (fix-8ko2): `retry_round_ordinal` joins the boolean `retry_round`.
         # The flag says an extraction resumed from stored parameters; the
         # ordinal says which attempt it was, which a consumer previously had to
@@ -1121,7 +1093,7 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
         # v13 (SPAN_CONTRACT_VERSION v57): `argument_check_not_in_request` (see the v57 note). Absent on earlier versions.
         # v14 (SPAN_CONTRACT_VERSION v58): `part`, the 1-based part of the turn a plan-path extraction is for (see the v58 note).
         # v15 (SPAN_CONTRACT_VERSION v60): `argument_left_empty` (see the v60 note). Absent on earlier versions.
-        version=15,
+        version=16,
         attributes=frozenset(
             {
                 "command_name",
@@ -1151,11 +1123,14 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
                 "argument_check_not_in_request",
                 "part",
                 "argument_left_empty",
+                "reads_reply",
             }
         ),
     ),
+    # v3 (SPAN_CONTRACT_VERSION v63): `role` is always set (`JEV` for the remote decision model), and `purpose` says
+    # what a call is for when its caller says (`conversation_summary`).
     SPAN_LLM_CALL: SpanContract(
-        version=2,
+        version=3,
         attributes=frozenset(
             {
                 "module",
@@ -1184,6 +1159,9 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
                 "outcome",
                 "timed_out",
                 "exception_type",
+                # (bd fix-qjne.34 step 7) what the call is for, when its caller says (``model_purpose``):
+                # `conversation_summary` for the turn's summary.
+                "purpose",
             }
         ),
     ),
@@ -1386,31 +1364,23 @@ def cap_attr_value(value: Any) -> Any:
     }
 
 
-def split_record_attribute(record: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
-    """The turn span's ``subtask_split`` (SPAN_CONTRACT_VERSION v56) from the split recorder's dict, or None when the
-    turn was not split. Every text is capped like any attribute string (``cap_attr_value``)."""
-    if not record:
-        return None
-    out: dict[str, Any] = {
-        "request": cap_attr_value(record["request"]),
-        "raw": [cap_attr_value(text) for text in record["raw"]],
-        "merged": [cap_attr_value(text) for text in record["merged"]],
-        "attempts": record["attempts"],
+def split_stage_attributes(record: Optional[dict[str, Any]]) -> dict[str, Any]:
+    """The ``fw.split`` span's attributes from the split recorder's dict (``workflow_agent.recording_split``); every key
+    None when the request was not split. Every text is capped like any attribute string (``cap_attr_value``). The gate's
+    verdict and the merge's doubts are their own spans' (``fw.split.gate``, ``fw.split.merge``)."""
+    record = record or {}
+    merged = record.get("merged")
+    return {
+        "request": cap_attr_value(record["request"]) if record.get("request") is not None else None,
+        "raw": [cap_attr_value(text) for text in record["raw"]] if record.get("raw") is not None else None,
+        "merged": [cap_attr_value(text) for text in merged] if merged is not None else None,
+        "rules": list(record.get("changed_by") or []) or None,
+        "failed": record.get("failed"),
+        "attempts": record.get("attempts"),
+        "prompt_digest": record.get("prompt_digest"),
+        "prompt_source": record.get("prompt_source"),
+        "parts": len(merged) if merged is not None else None,
     }
-    if record.get("changed_by"):
-        out["changed_by"] = list(record["changed_by"])
-    if record.get("doubts"):
-        # a rewrite the merge did not make because it would have dropped a name the part carried (bd fix-ftdl.12)
-        out["doubts"] = [{"part": cap_attr_value(d.get("part", "")), "missing": list(d.get("missing") or [])}
-                         for d in record["doubts"]]
-    if record.get("failed"):
-        out["failed"] = record["failed"]
-    if record.get("prompt_digest"):
-        out["prompt_digest"] = record["prompt_digest"]
-        out["prompt_source"] = record["prompt_source"]
-    if record.get("gate"):
-        out["gate"] = dict(record["gate"])
-    return out
 
 
 def _capped(attributes: Optional[dict[str, Any]]) -> dict[str, Any]:
@@ -1453,8 +1423,17 @@ def get_experiment_claim(host: Any) -> dict[str, Any]:
     return _resolve(host, "observability_experiment_claim") or {}
 
 
+def _host_stack(host: Any) -> Optional[list]:
+    return _resolve(host, "trace_span_stack") if host is not None else None
+
+
 def _get_stack(host: Any) -> Optional[list]:
-    return _resolve(host, "trace_span_stack")
+    """The parenting stack of *host* in this thread: a pooled call's own copy (``traced_call``), else the host's."""
+    stack = _host_stack(host)
+    forked = _forked_stack.get()
+    if forked is not None and stack is not None and forked[0] is stack:
+        return forked[1]
+    return stack
 
 
 def get_frame_alias(host: Any) -> str:
@@ -1526,10 +1505,14 @@ def start_span(
         if not turn_key:
             return None
 
+        if name in WORK_SPAN_NAMES and _resolve(host, "trace_quiet"):
+            return None     # the framework's own planning command runs: its work is recorded as its stage's (``quiet``)
+
         stack = _get_stack(host)
         if parent_span_id is None:
             if stack:
                 parent_span_id = stack[-1].span_id
+                stack[-1]._fw_has_children = True       # read by ``had_children`` (a trivial span is discarded)
             elif name != SPAN_TURN:
                 parent_span_id = root_span_id(turn_key)
 
@@ -1602,6 +1585,498 @@ def end_span(
             _emit(sink, span)
     except Exception as exc:
         logger.warning(f"end_span({span.name}) failed: {exc!r}")
+
+
+def discard_span(host: Any, span: Optional[Span]) -> None:
+    """Drop *span*, opened and never to be emitted: it leaves the parenting stack (bd fix-qjne.34 step 6: a per-command
+    decision that decided nothing is not written; its summary is on the command's span, ``note``)."""
+    if span is not None:
+        _without(_get_stack(host), span)
+
+
+def had_children(span: Optional[Span]) -> bool:
+    """Whether a span was opened under *span* through the parenting stack (a model call, a nested span)."""
+    return bool(getattr(span, "_fw_has_children", False))
+
+
+def is_command_decision(host: Any, span: Optional[Span]) -> bool:
+    """Whether *span* (a decision or a reading of values) is a command's own: it runs inside an open ``fw.command``
+    whose facts bag takes its summary (``facts_for``), the command a step dispatched or the direct ("/") path's command
+    (whose decision is filed under its part). Such a record is written only when it decided something (bd fix-qjne.34
+    decision b); its facts are on the command's span (``resolved_by``, ``parameters_read_by``, ``parameters_valid``)."""
+    if span is None or (_fact_bags.get() or {}).get(SPAN_COMMAND) is None:
+        return False
+    return any(each.name == SPAN_COMMAND for each in (_get_stack(host) or ()))
+
+
+# Facts that code several frames below a span hands to it (bd fix-qjne.34 step 6): the command a step dispatched, how a
+# command was resolved. The span's opener binds a bag for its name (``facts_for``) and writes what the bag holds when it
+# closes; the code below fills it (``note``), and does nothing when no such span is open.
+_fact_bags: contextvars.ContextVar = contextvars.ContextVar("fw_trace_fact_bags", default=None)
+
+
+@contextlib.contextmanager
+def facts_for(name: str) -> Iterator[dict]:
+    """A bag for the facts of the span *name* the block runs under (the innermost one of that name)."""
+    bag: dict = {}
+    bags = dict(_fact_bags.get() or {})
+    bags[name] = bag
+    token = _fact_bags.set(bags)
+    try:
+        yield bag
+    finally:
+        _fact_bags.reset(token)
+
+
+def note(name: str, **facts: Any) -> None:
+    """Add *facts* to the bag of the innermost open span *name* (``facts_for``); nothing when there is none."""
+    bag = (_fact_bags.get() or {}).get(name)
+    if bag is not None:
+        bag.update(facts)
+
+
+# What a model call is for (step 7): its caller says (``model_purpose``), and the call's span carries it.
+_purpose: contextvars.ContextVar = contextvars.ContextVar("fw_trace_model_purpose", default=None)
+
+
+@contextlib.contextmanager
+def model_purpose(purpose: str) -> Iterator[None]:
+    """The model calls of the block are for *purpose* (their span's ``purpose``)."""
+    token = _purpose.set(purpose)
+    try:
+        yield
+    finally:
+        _purpose.reset(token)
+
+
+def current_purpose() -> Optional[str]:
+    return _purpose.get()
+
+
+# Whose model a call is (the span's `role`): the caller names its own model setting (``LLM_PLANNER``, ``JEV``, ...)
+# where it makes the call (``model_role``, ``dspy_utils.role_context``), so the span says it whatever LM object the
+# caller holds; an LM ``get_lm`` built carries the same name as its tag, read when no caller named one.
+_role: contextvars.ContextVar = contextvars.ContextVar("fw_trace_model_role", default=None)
+
+
+@contextlib.contextmanager
+def model_role(role: str) -> Iterator[None]:
+    """The model calls of the block are *role*'s (their span's ``role``): the model setting's name."""
+    token = _role.set(role)
+    try:
+        yield
+    finally:
+        _role.reset(token)
+
+
+def current_role() -> Optional[str]:
+    return _role.get()
+
+
+def step_record(*, step_index: Any = None, run_by: Any = None, kind: Any = None, plan_span_id: Any = None,
+                thought: Any = None, tool_name: Any = None, tool_args: Any = None, raw_command: Any = None,
+                response_text: Any = None, success: Any = None, command_call_id: Any = None,
+                context_before: Any = None, context_after: Any = None, command: Any = None, phase: Any = None,
+                phase_index: Any = None, phase_count: Any = None, error_type: Any = None) -> dict[str, Any]:
+    """The ``fw.step`` record every opener of a step writes (a step the agent loop runs, a planning command's answer
+    step), so one contract describes them: the given facts that are not None. The keys only a step's close writes are
+    listed with None so that every opener declares the one key set (a later ``end_span`` adds those its step has)."""
+    return {key: value for key, value in {
+        "step_index": step_index, "run_by": run_by, "kind": kind, "plan_span_id": plan_span_id, "thought": thought,
+        "tool_name": tool_name, "tool_args": tool_args, "observation": None, "clarification": None,
+        "recovered": None, "tool_error": None, "error_type": error_type, "repaired_tool_name": None,
+        "folded_command": None, "policy_mode": None, "policy_outcome": None, "policy_source": None,
+        "policy_table_version": None, "policy_intent": None, "policy_requests": None, "policy_judgement": None,
+        "answer": None, "raw_command": raw_command, "response_text": response_text, "success": success,
+        ATTR_COMMAND_CALL_ID: command_call_id, ATTR_CONTEXT_BEFORE: context_before,
+        ATTR_CONTEXT_AFTER: context_after, "command": command, "phase": phase, "phase_index": phase_index,
+        "phase_count": phase_count,
+    }.items() if value is not None}
+
+
+# ----------------------------------------------------------------------
+# The turn's stages and parts (bd fix-qjne.34, design section 4.2)
+# ----------------------------------------------------------------------
+#
+# A stage span (``STAGE_SPAN_NAMES``) and a part span (``STAGE_OF_PART``) have a deterministic id, so the turn has ONE
+# of each however many times it waits for the user and in however many processes it runs: a wait closes the open stage
+# with the turn's status (``awaiting_user``) and the resumed segment opens the same id again (the store keeps the first
+# start and takes the last close). Children reach them by id (the explicit parent) or, while they are open in this
+# process, through the parenting stack: an open stage is pushed on the host's stack, and a part is pushed on the stack
+# of the thread that works on it (a pooled worker's own, ``traced_call``) for as long as ``part_span`` runs.
+#
+# Opening is this module's (the spans carry no emitter attribute when they open); every close is a rebuild by the host
+# (``_trace_close_stage(name, part, span, status)``, which calls ``close_stage_span`` with the attributes it computes
+# from the turn's saved state), so a close in a later process does not lose an earlier segment's facts.
+
+
+@dataclass
+class TurnStages:
+    """The stage bookkeeping of the host's turn: the open stage, the spans open in this process (by ``name:part``),
+    how many times each was opened (saved with the turn), the stage that was open when the turn began to wait (opened
+    again when it resumes), and the direct path's part (the "/" path has one part and no pool)."""
+
+    current: Optional[str] = None
+    spans: dict[str, Span] = field(default_factory=dict)
+    segments: dict[str, int] = field(default_factory=dict)
+    waiting_in: Optional[str] = None
+    waiting_parts: list[str] = field(default_factory=list)
+    direct_part: Optional[str] = None
+    #: The part of the open stage its work runs for now (``enter_part``: the run's parts, one after another).
+    current_part: Optional[str] = None
+    #: The parts closed before their stage (``enter_part`` closes the one before), not closed again with it.
+    closed: list[str] = field(default_factory=list)
+    #: Facts of a part the code that ran it noted (``note_part``), written by the part's rebuilder.
+    facts: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: The id of the last plan made for the current part (``note_plan``), carried by the steps that follow it.
+    last_plan: Optional[str] = None
+    #: The number (1-based, as the turn's split numbered it) of each part a stage's work runs, by part span name, when
+    #: they are not 1, 2, ...: the run leaves out the parts dropped while the turn was resolved (``number_parts``).
+    numbers: dict[str, list[int]] = field(default_factory=dict)
+    #: Whether the turn took the direct ("/") path (``open_direct_part``): its ``fw.turn`` says ``path`` direct.
+    direct: bool = False
+    lock: Any = field(default_factory=threading.Lock, repr=False, compare=False)
+
+    def to_state(self) -> dict[str, Any]:
+        return {"segments": dict(self.segments), "waiting_in": self.waiting_in,
+                "waiting_parts": list(self.waiting_parts), "current_part": self.current_part,
+                "closed": list(self.closed), "facts": {key: dict(value) for key, value in self.facts.items()},
+                "last_plan": self.last_plan, "numbers": {key: list(value) for key, value in self.numbers.items()},
+                "direct": self.direct}
+
+    @classmethod
+    def from_state(cls, state: Any) -> "TurnStages":
+        state = state if isinstance(state, dict) else {}
+        return cls(segments={str(k): int(v) for k, v in (state.get("segments") or {}).items()},
+                   waiting_in=state.get("waiting_in"), waiting_parts=list(state.get("waiting_parts") or []),
+                   current_part=state.get("current_part"), closed=list(state.get("closed") or []),
+                   facts={str(k): dict(v) for k, v in (state.get("facts") or {}).items() if isinstance(v, dict)},
+                   last_plan=state.get("last_plan"),
+                   numbers={str(k): [int(n) for n in v] for k, v in (state.get("numbers") or {}).items()
+                            if isinstance(v, list)},
+                   direct=bool(state.get("direct")))
+
+
+def stage_span_id(turn_key: str, name: str, part: int = 0) -> str:
+    """The deterministic id of a stage span (*part* 0) or of a part span."""
+    return deterministic_span_id(turn_key, name, part)
+
+
+def _stages(host: Any) -> Optional[TurnStages]:
+    return _resolve(host, "trace_stages") if host is not None else None
+
+
+def _stage_key(name: str, part: int) -> str:
+    return f"{name}:{part}"
+
+
+def _key_parts(key: str) -> tuple[str, int]:
+    name, _, part = key.rpartition(":")
+    return name, int(part)
+
+
+def _without(stack: Optional[list], span: Span) -> None:
+    """Remove *span* (the object, not an equal one) from *stack*: its last entry."""
+    if stack is None:
+        return
+    for index in range(len(stack) - 1, -1, -1):
+        if stack[index] is span:
+            del stack[index]
+            return
+
+
+def _open_stage_span(host: Any, stages: TurnStages, name: str, part: int) -> Optional[Span]:
+    """The open span of *name* (and *part*) in this process, opened (and counted) when it is not."""
+    turn_key = get_turn_key(host)
+    key = _stage_key(name, part)
+    with stages.lock:
+        if key in stages.spans:
+            return stages.spans[key]
+        parent = root_span_id(turn_key) if not part else stage_span_id(turn_key, STAGE_OF_PART[name])
+        span = start_span(host, name, span_id=stage_span_id(turn_key, name, part), parent_span_id=parent,
+                          attributes={"part": part} if part else None, use_stack=False, emit_open=True)
+        if span is not None:
+            stages.spans[key] = span
+            stages.segments[key] = stages.segments.get(key, 0) + 1
+        return span
+
+
+def _live(host: Any) -> Optional[TurnStages]:
+    """The host's stages when a turn is being recorded, else None."""
+    stages = _stages(host)
+    if stages is None or get_sink(host) is None or not get_turn_key(host):
+        return None
+    return stages
+
+
+def enter_stage(host: Any, name: str, *, push: Optional[bool] = None) -> None:
+    """Make *name* the turn's open stage: the stage open before it (and its parts) closes, and *name* opens with its
+    deterministic id under the turn root, pushed on the host's stack when it is one of ``PUSHED_STAGES`` and *push* is
+    not False (the "/" path passes False: its command spans keep their own parents). Nothing when it is already the open
+    stage, or nothing is recorded."""
+    push = name in PUSHED_STAGES if push is None else push
+    stages = _live(host)
+    if stages is None or (stages.current == name and _stage_key(name, 0) in stages.spans):
+        return
+    close_stages(host, STATUS_OK)
+    span = _open_stage_span(host, stages, name, 0)
+    stages.current = name
+    stack = _host_stack(host)
+    if push and span is not None and stack is not None:
+        stack.append(span)
+
+
+def resume_stage(host: Any) -> None:
+    """Open again the stage the turn was waiting in, and the parts of it that were open (a reply resumes them); the
+    part its work ran for goes back on the host's stack. Nothing when it was waiting in none."""
+    stages = _live(host)
+    if stages is not None and stages.waiting_in and stages.current is None:
+        name, stages.waiting_in = stages.waiting_in, None
+        parts, stages.waiting_parts = stages.waiting_parts, []
+        enter_stage(host, name)
+        for key in parts:
+            span = _open_stage_span(host, stages, *_key_parts(key))
+            stack = _host_stack(host)
+            if key == stages.current_part and span is not None and stack is not None:
+                stack.append(span)
+
+
+def enter_part(host: Any, name: str, part: int) -> None:
+    """Make part *part* (1-based) the part the open stage's work runs for: the part before it closes (its facts are
+    complete), and this one opens with its deterministic id, on the host's stack until its stage closes or the next
+    part is entered. Nothing when its stage is not the open stage or it is already the current part."""
+    stages = _live(host)
+    if stages is None or not part or stages.current != STAGE_OF_PART.get(name):
+        return
+    key = _stage_key(name, part)
+    if stages.current_part == key and key in stages.spans:
+        return
+    if stages.current_part is not None and stages.current_part != key and stages.current_part in stages.spans:
+        previous = stages.current_part
+        _close_one(host, stages, *_key_parts(previous), STATUS_OK)
+        stages.closed.append(previous)
+    if key in stages.closed:
+        stages.closed.remove(key)
+    stages.current_part, stages.last_plan = key, None
+    span = _open_stage_span(host, stages, name, part)
+    stack = _host_stack(host)
+    if span is not None and stack is not None:
+        stack.append(span)
+
+
+def note_part(host: Any, name: str, part: Optional[int] = None, **facts: Any) -> None:
+    """Keep *facts* of part *part* of span *name* (the current part when *part* is None) for its rebuilder
+    (``part_facts``); saved with the turn, so a close in a later process has them."""
+    stages = _live(host)
+    if stages is None:
+        return
+    key = _stage_key(name, part) if part else stages.current_part
+    if key is None or _key_parts(key)[0] != name:
+        return
+    stages.facts.setdefault(key, {}).update(facts)
+
+
+def part_facts(host: Any, name: str, part: int) -> dict[str, Any]:
+    """The facts noted for part *part* of span *name* (``note_part``)."""
+    stages = _stages(host)
+    return dict(stages.facts.get(_stage_key(name, part)) or {}) if stages is not None else {}
+
+
+def number_parts(host: Any, name: str, numbers: Optional[list[int]]) -> None:
+    """The parts of span *name* the stage's work runs are, in order, the turn's parts *numbers* (None: 1, 2, ...)."""
+    stages = _live(host)
+    if stages is not None:
+        if numbers:
+            stages.numbers[name] = [int(number) for number in numbers]
+        else:
+            stages.numbers.pop(name, None)
+
+
+def part_number(host: Any, name: str, index: int) -> int:
+    """The number of the part of span *name* the stage's work runs as its *index*-th (0-based): the turn's own number
+    for it (``number_parts``), else *index* + 1."""
+    stages = _stages(host)
+    numbers = stages.numbers.get(name) if stages is not None else None
+    return numbers[index] if numbers and 0 <= index < len(numbers) else index + 1
+
+
+def noted_parts(host: Any, name: str) -> list[int]:
+    """The numbers of the parts of span *name* that have noted facts (``note_part``), opened or not, in order."""
+    stages = _stages(host)
+    keys = list(stages.facts) if stages is not None else []
+    return sorted(part for key in keys for span_name, part in [_key_parts(key)] if span_name == name and part)
+
+
+def part_numbers(host: Any, name: str) -> list[int]:
+    """The numbers of the parts of span *name* opened in this turn (in any process), in order."""
+    stages = _stages(host)
+    keys = list(stages.segments) if stages is not None else []
+    return sorted(part for key in keys for span_name, part in [_key_parts(key)] if span_name == name and part)
+
+
+def current_part_id(host: Any) -> Optional[str]:
+    """The id of the part the open stage's work runs for now (``enter_part``), or None."""
+    stages = _live(host)
+    if stages is None or stages.current_part is None or stages.current_part not in stages.spans:
+        return None
+    return stages.spans[stages.current_part].span_id
+
+
+def note_plan(host: Any, span: Optional[Span]) -> None:
+    """*span* (a ``fw.plan``) is the plan the current part's next steps carry out (``current_plan_id``)."""
+    stages = _live(host)
+    if stages is not None and span is not None:
+        stages.last_plan = span.span_id
+
+
+def current_plan_id(host: Any) -> Optional[str]:
+    """The id of the last plan made for the current part, or None."""
+    stages = _live(host)
+    return stages.last_plan if stages is not None else None
+
+
+@contextlib.contextmanager
+def part_span(host: Any, name: str, part: Optional[int]) -> Iterator[Optional[Span]]:
+    """The part span *name* of part *part* (1-based) open, and on this thread's stack for the block, when its stage is
+    the open stage; else nothing (the block's spans parent as they would). The span stays open until its stage closes."""
+    stages = _live(host)
+    if stages is None or not part or stages.current != STAGE_OF_PART.get(name):
+        yield None
+        return
+    span = _open_stage_span(host, stages, name, part)
+    stack = _get_stack(host)
+    if span is not None and stack is not None:
+        stack.append(span)
+    try:
+        yield span
+    finally:
+        if span is not None:
+            _without(stack, span)
+
+
+def open_direct_part(host: Any, name: str) -> None:
+    """The direct ("/") path's one part: part 1 of *name*, open, not pushed; its decisions find it by
+    ``direct_part_id``."""
+    stages = _live(host)
+    if stages is None or stages.current != STAGE_OF_PART.get(name):
+        return
+    if _open_stage_span(host, stages, name, 1) is not None:
+        stages.direct_part = _stage_key(name, 1)
+        stages.direct = True
+
+
+def turn_path(host: Any) -> Optional[str]:
+    """The ``fw.turn``'s ``path``: ``direct`` when the turn took the direct ("/") path (a person's typed command, an
+    action), ``plan`` when it went through the turn's stages otherwise, None when it opened no stage."""
+    stages = _stages(host)
+    if stages is None or not stages.segments:
+        return None
+    return "direct" if stages.direct else "plan"
+
+
+def enter_direct_run(host: Any, command: Optional[str]) -> None:
+    """The direct ("/") path bound its one command *command*: its resolve stage closes (its part bound to it), and the
+    run opens with its one part (not pushed: the command's span opened before it, ``direct_part_id`` finds it).
+    Nothing on any other path."""
+    stages = _live(host)
+    if stages is None or stages.direct_part is None or stages.current != SPAN_RESOLVE:
+        return
+    note_part(host, SPAN_RESOLVE_PART, 1, command=command)
+    enter_stage(host, SPAN_RUN, push=False)
+    open_direct_part(host, SPAN_RUN_PART)
+    note_part(host, SPAN_RUN_PART, 1, direct=True, command=command)
+
+
+def direct_part_id(host: Any) -> Optional[str]:
+    """The id of the direct path's open part, when its stage is the open stage; else None (the caller's span then
+    parents as it would)."""
+    stages = _live(host)
+    if stages is None or stages.direct_part is None or stages.direct_part not in stages.spans:
+        return None
+    name, part = _key_parts(stages.direct_part)
+    if stages.current != STAGE_OF_PART.get(name):
+        return None
+    return stages.spans[stages.direct_part].span_id
+
+
+def part_span_id(host: Any, name: str, part: int) -> Optional[str]:
+    """The deterministic id of part *part*'s span *name* (whether open or not), or None with no turn."""
+    turn_key = get_turn_key(host)
+    return stage_span_id(turn_key, name, part) if turn_key else None
+
+
+def open_stage_id(host: Any) -> Optional[str]:
+    """The id of the turn's open stage span, or None."""
+    stages = _live(host)
+    if stages is None or stages.current is None:
+        return None
+    return stage_span_id(get_turn_key(host), stages.current)
+
+
+def leave_stage(host: Any, name: str) -> None:
+    """Close *name* (and its parts) when it is the open stage, leaving no stage open."""
+    stages = _live(host)
+    if stages is not None and stages.current == name:
+        close_stages(host, STATUS_OK)
+
+
+def close_stages(host: Any, status: str, *, waiting: bool = False) -> None:
+    """Close the open stage and every part of it opened in this turn (in any process), each rebuilt by the host
+    (``_trace_close_stage``) with *status*. *waiting*: the turn now waits for the user, and the stage opens again when
+    it resumes (``resume_stage``)."""
+    stages = _live(host)
+    if stages is None or stages.current is None:
+        return
+    name, stages.current = stages.current, None
+    stages.direct_part = None
+    if waiting:
+        stages.waiting_in = name
+        stages.waiting_parts = [key for key in stages.spans if key != _stage_key(name, 0)]
+    else:
+        stages.current_part = None
+    keys = [key for key in stages.segments if STAGE_OF_PART.get(_key_parts(key)[0]) == name
+            and key not in stages.closed]
+    keys.sort(key=lambda key: _key_parts(key)[1])
+    for key in [*keys, _stage_key(name, 0)]:
+        span_name, part = _key_parts(key)
+        _close_one(host, stages, span_name, part, status)
+
+
+def _close_one(host: Any, stages: TurnStages, name: str, part: int, status: str) -> None:
+    span = stages.spans.pop(_stage_key(name, part), None)
+    if span is None:
+        turn_key = get_turn_key(host)
+        claim = get_experiment_claim(host)
+        parent = root_span_id(turn_key) if not part else stage_span_id(turn_key, STAGE_OF_PART[name])
+        span = Span(span_id=stage_span_id(turn_key, name, part), trace_id=turn_key, name=name, parent_span_id=parent,
+                    channel_id=get_channel_id(host), experiment_id=claim.get("experiment_id"),
+                    task_id=claim.get("task_id"), attempt=claim.get("attempt"), claim_epoch=claim.get("epoch"),
+                    server_incarnation=claim.get("server_incarnation"))
+    _without(_host_stack(host), span)
+    closer = _resolve(host, "_trace_close_stage")
+    try:
+        if callable(closer):
+            closer(name, part, span, status)
+        else:
+            end_span(host, span, status=status)
+    except Exception as exc:  # a close must never fail a turn
+        logger.warning(f"closing the {name} span failed: {exc!r}")
+
+
+def stage_segments(host: Any, name: str, part: int = 0) -> dict[str, Any]:
+    """``resumed`` and ``segments`` of a stage or part span: how many times it was opened in this turn."""
+    stages = _stages(host)
+    count = (stages.segments.get(_stage_key(name, part), 0) if stages is not None else 0) or 1
+    return {"resumed": count > 1, "segments": count}
+
+
+def close_stage_span(host: Any, name: str, span: Span, *, status: str, attributes: dict[str, Any],
+                     command_name: Optional[str] = None) -> None:
+    """Close the stage or part span *span* (a ``name`` span) with the host's *attributes*: the host's rebuilders call
+    this, one per span name, so each name's keys are written in one place."""
+    if span.name != name:
+        raise ValueError(f"close_stage_span({name}) was handed a {span.name} span")
+    end_span(host, span, status=status, attributes=attributes, command_name=command_name)
 
 
 # ----------------------------------------------------------------------

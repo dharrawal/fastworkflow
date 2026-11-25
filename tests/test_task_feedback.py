@@ -47,7 +47,7 @@ def _seed_task(store, *, experiment_id="exp-1", task_id="task-1", attempts=(1, 2
                 conn.execute(
                     "INSERT INTO spans(span_id,trace_id,name,kind,start_ns,status,attributes) "
                     "VALUES(?,?,?,?,?,?,?)",
-                    (f"span-{key}", key, "fw.planner.plan", "internal", 1, "ok", "{}"),
+                    (f"span-{key}", key, "fw.plan", "internal", 1, "ok", "{}"),
                 )
                 keys.append(key)
     return keys
@@ -708,7 +708,7 @@ def read_only_copy(tmp_path):
             conn.execute(
                 "INSERT INTO spans(span_id,trace_id,name,kind,start_ns,status,attributes) "
                 "VALUES(?,?,?,?,?,?,?)",
-                (f"span-recorded-t{ordinal}", key, "fw.planner.plan", "internal",
+                (f"span-recorded-t{ordinal}", key, "fw.plan", "internal",
                  1, "ok", "{}"),
             )
     for index, (kind, spans, label, provenance, comment, category, subcategory) in (

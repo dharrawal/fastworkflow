@@ -1,8 +1,8 @@
 ---
 name: design-context-models
 description: >-
-  Design and tune the context inheritance (`base`) model of a fastWorkflow command tree, and the
-  enclosing record each context's `get_parent` returns, so intent routing stays accurate as the tree
+  Design and tune the context inheritance (`inherits`) of a fastWorkflow command tree, and the
+  enclosing record each context's `get_parent` returns (declared as `parents`), so intent routing stays accurate as the tree
   grows and a task takes the
   fewest commands. Covers deriving the containment graph from code, sizing base contexts to the
   parameter producers commands actually declare, removing duplicate commands, writing seed
@@ -16,16 +16,23 @@ description: >-
 
 ## The mechanism being optimized
 
-Two sources, two unrelated effects. Confusing them makes every later decision guesswork.
+Two declarations on each context's `class Context` (in `_commands/<Context>/_<Context>.py`), two
+unrelated effects. Confusing them makes every later decision guesswork.
 
-| Source | Key | Effect |
-|---|---|---|
-| `_commands/context_inheritance_model.json` | `base` | Adds the base context's commands to the child's **surface** (transitively). An own command with the same leaf name hides the inherited one. |
-| `get_parent` in `_commands/<Context>/_<Context>.py` | the enclosing record | **The only parent source.** Read from the live record at run time. The root record has no parent and the framework never asks it: its context class needs no `get_parent`. |
+| Declaration | Effect |
+|---|---|
+| `inherits = ["Base", ...]` | Adds the base context's commands to the context's **surface** (transitively). An own command with the same leaf name hides the inherited one. `"*"` adds the global commands. |
+| `get_parent` with `parents = ["Ctx", ...]` | The enclosing record: `get_parent` returns it from the live record at run time, and `parents` names every context it can be (the context itself when records nest). The root record has no parent and the framework never asks it: its context class needs neither. No `parents` is a top-level context. |
 
-There is no `context_hierarchy_model.json`. A workflow that still has one loads, logs a warning that
-the file is ignored and can be deleted, and routes the same way. `fastworkflow build` does not
-generate it.
+Both are list literals read without importing the file and checked at load (names are contexts, no
+duplicates, no self-inheritance or cycle; `parents` exactly when there is `get_parent`; a
+`@descends_to` target's `parents` must name the moving command's context). At run time a
+`get_parent` that returns a record of an undeclared context raises `MissingGetParentError`.
+`fastworkflow command preview` draws both, with the commands that enter each context, in the
+generated `_object_models/<workflow>.md`: read it instead of collecting the declarations by hand.
+`_commands/context_inheritance_model.json` is a removed spelling that stops the workflow
+(`fastworkflow migrate-contexts <workflow>` moves it into `inherits`; write `parents` by hand), and a
+`context_hierarchy_model.json` is ignored with a warning that it can be deleted.
 
 A context is named after its record's class, and its commands are the files in `_commands/<Context>/`.
 Files directly under `_commands/` are the global context `*`.
@@ -107,12 +114,14 @@ names a planning command is still confirmed by the remote model or asked about b
 Moving or renaming a planning command changes its qualified name, exactly as for a command, so its
 `from_command_output` edges and previews move with it.
 
-## Rule 1: keep `get_parent` honest; there is no second copy to maintain
+## Rule 1: keep `get_parent` honest, and `parents` beside it
 
-The parent of a context is what its `get_parent` returns for the live record. There is no JSON copy
-to drift from it. Check each `get_parent` against the record it should return: a record's parent is
-the record that holds it, and the root writes none (the framework never asks the root). In the
-`library` example `Book.get_parent` returns `record.library`, and `Library` has no `get_parent`.
+The parent of a record is what its context's `get_parent` returns for the live record; `parents`
+lists the contexts that can be, and the climb fails when `get_parent` returns a record of any other.
+Check each `get_parent` against the record it should return: a record's parent is the record that
+holds it, and the root writes none (the framework never asks the root). In the `library` example
+`Book` declares `parents = ["Library"]` and its `get_parent` returns `record.library`, and `Library`
+has neither.
 
 ## Rule 1a: navigation is declared once, with `descends_to`, on the command
 
@@ -120,8 +129,9 @@ A command that moves the workflow into another context (by assigning `workflow.r
 on its own class: `@fastworkflow.descends_to("<Context>")` on its `ResponseGenerator` or
 `PlanGenerator`. It is an unconditional move: there is no `when_parameter` (it is removed and fails
 the load); a command that moves only sometimes still assigns `workflow.record` only when it moves.
-`enter_command` or `enter_commands` on a context class is a load error that names the fix. A command may move the
-session only onto a context it declares (or one that inherits from it in `context_inheritance_model.json`); a move onto
+`enter_command` or `enter_commands` on a context class is a load error that names the fix, and so
+is a target whose `parents` name neither the command's context nor a context it inherits. A command may move the
+session only onto a context it declares (or one that inherits from it, `inherits`); a move onto
 any other context, another record of its own context included, fails the command and the record is put back. Planning, the
 run's listing and the "how to get there" reply read only these declarations.
 
@@ -148,15 +158,16 @@ that still defines the removed `instance_label` classmethod fails the load.
 
 The hooks that save and restore a session (`get_state`, `from_state`, `state_version`, `get_locator`,
 `find_by_locator`) live on the same class. When several context classes need the same ones, write them once on
-a plain base class in a helper module whose name starts with `_`, which the command scanner ignores (for
-example `_commands/_checkpoint.py` with `class CheckpointHooks:`), and write `from .._checkpoint import
-CheckpointHooks` and `class Context(CheckpointHooks):` in each callback file. The framework reads every member
+a plain base class in a helper module of the workflow's helper package `_commands/_shared/`, which the framework
+never reads (for example `_commands/_shared/checkpoint.py` with `class CheckpointHooks:`), and write
+`from .._shared.checkpoint import CheckpointHooks` and `class Context(CheckpointHooks):` in each callback file. The framework reads every member
 of the class with `getattr`, so these, `get_parent`, `get_displayname`, `instance_label_attr` and `occupiable`
-may all be inherited, and a class that defines one of its own overrides it.
+may all be inherited, and a class that defines one of its own overrides it. `inherits` and `parents` may not: they are
+read as written in the body of `class Context` itself.
 
 ## Rule 2: cutting an inherited command an enclosing record also offers keeps it reachable
 
-- **Reachability comes from `base` and from `get_parent`, never from a second file.** A command
+- **Reachability comes from `inherits` and from `get_parent`, never from a second file.** A command
   removed from a context's surface is still reachable *in place*, with no navigation, if it lives
   on the lookup path (an enclosing record's context or its bases, or the global context). It becomes
   unreachable without navigation if it only lives in a **sibling**.
@@ -185,7 +196,7 @@ Then chain the bases so nothing regresses:
 ```
 FooLookup   (the narrow subset)  <- inherited by the workspaces that need only that
 BarCatalog  (another subset)     <- inherited by the workspace that needs only that
-Wide        base: [FooLookup, BarCatalog] + its own remainder
+Wide        inherits = ["FooLookup", "BarCatalog"] + its own remainder
                                  <- inherited by the one context that needs everything
 ```
 
@@ -255,7 +266,7 @@ before assuming the change was free.
 ## Procedure
 
 ```
-- [ ] 1. Check each context's get_parent against the live record it should return
+- [ ] 1. Check each context's get_parent against the live record it should return, and its parents
 - [ ] 2. Check which contexts each command enters (`workflow.record` assignments) and that each declares @descends_to
 - [ ] 3. Per context, list surface vs. the producers its own commands declare
 - [ ] 4. For each unused inherited command, check Rule 2 depth before cutting

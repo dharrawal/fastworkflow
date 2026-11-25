@@ -18,7 +18,6 @@ library/
   startup_action.json            # runs the startup command
   application/library.py         # the in-memory library the commands read
   _commands/
-    context_inheritance_model.json   # Book and Member have the base Record
     startup.py                   # makes a Library the root object
     library_hours.py             # global: found from every context
     Library/                     # the library, the root object
@@ -28,9 +27,9 @@ library/
       find_member.py    open_member.py
       overdue_summary.py  note_member.py  count_books.py  book_by_title.py
       member_report.py    author_books.py find_record.py  book_loans.py
-    Book/                        # one book; its parent is the library
+    Book/                        # one book; inherits Record, its parent is the library
       _Book.py  show_book.py  list_loans.py  loan_report.py  shelf_report.py
-    Member/                      # one member; its parent is the library
+    Member/                      # one member; inherits Record, its parent is the library
       _Member.py  show_member.py  list_member_loans.py
     Record/                      # a base of Book and Member; never an object
       _Record.py  show_notes.py  add_note.py

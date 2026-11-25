@@ -319,9 +319,9 @@ def test_an_attended_turn_asks_for_the_missing_author_and_the_reply_completes_th
     second = restored.process_turn("The author is Frank Herbert.")
 
     assert second.status == TurnStatus.COMPLETED
-    call = sink.named("fw.planner.plan")[-1]
-    assert call.attributes["skill"] == "author_books"
-    assert call.attributes["skill_args"]["author"] == "Frank Herbert"
+    call = sink.named("fw.plan")[-1]
+    assert call.attributes["command"] == "author_books"
+    assert call.attributes["command_args"]["author"] == "Frank Herbert"
 
 
 @pytest.mark.slow
@@ -341,7 +341,7 @@ def test_an_unattended_turn_never_asks_about_a_refused_call(workflow_env):
 
     # Whether the model refuses or guesses a value the request writes, an unattended turn is never
     # put a question: a refusal falls back to the text planner, and no question is recorded.
-    span = sink.named("fw.planner.plan")[-1]
-    assert span.attributes["skill_refusal_asked"] is None
+    span = sink.named("fw.plan")[-1]
+    assert span.attributes["command_refusal_asked"] is None
     assert ctx._planning_command_refusal is None
     assert span.attributes["plan_source"] in ("text", "skill_call")

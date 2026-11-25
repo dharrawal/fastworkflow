@@ -90,11 +90,11 @@
           <li><strong>Putting the pair on the child's class.</strong> The framework reads it only from the root's class, so the session is pinned with the "no get_locator/find_by_locator pair" warning.</li>
         </ul>
         <h4 id="c-share">Write the hooks once for many classes</h4>
-        <p>When several context classes need the same hooks, do not copy them into each file. Write them once on a plain class in a helper file under <code>_commands/</code> whose name starts with an underscore, such as <code>_checkpoint.py</code>. The command scanner skips such a file, so it is neither a command nor a context. Each context class then inherits from it, and a class that needs something different writes that one method itself.</p>
+        <p>When several context classes need the same hooks, do not copy them into each file. Write them once on a plain class in a helper module of the workflow's helper package, such as <code>_commands/_shared/checkpoint.py</code>. The framework never reads that package, so it is neither a command nor a context. Each context class then inherits from it, and a class that needs something different writes that one method itself.</p>
       </div>
       <figure>
-        <figcaption>_commands/_checkpoint.py, and _commands/Book/_Book.py beside it</figcaption>
-        <pre><code><span class="c"># _commands/_checkpoint.py</span>
+        <figcaption>_commands/_shared/checkpoint.py, and _commands/Book/_Book.py</figcaption>
+        <pre><code><span class="c"># _commands/_shared/checkpoint.py</span>
 class CheckpointHooks:
     state_version = 1
 
@@ -103,7 +103,7 @@ class CheckpointHooks:
     <span class="c"># from_state, get_locator and find_by_locator are written here too</span>
 
 <span class="c"># _commands/Book/_Book.py</span>
-from .._checkpoint import CheckpointHooks
+from .._shared.checkpoint import CheckpointHooks
 
 class Context(CheckpointHooks):          <span class="c"># Book has all four hooks now</span>
     @classmethod
@@ -112,8 +112,8 @@ class Context(CheckpointHooks):          <span class="c"># Book has all four hoo
       </figure>
       <div class="prose">
         <ul>
-          <li><strong>The import.</strong> From a callback file, write <code>from .._checkpoint import CheckpointHooks</code>: two dots go from <code>_commands/Book/</code> up to <code>_commands/</code>, the same way a callback file reaches your application code with <code>from ...application.library import Book</code>.</li>
-          <li><strong>What may be inherited.</strong> The framework reads each member from the class itself, so <code>get_state</code>, <code>from_state</code>, <code>state_version</code>, <code>get_locator</code>, <code>find_by_locator</code>, <code>get_parent</code>, <code>get_displayname</code>, <code>instance_label_attr</code> and <code>occupiable</code> may all come from a base class.</li>
+          <li><strong>The import.</strong> From a callback file, write <code>from .._shared.checkpoint import CheckpointHooks</code>: two dots go from <code>_commands/Book/</code> up to <code>_commands/</code>, then into <code>_shared</code>, the same way a callback file reaches your application code with <code>from ...application.library import Book</code>.</li>
+          <li><strong>What may be inherited.</strong> The framework reads each member from the class itself, so <code>get_state</code>, <code>from_state</code>, <code>state_version</code>, <code>get_locator</code>, <code>find_by_locator</code>, <code>get_parent</code>, <code>get_displayname</code>, <code>instance_label_attr</code> and <code>occupiable</code> may all come from a base class. The two declarations may not: <code>inherits</code> and <code>parents</code> are read as written in the body of <code>class Context</code> itself, so one inherited from a base class stops the workflow, and a context that inherits <code>get_parent</code> still writes its own <code>parents</code>.</li>
           <li><strong>Overriding.</strong> A method written in the <code>Context</code> class wins over the inherited one. It can call the inherited one with <code>super().get_state(record)</code> and add to the result.</li>
           <li><strong>The startup list.</strong> A class that inherits <code>get_state</code> is not listed as lacking one; a class that neither writes nor inherits it still is.</li>
         </ul>

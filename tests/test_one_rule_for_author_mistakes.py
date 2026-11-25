@@ -24,6 +24,7 @@ from fastworkflow import planning_commands as pc
 from fastworkflow.command_directory import CommandLoadError
 from fastworkflow.command_routing import RoutingRegistry
 from tests.test_command_preview import PING, PONG
+from tests.context_declarations import declare_inherits
 from tests.test_field_sources import ROOT, _build_workflow
 
 
@@ -183,7 +184,7 @@ LOCAL = {
     # generator is not a command; __call__ is a plain def.
     "an assigned ResponseGenerator": ({"Library/greet": _exec().replace("class ResponseGenerator:", "class _Greet:") + "\n\nResponseGenerator = _Greet\n"}, {}, "Library/greet", "ResponseGenerator is imported or assigned here, not defined; a generator is a class defined in the command file"),
     "an imported PlanGenerator": ({}, {"Library/base_plan": _plan(), "Library/inspect_book": _plan(imports="from .base_plan import PlanGenerator", body="    pass").split("\n\n\nclass PlanGenerator")[0] + "\n"}, "Library/inspect_book", "PlanGenerator is imported or assigned here, not defined"),
-    "a helper module named like a command": ({"Library/text_helpers": "def shout(text):\n    return text.upper()\n"}, {}, "Library/text_helpers", "is not a command: it defines no Signature, ResponseGenerator or PlanGenerator. A file in _commands/ is a command; name a helper module with a leading underscore (_text_helpers.py)"),
+    "a helper module named like a command": ({"Library/text_helpers": "def shout(text):\n    return text.upper()\n"}, {}, "Library/text_helpers", "is not a command: it defines no Signature, ResponseGenerator or PlanGenerator. A file in _commands/ is a command; a helper module belongs in the package _commands/_shared/ (_commands/_shared/text_helpers.py)"),
     "async __call__": ({"Library/greet": _exec().replace("    def __call__", "    async def __call__")}, {}, "Library/greet", "ResponseGenerator.__call__ is async def here; it must be a plain def"),
     # display hints against the field's type (the load-check sweep): a badge on a number is allowed
     "hero on a list": ({"Library/greet": _exec(output_extra=', json_schema_extra={"ui": {"hero": True}}').replace("text: str = Field(description=\"the greeting\"", "text: list[str] = Field(description=\"the greeting\"")}, {}, "Library/greet", "ui.hero marks the one scalar to show first; list[str] is a list"),
@@ -337,9 +338,9 @@ def _one_global_problem(folder: str, file_label: str) -> str:
 
 def test_an_unknown_base_stops_the_workflow_naming_the_file_and_the_referring_context(tmp_path):
     folder = _build_workflow(tmp_path, "wf_base", extra_inheritance={"Member": {"base": ["Recrd"]}})
-    problem = _one_global_problem(folder, "context_inheritance_model.json")
-    assert "context 'Member' declares the base 'Recrd', which is no context of the workflow" in problem
-    with pytest.raises(Exception, match="context 'Member' declares the base 'Recrd'"):
+    problem = _one_global_problem(folder, "_commands/Member/_Member.py")
+    assert "inherits names 'Recrd', which is no context; did you mean 'Record'?" in problem
+    with pytest.raises(Exception, match="inherits names 'Recrd', which is no context"):
         fastworkflow.command_context_model.CommandContextModel.load(folder)     # at load, not at first use
 
 
@@ -391,23 +392,23 @@ def test_a_context_class_in_a_misnamed_file_stops_the_workflow_naming_the_right_
         in problem
 
 
-def test_an_inheritance_key_that_is_no_folder_stops_the_workflow(tmp_path):
-    """Every context is a folder of _commands/, so a key of context_inheritance_model.json that is no folder is a
-    mistake (a misspelt or a lost folder), named with the folder it probably meant."""
-    folder = _build_workflow(tmp_path, "wf_inh_key", extra_inheritance={"Membr": {"base": ["Record"]}})
+def test_the_removed_inheritance_file_stops_the_workflow(tmp_path):
+    """context_inheritance_model.json is a removed spelling (bd fix-qjne.36): whatever it holds (here a key that is
+    no folder, once its own mistake), its presence is one workflow-wide problem naming the file and the
+    declarations that replace it."""
+    folder = _build_workflow(tmp_path, "wf_inh_key")
+    (Path(folder) / "_commands" / "context_inheritance_model.json").write_text(
+        json.dumps({"Membr": {"base": ["Record"]}}), encoding="utf-8")
     problem = _one_global_problem(folder, "context_inheritance_model.json")
-    assert "the key 'Membr' is no context folder" in problem and "did you mean 'Member'?" in problem
-    assert "Book, Library, Member, Record" in problem
-    with pytest.raises(Exception, match="the key 'Membr' is no context folder"):
+    assert problem.workflow_wide
+    assert "context_inheritance_model.json is removed and not read" in problem
+    assert "inherits = [" in problem and "fastworkflow migrate-contexts" in problem
+    with pytest.raises(Exception, match="context_inheritance_model.json is removed and not read"):
         fastworkflow.command_context_model.CommandContextModel.load(folder)
 
 
 _A_CONTEXT_CLASS = """class Context:
     \"\"\"A paperback book.\"\"\"
-
-    @classmethod
-    def get_parent(cls, record):
-        return None
 """
 
 
@@ -421,8 +422,9 @@ def _context_folder(folder: str, name: str, files: dict[str, str]) -> None:
 def test_a_folder_with_no_command_file_that_inherits_one_loads_with_its_context_class(tmp_path, caplog):
     """A context whose commands are all inherited is a folder with no command file of its own; its _<Context>.py is
     read, and nothing is logged about it (it is not a mistake)."""
-    folder = _build_workflow(tmp_path, "wf_inheriting", extra_inheritance={"Paperback": {"base": ["Book"]}})
+    folder = _build_workflow(tmp_path, "wf_inheriting")
     _context_folder(folder, "Paperback", {"_Paperback.py": _A_CONTEXT_CLASS})
+    declare_inherits(folder, {"Paperback": ["Book"]})
     with caplog.at_level("DEBUG"):
         assert command_preview.load_problems(folder) == []
     assert not [r for r in caplog.records if r.levelname in ("WARNING", "ERROR") and "Paperback" in r.getMessage()]
@@ -440,38 +442,38 @@ def test_a_folder_that_inherits_from_a_base_workflow_folder_loads(tmp_path):
     derived = tmp_path / "wf_derived"
     (derived / "_commands").mkdir(parents=True)
     (derived / "workflow_inheritance_model.json").write_text(json.dumps({"base": [base]}), encoding="utf-8")
-    (derived / "_commands" / "context_inheritance_model.json").write_text(
-        json.dumps({"Book": {"base": ["Record"]}, "Paperback": {"base": ["Book"]}}), encoding="utf-8")
     _context_folder(str(derived), "Paperback", {"_Paperback.py": _A_CONTEXT_CLASS})
+    declare_inherits(derived, {"Paperback": ["Book"]})
     model = fastworkflow.command_context_model.CommandContextModel.load(str(derived))
     assert "Book/show_book" in model.commands("Paperback")
 
 
 @pytest.mark.parametrize("extra_inheritance,folders,empty", [
     ({}, {"Orphan": {"_Orphan.py": _A_CONTEXT_CLASS}}, ["Orphan"]),
-    ({}, {"shared": {"_util.py": "def helper():\n    return 1\n"}}, ["shared"]),
+    ({}, {"shared": {"__init__.py": "def helper():\n    return 1\n"}}, ["shared"]),
     ({"Paperback": {"base": ["Hollow"]}, "Hollow": {"base": []}},
      {"Paperback": {"_Paperback.py": _A_CONTEXT_CLASS}, "Hollow": {"_Hollow.py": _A_CONTEXT_CLASS}},
      ["Hollow", "Paperback"]),
 ], ids=["no_key_no_commands", "helper_folder_without_underscore", "inherits_only_empty_contexts"])
 def test_a_folder_with_no_command_file_that_inherits_none_stops_the_workflow(tmp_path, extra_inheritance, folders,
                                                                              empty):
-    folder = _build_workflow(tmp_path, "wf_empty", extra_inheritance=extra_inheritance)
+    folder = _build_workflow(tmp_path, "wf_empty")
     for name, files in folders.items():
         _context_folder(folder, name, files)
+    declare_inherits(folder, {name: entry["base"] for name, entry in extra_inheritance.items()})
     problems = command_preview.load_problems(folder)
     assert len(problems) == len(empty), problems
     for name, problem in zip(empty, problems):
         assert problem.workflow_wide
         assert f"_commands/{name}: the context folder {name!r} holds no command file and inherits none" in problem
-        assert "add a command" in problem and "start a helper folder's name with _" in problem
+        assert "add a command" in problem and "move helper modules to _commands/_shared/" in problem
     with pytest.raises(Exception, match="holds no command file and inherits none"):
         fastworkflow.command_context_model.CommandContextModel.load(folder)
 
 
 def test_a_folder_whose_only_command_does_not_load_is_that_commands_problem_only(tmp_path):
     """Command files count, not commands that load: a folder whose one command fails has that command's line only."""
-    folder = _build_workflow(tmp_path, "wf_broken_only", extra_inheritance={"Paperback": {"base": []}})
+    folder = _build_workflow(tmp_path, "wf_broken_only")
     _context_folder(folder, "Paperback", {
         "_Paperback.py": _A_CONTEXT_CLASS,
         "price.py": _exec().replace("import fastworkflow", "import fastworkflow\nimport no_such_module_b2", 1)})
@@ -528,26 +530,28 @@ class BookPhases:
 @pytest.mark.parametrize("template", [False, True], ids=["no_template", "declared_template"])
 def test_a_public_helper_on_a_shared_base_names_the_base_and_the_underscore_fix(tmp_path, template):
     """The fix is the helper's name, not Signature.template; and declaring a template does not hide the mistake."""
-    plan = _plan(imports="from ._book_phases import BookPhases", bases="(BookPhases)", body="    pass")
+    plan = _plan(imports="from .._shared.book_phases import BookPhases", bases="(BookPhases)", body="    pass")
     if template:
         plan = plan.replace('    plain_utterances = ["inspect a book"]',
                             '    template = ["find the book", "say what was found"]\n'
                             '    plain_utterances = ["inspect a book"]')
     folder = _build_workflow(tmp_path, "wf_helper", extra_planning_commands={"Library/inspect_book": plan})
-    (Path(folder) / "_commands" / "Library" / "_book_phases.py").write_text(_BOOK_PHASES, encoding="utf-8")
+    (Path(folder) / "_commands" / "_shared").mkdir()
+    (Path(folder) / "_commands" / "_shared" / "book_phases.py").write_text(_BOOK_PHASES, encoding="utf-8")
     problems = command_preview.load_problems(folder)
     mine = [p for p in problems if p.startswith("Library/inspect_book: ")]
     assert len(mine) == 1, problems
     assert ("every public method of a PlanGenerator and of its bases is a phase, and describe is defined on the "
-            "base BookPhases (_book_phases.py): if describe is a helper, name it _describe") in mine[0]
+            "base BookPhases (book_phases.py): if describe is a helper, name it _describe") in mine[0]
     assert "declare Signature.template" not in mine[0]
 
 
 def test_an_import_error_in_a_helper_names_the_helper_file_and_line(tmp_path):
     folder = _build_workflow(tmp_path, "wf_helper_import",
-                             extra_commands={"Library/greet": "from ._greet_helpers import X\n" + _exec()})
-    (Path(folder) / "_commands" / "Library" / "_greet_helpers.py").write_text(
+                             extra_commands={"Library/greet": "from .._shared.greet_helpers import X\n" + _exec()})
+    (Path(folder) / "_commands" / "_shared").mkdir()
+    (Path(folder) / "_commands" / "_shared" / "greet_helpers.py").write_text(
         "X = 1\nimport no_such_module_b3\n", encoding="utf-8")
     problems = command_preview.load_problems(folder)
     assert problems == ["Library/greet: _commands/Library/greet.py: ModuleNotFoundError: No module named "
-                        "'no_such_module_b3' (in _commands/Library/_greet_helpers.py, line 2)"], problems
+                        "'no_such_module_b3' (in _commands/_shared/greet_helpers.py, line 2)"], problems

@@ -463,6 +463,8 @@ class DSPyObservabilityCallback(BaseCallback):
         if payload:
             attributes["call_kwargs"] = _json_text(payload)
         attributes.update(_call_limits(instance))
+        if (purpose := tracing.current_purpose()) is not None:
+            attributes["purpose"] = purpose        # what the call is for, when its caller said (``model_purpose``)
         if chain := _module_chain(frames):
             attributes["module_chain"] = chain
         if identity is not None and identity.inputs:
@@ -563,7 +565,8 @@ def _call_limits(instance: Any) -> dict[str, Any]:
     LM) records only what it has.
     """
     limits: dict[str, Any] = {}
-    role = getattr(instance, "fastworkflow_role", None)
+    # The caller's own model setting (``tracing.model_role``) first, then the role ``get_lm`` tagged the LM with.
+    role = tracing.current_role() or getattr(instance, "fastworkflow_role", None)
     if isinstance(role, str) and role:
         limits["role"] = role
     kwargs = getattr(instance, "kwargs", None)

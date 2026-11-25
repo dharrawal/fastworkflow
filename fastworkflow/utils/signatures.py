@@ -1,5 +1,4 @@
 import sys
-import contextvars
 import ast
 import html
 import inspect
@@ -21,7 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from pydantic_core import PydanticUndefined
 
 import fastworkflow
-from fastworkflow import ModuleType
+from fastworkflow import ModuleType, tracing
 from fastworkflow.utils.logging import logger
 from fastworkflow.model_pipeline_training import get_route_layer_filepath_model
 from fastworkflow.utils.fuzzy_match import (
@@ -1009,7 +1008,7 @@ def _check_field_given(lm, statement: str, name: str, field_info: Any) -> tuple[
         "verdict": (Choice[_FIELD_GIVEN_OPTIONS],
                     dspy.OutputField(desc="Does the statement give a value for this argument?")),
     }, "Decide whether a command statement gives a value for one argument.")
-    with dspy.context(lm=lm):
+    with dspy_utils.role_context("JEV", lm):
         choice = dspy.Predict(signature)(statement=statement, argument=argument).verdict
     value = str(choice.value)
     probability = float((choice.probabilities or {}).get(value, choice.confidence))
@@ -1049,7 +1048,7 @@ def fields_not_given(statement: str, model_class: Type[BaseModel], values: dict)
 
         with ThreadPoolExecutor(len(checks)) as pool:
             # Each check runs under a copy of this thread's context, so its model call is traced under the turn.
-            futures = [pool.submit(contextvars.copy_context().run, one, check) for check in checks]
+            futures = [pool.submit(tracing.traced_call(one, check)) for check in checks]
             results = [r for r in (f.result() for f in futures) if r is not None]
         return {name: probability for name, verdict, probability in results
                 if verdict == "not_given" and probability >= FIELD_GIVEN_THRESHOLD}
@@ -1304,7 +1303,7 @@ Today's date is {today}.
 
         param_dict = {}
         field_names = list(model_class.model_fields.keys())
-        with dspy.context(lm=lm, adapter=_TextLiteralsAsText()):
+        with dspy_utils.role_context("LLM_PARAM_EXTRACTION", lm, adapter=_TextLiteralsAsText()):
             optimizer = dspy.LabeledFewShot(k=length)
             compiled_model = optimizer.compile(
                 student=param_extractor,

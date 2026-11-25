@@ -235,7 +235,9 @@ def test_a_context_class_with_no_get_parent_is_one_error_naming_the_context(libr
         source = handle.read()
     with open(path, "w") as handle:
         # a helper's name starts with _: a public unknown member of Context is a load error of its own
-        handle.write(source.replace("def get_parent(", "def _not_get_parent("))
+        # and parents is declared only with get_parent (bd fix-qjne.36)
+        handle.write(source.replace("def get_parent(", "def _not_get_parent(")
+                     .replace('    parents = ["Library"]\n', ""))
     workflow = _started(library, "no-parent")
     member = workflow.root.members["m1"]
     workflow.record = member

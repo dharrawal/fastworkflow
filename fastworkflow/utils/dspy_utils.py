@@ -3,6 +3,8 @@
 # fails with a circular import. Loaded first, the real openai is used instead.
 # Every module that imports dspy carries the litellm line directly above its dspy import.
 # The dspy-first case (dspy imported before fastworkflow) is repaired in fastworkflow/__init__.py.
+import contextlib
+
 import litellm  # noqa: F401  (must precede dspy; see fastworkflow/utils/dspy_utils.py)
 import dspy
 from pydantic import BaseModel, Field
@@ -104,6 +106,17 @@ def is_timeout_error(error: BaseException) -> bool:
             return True
         error = error.__cause__ or error.__context__
     return False
+
+
+@contextlib.contextmanager
+def role_context(role: str, lm, **settings):
+    """``dspy.context(lm=lm, **settings)`` for a call of the model setting *role* (``LLM_PLANNER``, ``JEV``, ...): the
+    caller names its own model's setting, and each model-call span of the block carries it as ``role``
+    (``tracing.model_role``), whichever LM object it was handed."""
+    from fastworkflow import tracing
+
+    with dspy.context(lm=lm, **settings), tracing.model_role(role):
+        yield
 
 
 def get_lm(model_env_var: str, api_key_env_var: Optional[str] = None, **kwargs):

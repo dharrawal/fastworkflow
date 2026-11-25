@@ -74,7 +74,6 @@ class ResponseGenerator:
 def stock_workflow(tmp_path):
     commands = tmp_path / "stock" / "_commands"
     commands.mkdir(parents=True)
-    (commands / "context_inheritance_model.json").write_text("{}\n")
     (commands / "check_stock.py").write_text(PLAN.format(name="check_stock"))
     (commands / "noop.py").write_text(NOOP)
     folder = str(tmp_path / "stock")

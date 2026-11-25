@@ -2,8 +2,8 @@
  * against a real server.
  *
  * Feedback comes before the waterfall on every level. "What was recorded" and
- * the execution ledger live on the Execution stage, the ledger folded shut
- * behind a link; a turn with no Execution stage keeps both on the turn page.
+ * the execution ledger live on the Run stage, the ledger folded shut
+ * behind a link; a turn with no Run stage keeps both on the turn page.
  * The rows and jumps still open their spans from the new home. */
 const assert = require('node:assert/strict');
 const {JSDOM, VirtualConsole} = require(process.argv[2] + '/node_modules/jsdom');
@@ -36,7 +36,7 @@ virtualConsole.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push
   const row = label => [...d.querySelectorAll('#detail .wfRow')]
     .find(r => r.getAttribute('aria-label').startsWith('Inspect ' + label));
 
-  /* ---- an agent turn: the record moves to its Execution stage ---------- */
+  /* ---- an agent turn: the record moves to its Run stage ---------------- */
   w.selectTurn(agentTurn);
   await until(() => named('Inside this turn'), 'the agent turn to open');
   assert.deepEqual(blocks(), ['crumbs', 'header', 'Feedback', 'Inside this turn',
@@ -45,10 +45,10 @@ virtualConsole.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push
   assert.equal(d.querySelector('#detail > .card > pre.json'), null, 'nor the record_json dump');
   assert.equal(ledger(), null, 'the ledger is not on the turn page of an agent turn');
 
-  row('Execution').click();
-  await until(() => named('Inside this stage'), 'the Execution stage');
+  row('Run').click();
+  await until(() => named('Inside this stage'), 'the Run stage');
   assert.deepEqual(blocks(), ['crumbs', 'header', 'What was recorded', 'Feedback',
-    'Inside this stage', 'ledger'], 'Execution stage order');
+    'Inside this stage', 'ledger'], 'Run stage order');
   assert.equal(ledger().open, false, 'the ledger starts folded');
   assert.equal(ledger().querySelector(':scope > summary').textContent, 'Execution ledger');
   ledger().querySelector(':scope > summary').click();
@@ -61,20 +61,20 @@ virtualConsole.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push
   openable.click();
   await until(() => !named('Inside this stage') && named('Inside this span'),
     'the ledger row to open its span');
-  assert.ok(d.querySelector('#detail .levelHead h2').textContent.startsWith('Assistant'),
+  assert.ok(d.querySelector('#detail .levelHead h2').textContent.startsWith('Command'),
     'the opened span is the dispatch: ' + d.querySelector('#detail .levelHead h2').textContent);
   assert.deepEqual(blocks(), ['crumbs', 'header', 'Feedback', 'Inside this span'],
     'span page order');
 
-  /* ---- a direct-command turn: no Execution stage, so the turn keeps both - */
+  /* ---- a direct-command turn: no Run stage, so the turn keeps both ------ */
   w.selectTurn(directTurn);
   await until(() => named('Inside this turn') && ledger(), 'the direct turn to open');
   assert.deepEqual(blocks(), ['crumbs', 'header', 'What was recorded', 'Feedback',
     'Inside this turn', 'ledger', 'Artifacts'],
     'fallback turn page order');
   assert.equal(named('Raw turn record'), 0, 'the fallback turn page has no raw record card');
-  assert.equal(row('Execution'), undefined,
-    'a direct-command turn has no Execution stage to move them to');
+  assert.equal(row('Run'), undefined,
+    'a direct-command turn has no Run stage to move them to');
   assert.equal(ledger().open, false, 'the fallback ledger starts folded too');
 
   assert.deepEqual(errors, []);

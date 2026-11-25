@@ -134,7 +134,7 @@ context** is worth stating precisely, because it is not what the ambiguity machi
 name suggests. `intent_detection.py` builds the three-option "The command is ambiguous.
 Please choose…" message, stores the candidates, and returns `command_name=None`. In
 `_commands/wildcard.py:99-124` that enters the parent walk; retail's
-`context_inheritance_model.json` is empty, so `is_command_context_for_response_generation_root`
+`context_inheritance_model.json` (a removed spelling: a context's bases are now `inherits` on its `class Context`) is empty, so `is_command_context_for_response_generation_root`
 is true, the walk body never executes, and control reaches line 111 — `# out of scope
 commands` — which runs `ErrorCorrection/you_misunderstood`. The three-option message is
 discarded on this turn; what the user actually sees is `you_misunderstood`'s **full command
@@ -777,7 +777,7 @@ larger and less predictable cost and is *per workflow*, not one-off.
   churn dominates.
 - **§1.3's account of what the ambiguous 60% actually see.** Established by reading
   `intent_detection.py` and `_commands/wildcard.py:99-124` plus retail's empty
-  `context_inheritance_model.json`, not by capturing a live turn. It is the one claim in
+  `context_inheritance_model.json` (a removed spelling: a context's bases are now `inherits` on its `class Context`), not by capturing a live turn. It is the one claim in
   this document that a single integration test would settle, and §7.1 makes that the first
   task.
 - **That `fix-d28` should be p2.** That is a recommendation (§3.1) contingent on §3.3's

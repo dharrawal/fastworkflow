@@ -1,7 +1,7 @@
 from fastworkflow.command_context_model import CommandContextModel
 
 def list_context_names(workflow_folderpath: str, include_default: bool = False) -> list[str]:
-    """Return context names defined in context_inheritance_model.json.
+    """Return the workflow's context names (its context folders and the contexts its declarations name).
     If include_default is False the '*' context is filtered out.
     """
     model = CommandContextModel.load(workflow_folderpath)

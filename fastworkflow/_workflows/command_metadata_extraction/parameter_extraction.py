@@ -20,7 +20,7 @@ from fastworkflow.observability.decision_signals import (
 from fastworkflow import no_agent_mode, parameter_clarification, waiting
 from fastworkflow.parameter_clarification import Extraction, ParameterLoop
 from fastworkflow.parameters import ask, fill, pipeline, read
-from fastworkflow.utils import argument_checks, signatures
+from fastworkflow.utils import argument_checks, dspy_utils, signatures
 from fastworkflow.utils.signatures import (
     InputForParamExtraction,
     MISSING_INFORMATION_ERRMSG,
@@ -293,9 +293,17 @@ def _llm_guard(request: str, diagnostics: dict):
     return check, settle
 
 
+#: ``fw.command``'s ``parameters_read_by``, by the extraction's method (any other is its own value).
+PARAMETERS_READ_BY = {None: "none", "xml_regex": "typed", "llm": "model"}
+#: An extraction that found any of these decided something: its span is written even under a command.
+_DECISION_KEYS = ("missing_fields", "invalid_fields", "argument_refusal", "argument_check_refusals",
+                  "argument_check_refusals_final", "argument_check_retry", "fields_reset_not_given")
+
+
 def traced_extraction(command_name: str, extract: Callable[[dict], Any], *, valid: Callable[[Any], bool],
                       part: Optional[int] = None):
-    """``extract(diagnostics)``'s result, run in ONE ``fw.nlu.param_extraction`` span (D3 as amended). THE writer of
+    """``extract(diagnostics)``'s result, run in ONE ``fw.parameters`` span (D3 as amended; a child of the part it reads
+    the values of, as ``intent_detection.traced_decision``'s span is). THE writer of
     that span: the CME's parameter stage (``ParameterExtraction.extract``) and the plan path's extraction for a part's own
     command (``review_proposals.draft_inputs``, with *part*, the part's 1-based number) both call it.
 
@@ -310,9 +318,10 @@ def traced_extraction(command_name: str, extract: Callable[[dict], Any], *, vali
     host = tracing.current_host()
     span = tracing.start_span(
         host,
-        tracing.SPAN_NLU_PARAM_EXTRACTION,
+        tracing.SPAN_PARAMETERS,
         command_name=command_name,
         attributes={"command_name": command_name, **({"part": part} if part is not None else {})},
+        parent_span_id=tracing.direct_part_id(host) if part is None else None,
     )
     diagnostics: dict = {}
     try:
@@ -322,6 +331,18 @@ def traced_extraction(command_name: str, extract: Callable[[dict], Any], *, vali
         # characterise. The raw diagnostics gathered so far still go out.
         tracing.end_span(host, span, status=tracing.STATUS_ERROR, attributes=diagnostics)
         raise
+    # The command these values are for records how they were read (bd fix-qjne.34 step 6); a command's extraction
+    # that decided nothing (a typed call read in code, or no values to read, all valid, no model call), on any path, is
+    # not written: the command's span says it.
+    method = diagnostics.get("extraction_method")
+    is_valid = valid(output)
+    tracing.note(tracing.SPAN_COMMAND, parameters_read_by=PARAMETERS_READ_BY.get(method, method),
+                 parameters_valid=is_valid)
+    if (is_valid and method in (None, "xml_regex") and not diagnostics.get("retry_round")
+            and not any(diagnostics.get(key) for key in _DECISION_KEYS)
+            and not tracing.had_children(span) and tracing.is_command_decision(host, span)):
+        tracing.discard_span(host, span)
+        return output
     tracing.end_span(
         host,
         span,
@@ -329,7 +350,9 @@ def traced_extraction(command_name: str, extract: Callable[[dict], Any], *, vali
         attributes={
             **diagnostics,
             "decision_uncertainty": _recorded_slot_binding_uncertainty(span, diagnostics),
-            "parameters_valid": valid(output),
+            "parameters_valid": is_valid,
+            # the extraction reads the reply to a parameter question (a round resumed from the values kept)
+            "reads_reply": bool(diagnostics.get("retry_round")),
             **({"part": part} if part is not None else {}),
         },
     )
@@ -354,7 +377,7 @@ class ParameterExtraction:
         self._validation = None
 
     def extract(self) -> "ParameterExtraction.Output":
-        """Extract, wrapped in a ``fw.nlu.param_extraction`` span (D3 as
+        """Extract, wrapped in a ``fw.parameters`` span (D3 as
         amended). The span records the extraction method (stored-merge /
         xml-regex / llm), whether this is a NOT_FOUND retry round, and the
         STRUCTURED validation outcome from ``validate_parameters`` —
@@ -849,7 +872,7 @@ def classify_missing_value_reply(question: str, reply: str) -> str:
         # reply that names another command ("/find_book") was classified as an answer (measured, bd fix-rpio).
         question = "\n".join(line for line in str(question).splitlines()
                              if line.strip() != no_agent_mode.ANSWER_ONLY_NOTE)
-        with dspy.context(lm=jev_lm):
+        with dspy_utils.role_context("JEV", jev_lm):
             choice = dspy.Predict(ClassifyMissingValueReply)(question=question, reply=reply).intent
         value = str(choice.value)
         probability = (choice.probabilities or {}).get(value, choice.confidence)
@@ -896,7 +919,6 @@ def _start_argument_checks(app_workflow, extractor, command_name: str, params_cl
     """``(future, pool)`` of ``check_verdicts`` for *text*, started in a copy of this thread's context; or
     ``(None, None)`` when there is no Jev LM or the command has no ``verify`` parameter (nothing to start)."""
     import concurrent.futures
-    import contextvars
     from fastworkflow import planning_commands
     from fastworkflow.workflow_agent import _jev_lm
 
@@ -911,7 +933,7 @@ def _start_argument_checks(app_workflow, extractor, command_name: str, params_cl
     if not any(p.verify for p in command.params):
         return None, None
     pool = concurrent.futures.ThreadPoolExecutor(1)
-    return pool.submit(contextvars.copy_context().run, planning_commands.check_verdicts, lm, command, text), pool
+    return pool.submit(tracing.traced_call(planning_commands.check_verdicts, lm, command, text)), pool
 
 
 #: The diagnostics keys that record a value the model produced and a screen refused (it is then cleared, so the

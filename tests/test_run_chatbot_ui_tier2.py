@@ -4,10 +4,10 @@ roll-ups, all inside `#detail` and all derived in the read layer from store
 reads only.
 
 (a) a turn's execution ledger joins the record's `execution_records` refs
-    with the trace's `fw.command.execute` spans on `command_call_id`; a
+    with the trace's `fw.command` spans on `command_call_id`; a
     resumed turn is one ledger, not a restart;
 (b) per-turn chips from `decision_uncertainty` (least confident top-k
-    margin) and `fw.ask_user` (asked), and a
+    margin) and `fw.question` (asked), and a
     rail filter that counts only turns with a RECORDED margin below the
     user's threshold;
 (c) a collapsed provenance section from the evidence-run records, the
@@ -160,14 +160,14 @@ def _execute(span_id, trace_id, parent, t0, call_id, command, *, context="global
         }
     if child_calls is not None:
         attributes["child_calls"] = child_calls
-    return _span(span_id, trace_id, "fw.command.execute", parent, t0, dur=dur,
+    return _span(span_id, trace_id, "fw.command", parent, t0, dur=dur,
                  status=status, command_name=command, context=context,
                  attributes=attributes)
 
 
 def _intent(span_id, trace_id, parent, t0, uncertainty):
-    return _span(span_id, trace_id, "fw.nlu.intent", parent, t0, kind="internal",
-                 attributes={"decision_uncertainty": uncertainty, "stage": "INTENT_DETECTION"})
+    return _span(span_id, trace_id, "fw.intent", parent, t0, kind="internal",
+                 attributes={"decision_uncertainty": uncertainty, "reads_reply": False})
 
 
 def _llm(span_id, trace_id, parent, t0, cost, usage=None):
@@ -181,9 +181,9 @@ def _llm(span_id, trace_id, parent, t0, cost, usage=None):
 
 
 def _ask(span_id, trace_id, parent, t0):
-    return _span(span_id, trace_id, "fw.ask_user", parent, t0, dur=None,
+    return _span(span_id, trace_id, "fw.question", parent, t0, dur=None,
                  status="open", kind="human_wait",
-                 attributes={"agent_query": "which one?", "attempt": 0})
+                 attributes={"kind": "agent", "asked": "which one?", "attempt": 0})
 
 
 def _ref(call_id, ordinal, span_id=None, parent=None):
@@ -204,20 +204,21 @@ T0 = 1_788_000_000_000_000_000
 def turn_a_spans():
     return [
         _span("a-root", TURN_A, "fw.turn", None, T0, dur=50_000_000, kind="internal"),
-        _span("a-exec", TURN_A, "fw.agent.execute", "a-root", T0 + 1_000_000,
-              dur=40_000_000, kind="internal"),
-        _span("a-tc1", TURN_A, "fw.agent.tool_call", "a-exec", T0 + 2_000_000,
+        _span("a-run", TURN_A, "fw.run", "a-root", T0 + 500_000, dur=45_000_000, kind="internal"),
+        _span("a-exec", TURN_A, "fw.run.part", "a-run", T0 + 1_000_000,
+              dur=40_000_000, kind="internal", attributes={"part": 1, "means": "ad_hoc", "outcome": "ran"}),
+        _span("a-tc1", TURN_A, "fw.step", "a-exec", T0 + 2_000_000,
               command_name="open_item_explorer", context="global",
-              attributes={"command_call_id": "call-1",
+              attributes={"command_call_id": "call-1", "run_by": "agent", "kind": "command",
                           "consequence": {"consequence_class": "low"}}),
         _execute("a-ex1", TURN_A, "a-tc1", T0 + 2_100_000, "call-1", "open_item_explorer",
                  consequence="high", dur=900_000,
                  child_calls=[{"call_id": "call-1a", "parent_call_id": "call-1",
                                "command_name": "wildcard"}]),
         _intent("a-nlu1", TURN_A, "a-ex1", T0 + 2_200_000, _uncertainty(0.9, 0.95)),
-        _span("a-tc2", TURN_A, "fw.agent.tool_call", "a-exec", T0 + 10_000_000,
+        _span("a-tc2", TURN_A, "fw.step", "a-exec", T0 + 10_000_000,
               command_name="find_person", context="ItemExplorer",
-              attributes={"command_call_id": "call-2"}),
+              attributes={"command_call_id": "call-2", "run_by": "agent", "kind": "command"}),
         _execute("a-ex2", TURN_A, "a-tc2", T0 + 10_100_000, "call-2", "find_person",
                  context="ItemExplorer", consequence="medium", dur=2_000_000),
         _intent("a-nlu2", TURN_A, "a-ex2", T0 + 10_200_000, _uncertainty(0.1, 0.4)),
@@ -409,7 +410,7 @@ class TestCost:
         assert llm_call_cost(_llm("s", "t", None, T0, True)) is None
         assert llm_call_cost(_llm("s", "t", None, T0, -1.0)) is None
         assert llm_call_cost(_llm("s", "t", None, T0, float("nan"))) is None
-        not_llm = _span("s", "t", "fw.agent.step", None, T0, attributes={"cost": 1.0})
+        not_llm = _span("s", "t", "fw.step", None, T0, attributes={"cost": 1.0})
         assert llm_call_cost(not_llm) is None
 
     def test_rollup_total_is_none_never_zero_when_nothing_was_recorded(self):
@@ -819,10 +820,10 @@ class TestPage:
         assert b'"Execution ledger"' in page
         assert b"renderExecutionLedger(ledgerCard, state.turn, openSpanInTree)" in page
         assert b"renderExecutionLedger(ledgerCard, turn, null)" in page
-        # The turn-wide record lives on the Execution stage, found by its
-        # phase key rather than its title, with the ledger folded behind a link.
+        # The turn-wide record lives on the Run stage, found by its span name
+        # rather than its title, with the ledger folded behind a link.
         assert b"function turnRecordHome()" in page
-        assert b'child.kind === "phase" && child.phase === PHASE_EXECUTION' in page
+        assert b'child.span.name === "fw.run"' in page
         assert b'el("details", "card ledgerDisclosure")' in page
         assert b'"no span recorded"' in page
         assert b"the record lists only dispatches since the last resume" in page
@@ -874,7 +875,7 @@ class TestPage:
 
 
 def test_execution_stage_layout_dom(server):
-    """TURN_A runs an agent loop, so its record moves to the Execution stage;
+    """TURN_A has a Run stage, so its record moves there;
     TURN_B dispatches commands directly and keeps it on the turn page."""
     dependency = os.environ.get("TEST_JSDOM_ROOT")
     if not dependency:

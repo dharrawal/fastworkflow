@@ -25,8 +25,9 @@ version under the cursor — the closest a static check gets to "you cannot add 
 key without deciding about the version", and strictly better than the
 hand-maintained list it replaces, which had no way to notice a bag.
 
-**Producer agreement.** `fw.agent.tool_call` is opened from THREE sites. One
-version for that name is a lie unless the three write the same keys, so the rule
+**Producer agreement.** `fw.command` is opened from two sites and `fw.step` from
+three (until bd fix-qjne.34 it was `fw.agent.tool_call`, from three). One
+version for a name is a lie unless its openers write the same keys, so the rule
 is enforced rather than asserted in a comment: every function that *opens* a span
 of a given name must write the same set. Functions that RECONSTRUCT a span (the
 `Span(...)` rebuilds that close `fw.turn` and `fw.ask_user` across a suspension)
@@ -198,6 +199,11 @@ def _dict_keys(node: ast.AST, home: str, seen: set) -> set[str]:
             raise _Unresolved(f"call at line {node.lineno} of {home}")
     elif isinstance(node, ast.IfExp):  # `**({} if c else {...})`: the keys of either branch
         keys |= _dict_keys(node.body, home, seen) | _dict_keys(node.orelse, home, seen)
+    elif (isinstance(node, ast.DictComp) and len(node.generators) == 1
+          and isinstance(call := node.generators[0].iter, ast.Call) and isinstance(call.func, ast.Attribute)
+          and call.func.attr == "items"):
+        # `{k: v for k, v in {...}.items() if ...}`: a filter of a dict whose keys are read; at most its keys
+        keys |= _dict_keys(call.func.value, home, seen)
     else:
         raise _Unresolved(f"{type(node).__name__} at line {node.lineno} of {home}")
     return keys
@@ -283,6 +289,11 @@ def _parent_table(tree: ast.Module) -> dict:
     }
 
 
+#: The stage machinery's openers (``tracing.enter_stage``, ``part_span``, ``open_direct_part``): the span name is their
+#: second argument, and they write no emitter attribute (the host's ``close_stage_span`` rebuilder writes them all).
+_STAGE_OPENERS = frozenset({"enter_stage", "part_span", "open_direct_part", "enter_part"})
+
+
 def _scan_emission_sites() -> list[dict]:
     """One entry per function that opens, reconstructs, or closes a span."""
     sites: list[dict] = []
@@ -296,7 +307,21 @@ def _scan_emission_sites() -> list[dict]:
             if not isinstance(node, ast.Call):
                 continue
             name = _called_name(node.func)
-            if name == "start_span":
+            if name in _STAGE_OPENERS:
+                # The stage machinery opens a stage or part span (bd fix-qjne.34): an open of the name it is given.
+                opened = _span_names(node.args[1]) if len(node.args) > 1 else set()
+                if not opened:
+                    raise _Unresolved(f"{name} at line {node.lineno} of {relative_path} opens an unresolvable span")
+                module_names |= opened
+                calls.append((node, "open", opened))
+            elif name == "close_stage_span":
+                # A host's rebuilder of a stage or part span: a later phase of one span, like a `Span(...)` rebuild.
+                rebuilt = _span_names(node.args[1]) if len(node.args) > 1 else set()
+                if not rebuilt:
+                    raise _Unresolved(f"close_stage_span at line {node.lineno} of {relative_path}")
+                module_names |= rebuilt
+                calls.append((node, "rebuild", rebuilt))
+            elif name == "start_span":
                 opened = _span_names(node.args[1]) if len(node.args) > 1 else set()
                 if not opened:
                     raise _Unresolved(
@@ -420,10 +445,10 @@ def test_the_scan_reaches_keys_written_far_from_the_emission_site():
     discovered, the corresponding declaration would silently become unchecked.
     """
     discovered = _emitted_attributes()
-    assert "escalation_outcome" in discovered[tracing.SPAN_NLU_INTENT]
-    assert "validation_hook" in discovered[tracing.SPAN_NLU_PARAM_EXTRACTION]
-    assert "db_lookup" not in discovered[tracing.SPAN_NLU_PARAM_EXTRACTION]
-    assert tracing.ATTR_CONTEXT_BEFORE in discovered[tracing.SPAN_AGENT_TOOL_CALL]
+    assert "escalation_outcome" in discovered[tracing.SPAN_INTENT]
+    assert "validation_hook" in discovered[tracing.SPAN_PARAMETERS]
+    assert "db_lookup" not in discovered[tracing.SPAN_PARAMETERS]
+    assert tracing.ATTR_CONTEXT_BEFORE in discovered[tracing.SPAN_STEP]
 
 
 # ----------------------------------------------------------------------
@@ -506,14 +531,15 @@ def test_the_envelope_key_belongs_to_no_emitter():
 
 
 # ----------------------------------------------------------------------
-# Producer agreement — what makes ONE version for fw.agent.tool_call honest
+# Producer agreement — what makes ONE version for a multi-producer name honest
 # ----------------------------------------------------------------------
 
 
 def test_all_producers_of_one_span_name_write_the_same_attributes():
-    """Three sites open `fw.agent.tool_call`, and they share one version.
+    """Several sites open `fw.command` and `fw.step` (until bd fix-qjne.34, `fw.agent.tool_call`), and each name has one
+    version.
 
-    Until fix-ajv.3's capture reached the third (`workflow_agent`), that single
+    Until fix-ajv.3's capture reached the third tool-call site (`workflow_agent`), that single
     version described three different attribute sets — a reader would have had to
     know which site wrote a span before knowing what to expect from it. Enforced
     here rather than described in a comment, so a fourth producer, or a key added
@@ -539,18 +565,23 @@ def test_all_producers_of_one_span_name_write_the_same_attributes():
     )
 
 
-def test_fw_agent_tool_call_really_is_opened_from_three_sites():
-    """The test above is only interesting while the trio exists."""
-    openers = sorted(
-        (site["file"], site["function"])
-        for site in SITES
-        if tracing.SPAN_AGENT_TOOL_CALL in site["opens"]
-    )
-    assert openers == [
-        ("workflow_agent.py", "_execute_workflow_query"),
+def test_the_rule_has_real_multi_producer_names_to_hold():
+    """The test above is only interesting while names with several openers exist (bd fix-qjne.34: the old
+    fw.agent.tool_call trio is gone; a command run is opened by the dispatcher and by a direct action, a step by the
+    agent loop and by a planning command's answer step)."""
+    def openers(name):
+        return sorted((site["file"], site["function"]) for site in SITES if name in site["opens"])
+
+    assert openers(tracing.SPAN_COMMAND) == [
+        ("command_executor.py", "invoke_command"),
         ("workflow_execution_context.py", "_process_action"),
-        ("workflow_execution_context.py", "_process_message"),
     ]
+    assert openers(tracing.SPAN_STEP) == [
+        ("utils/react.py", "_run_loop"),
+        ("workflow_execution_context.py", "_record_result_failure"),
+        ("workflow_execution_context.py", "_settled_phase_answer"),
+    ]
+    assert not openers("fw.agent.tool_call")
 
 
 def test_a_reconstruction_is_not_held_to_the_producer_rule():
@@ -565,6 +596,10 @@ def test_a_reconstruction_is_not_held_to_the_producer_rule():
     }
     assert ("workflow_execution_context.py", "_close_ask_user_span") in rebuilders
     assert ("workflow_execution_context.py", "_finalize_turn_trace") in rebuilders
+    # The stage and part spans (bd fix-qjne.34): opened by the stage machinery, closed by one rebuilder each.
+    for rebuilder in ("_close_split_span", "_close_resolve_span", "_close_resolve_part_span", "_close_review_span",
+                      "_close_run_span", "_close_run_part_span", "_close_answer_span"):
+        assert ("workflow_execution_context.py", rebuilder) in rebuilders
 
 
 # ----------------------------------------------------------------------
@@ -626,7 +661,7 @@ def test_an_unreadable_emission_site_is_reported_rather_than_skipped():
 def test_provenance_carries_the_per_emitter_map():
     provenance = capture_observability_provenance()
     assert provenance.span_contract_versions == tracing.span_contract_versions()
-    assert provenance.span_contract_versions[tracing.SPAN_AGENT_TOOL_CALL] >= 1
+    assert provenance.span_contract_versions[tracing.SPAN_COMMAND] >= 1
 
 
 def test_the_aggregate_is_kept_beside_the_map_not_replaced_by_it():
@@ -645,7 +680,7 @@ def test_the_aggregate_number_moves_only_on_purpose():
     itself, so a bump -- or an accidental revert -- passes them all. Pinning the
     literal makes a change to the aggregate a deliberate edit to this test, next
     to the history comment in `tracing.py` that says what moved."""
-    assert tracing.SPAN_CONTRACT_VERSION == 62
+    assert tracing.SPAN_CONTRACT_VERSION == 63
 
 
 def test_a_provenance_record_written_before_the_map_still_validates():
@@ -802,20 +837,21 @@ def test_a_real_turn_writes_no_attribute_outside_the_declared_contract(ctx, sink
 def test_the_prose_path_stamps_its_two_spans_too(
     initialized_fastworkflow, todo_workflow_path, tmp_path, sink, monkeypatch
 ):
-    """`fw.command.execute` and the `fw.agent.tool_call` around it are versioned
-    independently, so a change to one does not implicate the other."""
+    """`fw.command` and the stage spans around it (bd fix-qjne.34: the direct path opens no tool-call span of its own)
+    are versioned independently, so a change to one does not implicate the other."""
     context = _make_ctx(todo_workflow_path, tmp_path, sink)
     try:
         _nesting_cme_hop(monkeypatch, context.app_workflow)
         context.process_turn("list my todo lists")
 
-        execute = sink.named(tracing.SPAN_COMMAND_EXECUTE)[0]
-        tool_call = sink.named(tracing.SPAN_AGENT_TOOL_CALL)[0]
+        assert not sink.named("fw.agent.tool_call")
+        execute = sink.named(tracing.SPAN_COMMAND)[0]
+        resolve = sink.named(tracing.SPAN_RESOLVE)[-1]
         assert execute.attributes[tracing.ATTR_SPAN_CONTRACT_VERSION] == (
-            tracing.SPAN_CONTRACTS[tracing.SPAN_COMMAND_EXECUTE].version
+            tracing.SPAN_CONTRACTS[tracing.SPAN_COMMAND].version
         )
-        assert tool_call.attributes[tracing.ATTR_SPAN_CONTRACT_VERSION] == (
-            tracing.SPAN_CONTRACTS[tracing.SPAN_AGENT_TOOL_CALL].version
+        assert resolve.attributes[tracing.ATTR_SPAN_CONTRACT_VERSION] == (
+            tracing.SPAN_CONTRACTS[tracing.SPAN_RESOLVE].version
         )
     finally:
         with suppress(Exception):
@@ -863,7 +899,7 @@ def test_re_emitting_a_span_does_not_move_its_version(ctx, sink):
     """The store upserts on span_id ([R2]/[R6]), so a span emitted at open and
     again at close must not disagree with itself about its contract."""
     ctx.process_action_turn(_action())
-    span = sink.named(tracing.SPAN_AGENT_TOOL_CALL)[0]
+    span = sink.named(tracing.SPAN_COMMAND)[0]
     stamped = span.attributes[tracing.ATTR_SPAN_CONTRACT_VERSION]
 
     tracing.end_span(ctx, span, attributes={"response_text": "replayed"})

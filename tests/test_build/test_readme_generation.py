@@ -31,14 +31,9 @@ def mock_commands_dir(temp_dir):
     todo_item_dir = commands_dir / "TodoItem"
     todo_item_dir.mkdir(exist_ok=True)
     
-    # Create a simple context model
-    context_model = {
-        "TodoItem": {"base": []},
-        "TodoList": {"base": ["TodoItem"]}
-    }
-    
-    with open(commands_dir / "context_inheritance_model.json", "w") as f:
-        json.dump(context_model, f, indent=2)
+    # A simple context model: TodoList inherits TodoItem, declared on its class Context (bd fix-qjne.37.1)
+    (commands_dir / "TodoList").mkdir(exist_ok=True)
+    (commands_dir / "TodoList" / "_TodoList.py").write_text('class Context:\n    inherits = ["TodoItem"]\n')
     
     # Create a simple command file
     command_content = """

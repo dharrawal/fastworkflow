@@ -107,8 +107,9 @@ Add `___command_info` and `___convo_info` to `.gitignore`. Session state lives o
 
 For each capability mapped in Step 1, create a command file that invokes the app's business logic:
 `_commands/<command_name>.py` for the root context, `_commands/<Context>/<command_name>.py` for a
-context (a class that holds state). `_commands/context_inheritance_model.json` only declares which
-contexts inherit another's commands. Use Pydantic `Input`/`Output` signatures with strong `Field`
+context (a class that holds state). A context's `class Context` in `_commands/<Context>/_<Context>.py`
+declares `inherits = [...]` (the contexts whose commands it also has) and, beside its `get_parent`,
+`parents = [...]` (the contexts whose records `get_parent` returns). Use Pydantic `Input`/`Output` signatures with strong `Field`
 descriptions and examples. A required field (no default) is what makes a missing parameter get asked
 for rather than hallucinated; `Optional[...] = None` makes it optional. See [reference.md](reference.md)
 for the command-file structure and context format.

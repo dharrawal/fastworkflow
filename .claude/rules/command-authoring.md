@@ -1,7 +1,6 @@
 ---
 paths:
   - "**/_commands/**"
-  - "**/context_inheritance_model.json"
 ---
 
 # Authoring fastWorkflow Commands
@@ -12,11 +11,14 @@ paths:
 my_workflow/
 ├── application/                     # Your app code (untouched)
 ├── _commands/                       # Command implementations (generated + edited)
-│   ├── context_inheritance_model.json  # Context bases ("base" lists)
 │   ├── startup.py                   # Global command that builds the root object
 │   ├── <command_name>.py            # Global command: single file (preferred)
+│   ├── _workflow.py                 # Optional: the workflow's settings (class Context)
+│   ├── _shared/                     # Optional: helper modules (__init__.py + modules), never read as commands;
+│   │                                #   import with from ._shared.x (root) or from .._shared.x (context folder).
+│   │                                #   Any other _name.py or _folder in _commands/ is a load error.
 │   └── <Context>/                   # One folder per kind of object, named after its class
-│       ├── _<Context>.py            # Optional: class Context (get_parent, get_displayname, ...)
+│       ├── _<Context>.py            # Optional: class Context (inherits, parents, get_parent, get_displayname, ...)
 │       └── <command_name>.py        # A command of that context
 ├── ___command_info/                 # Generated at train-time (gitignore)
 ├── ___workflow_contexts/            # Session state at run-time (gitignore)
@@ -342,8 +344,42 @@ name: str = Field(..., examples=["Maria Okafor", "Payroll Approvers EMEA"], json
 Like any edit of a command file, adding them changes that workflow's training signature, so the next
 `fastworkflow train` retrains it.
 
-## Context Model (`context_inheritance_model.json`)
+## Context declarations (`inherits` and `parents` on `class Context`)
 
-Each context entry has exactly one key, `base` (required): the list of parent context names whose commands are inherited. A `/` key is rejected; a context's own commands come from the filesystem (`_commands/<Context>/<command_name>.py`, or `_commands/<command_name>.py` for the global context `*`).
+A context is a folder of `_commands/`. Its `class Context`, in `_commands/<Context>/_<Context>.py`, declares two
+lists of context names, written as string literals in the class body and read without importing the file:
 
-To add a new command: create its `.py` file in the context's folder; add the context to the JSON only to give it a `base`.
+- `inherits = ["Record"]`: the contexts whose commands this context also has (transitively, in list order; its own
+  command of the same file name wins). `inherits = ["*"]` adds the global commands to its own set.
+- `parents = ["Library"]`: every context a record of this context can sit in, i.e. the contexts whose records its
+  `get_parent` returns; the context itself when records nest (`TodoList` declares `parents = ["TodoList",
+  "TodoListManager"]`). No `parents` means a top-level context, enclosed only by the global commands; the root record
+  needs neither.
+
+From `fastworkflow/examples/library/_commands/Book/_Book.py`:
+
+```python
+class Context:
+    inherits = ["Record"]
+    parents = ["Library"]
+
+    @classmethod
+    def get_parent(cls, record: Book) -> Library:
+        return record.library
+```
+
+Load checks (each stops the workflow with one line naming the file): a name that is no context (with a did-you-mean),
+a name given twice, `[]`, a value that is not a list of string literals, a declaration assigned twice or inherited
+from a Python base class, a context that inherits itself, an inheritance cycle, a folder with no command file that
+inherits none, `parents` without `get_parent` or `get_parent` without `parents`, and `parents` on an
+`occupiable = False` context. A command's `@descends_to("X")` target must list the command's context (or one it
+inherits, or one inheriting it) among its `parents`, or that command does not load. At run time a `get_parent` that
+returns a record of a context its `parents` do not name raises `MissingGetParentError`.
+
+`_commands/context_inheritance_model.json` is a removed spelling and stops the workflow: run
+`fastworkflow migrate-contexts <workflow>` (writes `inherits`, deletes the file, lists the contexts with a
+`get_parent`) and write their `parents` by hand from what each `get_parent` can return. `fastworkflow build` prints the
+`inherits` line it derives for each context and writes it only into a `_<Context>.py` it creates.
+`fastworkflow command preview` writes the generated object model to `_object_models/<workflow>.md`.
+
+To add a new command: create its `.py` file in the context's folder; declare `inherits` only to give the context a base.

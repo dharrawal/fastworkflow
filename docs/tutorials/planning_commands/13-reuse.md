@@ -1,12 +1,12 @@
 # 13. Reuse without a call
 
 **Goal:** know the three ways one planning command can use another's work, and choose. Page
-12 called `book_by_title` as a step. The other two reuse *code*: a `_` helper module, and a
-base class kept in one.
+12 called `book_by_title` as a step. The other two reuse *code*: a helper module in `_commands/_shared/`,
+and a base class kept in one.
 
 ## Three ways
 
-| | a nested call (page 12) | a `_` helper module (page 4) | a base class in a `_` module |
+| | a nested call (page 12) | a helper module (page 4) | a base class in a helper module |
 |---|---|---|---|
 | what is shared | the whole job, its checks and its `Output` | functions, tables, facts models | phases, hooks, helpers |
 | what the caller sees | one run and a typed `Output` | ordinary Python | the base's phases, as its own |
@@ -17,21 +17,24 @@ Choose a nested call when the caller wants the callee's whole job, done as the c
 it, checks included, and should not depend on how the callee does it: `book_loans` reads
 `book_by_title`'s `Output`, not its facts. Choose shared code when you want parts of a job,
 or when a call's cost buys nothing. Nothing on the nested path is needed to keep using
-helpers; a workflow can reuse entirely through `_` modules.
+helpers; a workflow can reuse entirely through helper modules.
 
-## A `_` helper module
+## A helper module
 
-`_commands/Library/_wording.py` (page 4) holds `copies`, the function `book_by_title` and
-`author_books` both call. Any file whose name starts with `_` is a module, never a command,
-and the commands of its folder import it (`from ._wording import copies`). Shared functions,
-tables and facts models go there.
+`_commands/_shared/wording.py` (page 4) holds `copies`, the function `book_by_title` and
+`author_books` both call. `_commands/_shared/` is the workflow's one helper package: the
+framework never reads it as commands, and command files import it (`from .._shared.wording
+import copies` from a context folder, `from ._shared.wording import ...` from `_commands/`).
+Shared functions, tables and facts models go there. Any other file of `_commands/` whose name
+starts with `_` (other than `_workflow.py` and a context folder's own `_<Context>.py`) fails
+the load, naming `_commands/_shared/`.
 
 A facts model in a helper is checked for each command that imports it, and a problem in it is
 reported by each of those commands.
 
-## A base class in a `_` module
+## A base class in a helper module
 
-A `PlanGenerator` may subclass a class kept in a `_` module, and reach the base's phases,
+A `PlanGenerator` may subclass a class kept in a helper module, and reach the base's phases,
 hooks and helpers through `self`, as Python resolves any method. A sketch, not a file of the
 sample:
 
@@ -39,7 +42,7 @@ sample:
 from fastworkflow.planning import count_and_names_read, run
 
 from ..Book.list_loans import Signature as ListLoans
-from ._shelf import BookPhases            # a _ module: phases find and book, and a __result__
+from .._shared.shelf import BookPhases    # a helper module: phases find and book, and a __result__
 
 
 class Signature:
@@ -79,7 +82,7 @@ The rules:
   load fails, naming both ways out:
 
   ```text
-  _commands/Library/book_and_loans.py: PlanGenerator inherits from Library/book_by_title's PlanGenerator; to reuse its whole job, call book_by_title in a step; to share phases, move them to a base class in a _ module
+  _commands/Library/book_and_loans.py: PlanGenerator inherits from Library/book_by_title's PlanGenerator; to reuse its whole job, call book_by_title in a step; to share phases, move them to a base class in a module of _commands/_shared/
   ```
 
 - **Hooks a base defines are inherited like any method**, and checked as if the file wrote
@@ -91,5 +94,5 @@ The rules:
 ## What you learned
 
 Call a planning command to reuse its whole job behind its `Input` and `Output`; share code
-through a `_` module, or a base class kept there, to reuse parts of a job at no run-time
+through a helper module in `_commands/_shared/`, or a base class kept there, to reuse parts of a job at no run-time
 cost. A `PlanGenerator` never subclasses another command's.

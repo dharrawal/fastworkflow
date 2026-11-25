@@ -10,6 +10,7 @@ import json
 
 import pytest
 
+from fastworkflow import tracing
 from fastworkflow import waiting as waiting_module
 from fastworkflow.turn import TurnStatus
 from tests.test_approval_binding import (  # noqa: F401 - fixtures
@@ -54,7 +55,15 @@ def test_the_review_state_of_a_turn_survives_a_restore(annotated_library, monkey
     second.script.steps = [("finish", {})] * 3
     out = second.ctx.process_turn("the second one")
     assert out.status is TurnStatus.COMPLETED
-    assert _marker(second) == "reviewed"            # the turn span says what the live process would have said
+    # Span contract 63: the review's outcome is on the turn's fw.review span, which the first process wrote before it
+    # saved; the resumed segment reopens only the stage that was open (the run). The turn's tree, as a store holding
+    # both processes' emissions reads it, says what the live process would have said.
+    turn_ids = {span.trace_id for sink in (first.sink, second.sink) for span in sink.spans
+                if span.name == tracing.SPAN_TURN}
+    assert len(turn_ids) == 1                       # one turn, continued in the second process
+    both = type("Both", (), {"sink": type("Sink", (), {"spans": [*first.sink.spans, *second.sink.spans]})()})()
+    assert _marker(both) == "reviewed"
+    assert second.ctx._turn_subtask_review == "reviewed"
 
 
 def test_a_refused_typed_call_of_a_reviewed_turn_is_not_asked_after_a_restore(annotated_library, monkeypatch):

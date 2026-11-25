@@ -96,7 +96,8 @@ def _action(command_name: str, **parameters) -> fastworkflow.Action:
 
 
 def _last_tool_call(sink: RecordingTraceSink) -> tracing.Span:
-    return sink.named(tracing.SPAN_AGENT_TOOL_CALL)[-1]
+    """The direct action's dispatch record: its ``fw.command`` (bd fix-qjne.34; was ``fw.agent.tool_call``)."""
+    return sink.named(tracing.SPAN_COMMAND)[-1]
 
 
 # ----------------------------------------------------------------------
@@ -153,7 +154,7 @@ def test_the_prose_path_records_context_types_too(
     try:
         context.process_turn("make me a grocery list")
 
-        execute = sink.named(tracing.SPAN_COMMAND_EXECUTE)[0]
+        execute = sink.named(tracing.SPAN_COMMAND)[0]
         assert execute.attributes[tracing.ATTR_CONTEXT_BEFORE] == "TodoListManager"
         assert execute.attributes[tracing.ATTR_CONTEXT_AFTER] == "TodoList"
     finally:

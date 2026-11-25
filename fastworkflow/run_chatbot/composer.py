@@ -3594,7 +3594,7 @@ def _predict(
     def run(settings: dict[str, Any]) -> dspy.Prediction:
         def call(lm):
             used.append(lm)
-            with dspy.context(lm=lm, adapter=COMPOSER_ADAPTER):
+            with dspy_utils.role_context("LLM_RESPONSE_GEN", lm, adapter=COMPOSER_ADAPTER):
                 return dspy.Predict(signature)(**inputs)
         try:
             return dspy_utils.call_dropping_rejected_params(base_lm.copy(**settings), call)

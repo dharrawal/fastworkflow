@@ -9,7 +9,16 @@ Span and attribute names come from `fastworkflow/tracing.py` (`SPAN_CONTRACTS`; 
 at the time of writing). Contracts are versioned, so check them against the version that wrote the
 store. Every attribute, the turn record (`turns.record_json`) and its artifacts are catalogued in
 the [debug-workflow-conversations reference](../debug-workflow-conversations/reference.md#span-catalog).
-The span attributes still call a planning command a `skill` (`skill`, `skill_args`, `fw.skill.phase`).
+This page names spans as span contract 62 and earlier wrote them (the benchmark stores graded so far).
+Since contract 63 (bd fix-qjne.34) a turn's spans follow its stages (`fw.split`, `fw.resolve` >
+`fw.resolve.part`, `fw.review`, `fw.run` > `fw.run.part` with `outcome`, `fw.answer`) and the names are
+neutral: `fw.plan` (was `fw.planner.*`), `fw.phase` (was `fw.skill.phase`, `skill` is `command`), `fw.step`
+(was `fw.agent.step` with its `fw.agent.tool_call`, and `fw.skill.answer`; `run_by` code/agent replaces
+`by_code`), `fw.command` (was `fw.command.execute`), `fw.question` (was `fw.ask_user`), `fw.intent`,
+`fw.parameters` (were `fw.nlu.*`); `fw.agent.execute` is gone (its facts are on `fw.run.part`). A dump of a
+new store must keep model calls whose parent is a stage or split/review span, not only `fw.turn` or a
+planner span. The framework's tools do not read a store written before contract 63; only the benchmark's own
+dump tool maps the old names.
 
 ## Contents
 

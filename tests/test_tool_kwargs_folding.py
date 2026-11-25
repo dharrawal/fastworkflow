@@ -237,7 +237,7 @@ def test_the_typed_text_of_a_folded_call_is_the_same_command(session, agent, res
 
 
 def test_the_step_span_declares_folded_command():
-    assert "folded_command" in tracing.SPAN_CONTRACTS[tracing.SPAN_AGENT_STEP].attributes
+    assert "folded_command" in tracing.SPAN_CONTRACTS[tracing.SPAN_STEP].attributes
 
 
 def test_the_react_loop_records_the_folded_command_on_the_step(
@@ -273,7 +273,7 @@ def test_the_react_loop_records_the_folded_command_on_the_step(
     with tracing.host_scope(ctx):
         agent._run_loop({}, 0, {"q": "x"}, max_iters=5, exception_count=0)
 
-    steps = sink.named(tracing.SPAN_AGENT_STEP)
+    steps = sink.named(tracing.SPAN_STEP)
     assert steps[0].attributes["folded_command"] == "find_item name=Ann"
     assert steps[0].attributes["tool_args"] == {"command": "find_item", "name": "Ann"}
     assert "folded_command" not in steps[1].attributes

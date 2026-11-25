@@ -71,7 +71,7 @@ _COPIED_PLANNING_COMMANDS = (
 _COPIED_COMMANDS = (
     "_commands/library_hours.py",
     "_commands/startup.py",
-    "_commands/Library/_wording.py",
+    "_commands/_shared/__init__.py", "_commands/_shared/wording.py",
     "_commands/Library/count_overdue.py",
     "_commands/Library/find_book.py",
     "_commands/Library/find_member.py",
@@ -113,10 +113,6 @@ def _library_workflow(
 
     commands_dir = folder / "_commands"
     commands_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(
-        os.path.join(LIBRARY, "_commands", "context_inheritance_model.json"),
-        commands_dir / "context_inheritance_model.json",
-    )
     for rel in dict.fromkeys((*_COPIED_CONTEXT_CLASSES, *_COPIED_COMMANDS, *extra_commands,
                               *(command_texts or {}))):
         src = os.path.join(LIBRARY, rel)
@@ -1029,7 +1025,7 @@ def test_pick_in_a_later_phase_runs_by_code_on_the_one_exact_match(library_env):
     assert library_env.model.asked == []
     # find_book query=Dune returned b1 ("Dune") and b2 ("Dune Messiah"); pick opened b1 in code.
     assert library_env.runner.sent == ["find_book query=Dune", "open_book book_uid=b1"]
-    spans = library_env.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
+    spans = library_env.sink.named(tracing.SPAN_PHASE)
     assert [s.attributes["phase"] for s in spans] == ["find", "book"]
     assert spans[1].attributes["code_stop"] == "done"
     assert spans[1].attributes["facts"] == {
@@ -1058,7 +1054,7 @@ def test_pick_goes_to_the_agent_when_two_rows_or_none_match(library_env):
     assert result.status == TurnStatus.COMPLETED
     assert len(library_env.model.asked) == 2
     assert "1. open_book with the uid of the Dune match" in library_env.model.asked[0]["query"]
-    spans = library_env.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
+    spans = library_env.sink.named(tracing.SPAN_PHASE)
     assert spans[1].attributes["code_stop"] == "open step 1"
 
     # 2. No row matches the named title ("Dune" when only "Dune 1" and "Dune Messiah" exist).
@@ -1210,7 +1206,7 @@ def test_pick_skips_a_child_listing_inside_a_child_range(library_env, monkeypatc
     assert [(row["step_index"], row["command"]) for row in rows] == [
         (0, "Library/find_book"), (1, "Library/find_book"), (3, "Library/open_book")]
     assert result.status == TurnStatus.COMPLETED
-    book_span = library_env.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)[1]
+    book_span = library_env.sink.named(tracing.SPAN_PHASE)[1]
     if child_range:
         assert book_span.attributes["code_stop"] == "done"
         assert book_span.attributes["steps_by_code"] == 1
@@ -1433,7 +1429,7 @@ def test_library_loan_report_from_real_module_runs_full_list_on_open_book(librar
     assert result.status == TurnStatus.COMPLETED
     assert library_proof_env.model.asked == []
     assert library_proof_env.runner.sent == ["list_loans"]
-    spans = library_proof_env.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
+    spans = library_proof_env.sink.named(tracing.SPAN_PHASE)
     assert len(spans) == 1
     assert spans[0].attributes["code_stop"] == "done"
     assert spans[0].attributes["steps_by_code"] == 1

@@ -605,7 +605,7 @@ du -sh <workflow>/___command_info/*/ | sort -h | tail -5
 
 # AR2 - the base axis reaches the wildcard class through commands(); both models live
 # together in tests/todo_list_workflow (TodoList base:[TodoItem], TodoItem parent:[TodoList])
-cat tests/todo_list_workflow/_commands/context_inheritance_model.json
+cat tests/todo_list_workflow/_commands/context_inheritance_model.json   # removed spelling: now inherits on class Context
 cat tests/todo_list_workflow/context_hierarchy_model.json
 grep -n "context_model.commands(ancestor_ctx)\|get_ancestor_contexts" \
      fastworkflow/model_pipeline_training.py fastworkflow/command_context_model.py
@@ -693,7 +693,7 @@ cached utterances:
 ### AR2 — the closure was incomplete; `base` and `parent` compose
 
 fastWorkflow has two inheritance axes and D5 modelled only one. `base`
-(`_commands/context_inheritance_model.json`) pulls a context's commands into a derived context's
+(`_commands/context_inheritance_model.json` (a removed spelling: a context's bases are now `inherits` on its `class Context`)) pulls a context's commands into a derived context's
 own label space, resolved by `CommandContextModel.commands`
 (`command_context_model.py:222-266`). `parent` (`context_hierarchy_model.json`) drives
 `get_ancestor_contexts` (`:169-215`) and determines whose utterances become a context's
@@ -1192,7 +1192,7 @@ Where §4 understates the problem:
 changed command". That question is real and its answer is subtle — the base and parent axes
 compose, so `AdminSession`'s wildcard class carries `Account/close` even though `Account` is
 nowhere on its parent chain — but it structurally cannot answer *"would this workflow produce
-this model today"*. A `context_inheritance_model.json` edit removes commands from a label space
+this model today"*. A `context_inheritance_model.json` (a removed spelling: a context's bases are now `inherits` on its `class Context`) edit removes commands from a label space
 with **every command file byte-identical**. Roughly half of R5's implementation is a recorded
 `TrainingSignature` (per-context label space, ancestors, wildcard sources; global seed, model
 ids, persona source, generator digest, reserved-label constants, and a hand-bumped

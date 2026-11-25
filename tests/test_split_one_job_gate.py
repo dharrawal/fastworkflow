@@ -25,6 +25,7 @@ from tests.test_approval_binding import (  # noqa: F401
 from tests.test_plan_reply_policy import _wire_plan, planner, script_param_extraction  # noqa: F401
 from tests.test_round1_gate import gated, no_draft_extraction  # noqa: F401
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401
+from tests import span_tree
 
 pytestmark = pytest.mark.usefixtures("initialized_fastworkflow")
 
@@ -114,9 +115,9 @@ def test_a_confident_one_skips_the_splitter_and_records_the_gate(remote):
     assert len(calls) == 1
     assert record == {"request": ONE, "raw": [], "merged": [ONE], "attempts": 0,
                       "gate": {"score": 0.97, "label": "one", "threshold": 0.85, "skipped": True}}
-    # on the span: no splitter prompt was used, so no prompt keys
-    recorded = tracing.split_record_attribute(record)
-    assert recorded["gate"]["skipped"] is True and "prompt_digest" not in recorded and "prompt_source" not in recorded
+    # on the split span: no splitter prompt was used, so no prompt values; the gate's verdict is its own span's
+    recorded = tracing.split_stage_attributes(record)
+    assert "gate" not in recorded and recorded["prompt_digest"] is None and recorded["prompt_source"] is None
     json.dumps(recorded)
 
 
@@ -179,7 +180,7 @@ def test_off_makes_no_remote_call(remote, monkeypatch):
     with workflow_agent.recording_split() as record:
         out = workflow_agent.split_into_subtasks(SEVERAL, planner_lm=splitter, workflow_folderpath=LIBRARY)
     assert out == SEVERAL_PARTS and calls == [] and len(splitter.calls) == 1
-    assert "gate" not in record and "gate" not in tracing.split_record_attribute(record)
+    assert "gate" not in record and "gate" not in tracing.split_stage_attributes(record)
 
 
 def test_no_remote_model_makes_no_remote_call(remote, monkeypatch, no_planner_key):
@@ -227,8 +228,12 @@ def test_a_turn_the_gate_kept_whole_runs_one_part_and_records_the_gate(gated, mo
     out = gated.ctx.process_turn(ONE, unattended=True)
     assert out.status is TurnStatus.COMPLETED
     assert splitter.calls == []
-    span = [span for span in gated.sink.spans if span.name == tracing.SPAN_TURN][-1]
-    recorded = span.attributes["subtask_split"]
+    (split,) = span_tree.named(gated.sink, tracing.SPAN_SPLIT)
+    recorded = split.attributes
     assert recorded["request"] == ONE and recorded["merged"] == [ONE] and recorded["raw"] == []
-    assert recorded["attempts"] == 0 and recorded["gate"]["skipped"] is True
-    assert "prompt_digest" not in recorded
+    assert recorded["attempts"] == 0 and recorded["prompt_digest"] is None
+    # the gate is the split stage's own step, and the splitter never ran
+    (gate,) = span_tree.children_of(split, gated.sink, tracing.SPAN_SPLIT_GATE)
+    assert gate.attributes["skipped"] is True and gate.attributes["label"] == "one" and gate.attributes["score"] == 0.99
+    assert gate.attributes["threshold"] == 0.85
+    assert not span_tree.children_of(split, gated.sink, tracing.SPAN_SPLIT_SPLITTER)

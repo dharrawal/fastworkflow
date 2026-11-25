@@ -72,6 +72,9 @@ class ResponseGenerator:
   gets a note. A command may move the workflow only onto a context it declares (or one that
   inherits from it): a move onto any other context fails the command, naming the decorator to
   write, and the workflow stays where it was, so a missing `@descends_to` shows up in the first run.
+  The target is checked when the workflow loads too: its `parents` (below) must name the
+  command's context or a context it inherits, so `Book`'s `parents = ["Library"]` is what lets
+  `Library/open_book` load.
 - **`json_schema_extra={"from_command_output": "find_book.book_uids"}`** points this field at
   another command's `Output` field: the place its value comes from. On an `Input` field,
   `from_command_output` is a **producer** hint: "call `find_book` first; one of its `book_uids` is this value". The
@@ -100,6 +103,9 @@ from ...application.library import Book, Library
 
 
 class Context:
+    inherits = ["Record"]
+    parents = ["Library"]
+
     state_version = 1
 
     @classmethod
@@ -123,8 +129,11 @@ class Context:
         return Library.from_state_dict(state["library"]).books[state["uid"]]
 ```
 
-`_Book.py` describes the `Book` context's object. `get_parent` is the record that encloses a
-book, the library; `get_displayname` is how a book is named to the agent. `get_state` and `from_state` are the serialization hooks: they let the server save a session standing on a
+`_Book.py` describes the `Book` context's object. `inherits` gives a book the commands of
+`Record`. `get_parent` is the record that encloses a book, the library, and `parents` names the
+contexts whose records `get_parent` returns; the two go together, and the workflow does not load
+with one and not the other. Both declarations are lists of context names written as strings,
+read as written. `get_displayname` is how a book is named to the agent. `get_state` and `from_state` are the serialization hooks: they let the server save a session standing on a
 book and restore it, so the session can be evicted instead of held in memory for good (a context class without
 `get_state` pins its session). The context class
 says nothing about how to enter it: that is the navigation command's `@descends_to`. And here

@@ -92,6 +92,11 @@ def _command_with_declared_output(plan_cls):
 # __result__ is the answer, and no phase writes one
 # ----------------------------------------------------------------------
 
+
+def _answer_steps(env) -> list:
+    """The answer steps of the turn's planning command calls (``fw.step`` with ``kind`` answer)."""
+    return [span for span in env.sink.named(tracing.SPAN_STEP) if span.attributes.get("kind") == "answer"]
+
 def test_a_result_text_is_the_answer_exactly_and_no_phase_writes_one(library_env, answered):
     class Plan:
         def find(self, input) -> FoundBooks:
@@ -518,9 +523,10 @@ def test_answer_by_model_gives_a_phased_call_one_deferred_answer_from_its_facts(
     assert "Dune" in answered[0] and "Dune Messiah" in answered[0]
     assert not any("__result__" in r.message for r in caplog.records)
     assert _outputs(library_env, command) == []
-    spans = library_env.sink.named(tracing.SPAN_PLANNING_COMMAND_ANSWER)
+    # The deferred answer is the call's answer step, written by the model (``fw.step`` kind answer, bd fix-qjne.34).
+    spans = _answer_steps(library_env)
     assert len(spans) == 1
-    assert spans[0].attributes["skill"] == command.name
+    assert spans[0].attributes["command"] == command.name and spans[0].attributes["run_by"] == "model"
     assert spans[0].attributes["phase"] == "find"
     assert spans[0].attributes["phase_index"] == 0
     assert spans[0].attributes["phase_count"] == 1
@@ -541,7 +547,7 @@ def test_a_text_result_means_the_last_phases_agent_is_not_asked_for_an_answer(li
     # Code ran every step, so the last phase's agent is given no step at all (fix-s70h).
     assert library_env.model.closings == []
     assert all("Answer the request" not in query for query in library_env.model.answers)
-    assert library_env.sink.named(tracing.SPAN_PLANNING_COMMAND_ANSWER) == []
+    assert _answer_steps(library_env) == []
 
 
 def test_a_phased_answer_by_model_gives_the_agent_no_step_and_the_deferred_call_writes_the_answer(

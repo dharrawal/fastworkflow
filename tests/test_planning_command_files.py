@@ -561,8 +561,8 @@ def test_a_planning_command_file_is_planned_as_a_call_and_its_hook_refusal_falls
     script_extractor(monkeypatch, _arguments(_typed(person="Ann Lee")))
     lm = DummyLM([_typed(person="Ann Lee")])
     result = _plan_planning_command(ctx, wf, lm, request, command)
-    span = sink.named("fw.planner.plan")[-1]
-    assert span.attributes["plan_source"] == "skill_call" and span.attributes["skill"] == "show_record"
+    span = sink.named("fw.plan")[-1]
+    assert span.attributes["plan_source"] == "skill_call" and span.attributes["command"] == "show_record"
     assert span.attributes["plan"].splitlines()[:3] == [
         "1. find_group query=Payroll", "2. list_members filter=Ann Lee", "3. open member 1"]
     assert "show_record(name: str, kind: group|unit" in _prompt(lm, 0)
@@ -579,9 +579,9 @@ def test_a_planning_command_file_is_planned_as_a_call_and_its_hook_refusal_falls
     extractor = script_extractor(monkeypatch, _arguments(_typed(person="Ann Lee", include_risk=True)))
     lm = DummyLM([_text_answer()])
     _plan_planning_command(ctx, wf, lm, request, command)
-    span = sink.named("fw.planner.plan")[-1]
+    span = sink.named("fw.plan")[-1]
     assert span.attributes["plan_source"] == "text"
-    assert "the risk is assessed for the whole record" in span.attributes["skill_fallback"]
+    assert "the risk is assessed for the whole record" in span.attributes["command_fallback"]
     assert len(extractor.prompts) == 1 and "was refused" not in extractor.prompts[0]
     assert "TEMPLATE TEXT" in _prompt(lm, 0)
 

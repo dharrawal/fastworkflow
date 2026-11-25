@@ -2,7 +2,7 @@
 
 Moves: a command may move the session only onto a context it declares with ``@descends_to``; a move onto any other
 context fails the command and the record is put back (``command_executor._check_move``). "Onto the declared context"
-means the record's context is the declared one or one that inherits from it in ``context_inheritance_model.json``. A
+means the record's context is the declared one or one that inherits from it (``inherits`` on its ``class Context``). A
 command that declares a move and does not make it has not moved; setting ``workflow.root`` is not a record move; a move
 onto another record of the command's own context is a move and is declared like any other.
 
@@ -21,7 +21,9 @@ import uuid
 import pytest
 
 import fastworkflow
+from fastworkflow import command_preview
 from fastworkflow import context_navigation
+from fastworkflow.command_directory import CommandLoadError
 from fastworkflow.command_executor import CommandExecutor, call_response_generator
 from fastworkflow.command_routing import ModuleType
 from fastworkflow.workflow import MissingGetParentError
@@ -215,17 +217,22 @@ def _todo_without_item_callback(tmp_path) -> str:
 
 
 def test_with_a_root_a_move_onto_a_record_whose_context_has_no_get_parent_fails(tmp_path):
-    workflow = _started(_todo_without_item_callback(tmp_path))
+    """A context with no get_parent declares no parents (bd fix-qjne.36), so a command that descends to it from another
+    context is stopped when the workflow loads, naming the parents to declare; acting it raises the load error and the
+    record stays."""
+    folder = _todo_without_item_callback(tmp_path)
+    problems = [str(problem) for problem in command_preview.load_problems(folder)]
+    line = next(problem for problem in problems if problem.startswith("TodoList/add_child_todoitem: "))
+    assert "TodoItem declares no parents" in line and 'Add "TodoList" to the parents of TodoItem' in line
+
+    workflow = _started(folder)
     output = _act(workflow, "TodoListManager/create_todo_list", description="house")
     assert output.command_response.success, output.command_response.response
     todo_list = workflow._current_command_context
 
-    output = _act(workflow, "TodoList/add_child_todoitem", description="milk", assign_to="me", is_complete=False)
+    with pytest.raises(CommandLoadError, match="TodoItem declares no parents"):
+        _act(workflow, "TodoList/add_child_todoitem", description="milk", assign_to="me", is_complete=False)
 
-    assert not output.command_response.success
-    assert output.command_response.response.startswith(
-        "add_child_todoitem moved the workflow onto a TodoItem record, but the context TodoItem has no get_parent "
-        "(there is no _commands/TodoItem/_TodoItem.py)")
     assert workflow._current_command_context is todo_list
 
 

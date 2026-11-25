@@ -27,11 +27,10 @@ from fastworkflow.observability.turn_derivations import (
     CONSEQUENCE_ORDER,
     LOW_CONFIDENCE_DEFAULT_MARGIN,
     SIGNAL_TOPK_MARGIN,
-    SPAN_AGENT_TOOL_CALL,
-    SPAN_ASK_USER,
-    SPAN_COMMAND_EXECUTE,
+    SPAN_COMMAND,
+    SPAN_INTENT,
     SPAN_LLM_CALL,
-    SPAN_NLU_INTENT,
+    SPAN_QUESTION,
     _exact_int,
     _finite_number,
     _mapping_attr,
@@ -182,7 +181,7 @@ def annotate_attempt_rows(
 #
 # (a) a turn's execution ledger -- every dispatch, joined on `command_call_id`
 #     between the turn record's `execution_records` refs and the trace's
-#     `fw.command.execute` spans (and the span-less inner hops those spans
+#     `fw.command` spans (and the span-less inner hops those spans
 #     file under `child_calls`);
 # (b) the turn's decision signals -- the least confident intent resolution's
 #     top-k margin and whether the user was asked -- and the low-confidence

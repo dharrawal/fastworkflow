@@ -953,6 +953,71 @@ def check_no_planning_commands_folder(workflow_folderpath: str) -> None:
         raise ValueError(PLANNING_COMMANDS_FOLDER_RETIRED)
 
 
+#: The one home of a workflow's helper modules: the package ``_commands/_shared/``, which the framework never reads as
+#: commands, contexts, settings or training inputs; command files import it (``from ._shared.x import Y`` from a root
+#: command, ``from .._shared.x import Y`` from a context folder).
+SHARED_HELPERS_FOLDER = "_shared"
+
+
+def helper_file_problems(workflow_folderpath: str) -> list[str]:
+    """The underscore files and folders of ``_commands/`` the framework does not read, one ``<path>: <reason>`` each
+    (bd fix-qjne.33): each is a workflow-wide load problem (``command_preview.load_problems``).
+
+    ``_commands/`` holds command files, context folders (command files and the folder's own ``_<Context>.py``),
+    ``_workflow.py``, its ``.json`` files and the helper package ``_shared/``; ``__init__.py`` and ``__pycache__`` are
+    allowed everywhere. Any other ``.py`` file whose name starts with ``_``, directly in ``_commands/`` or in a context
+    folder, and any other folder of ``_commands/`` whose name starts with ``_``, is reported: an underscore no longer
+    means "ignored", so a misspelt settings or context class file is caught (with a did-you-mean when one name is
+    close) and a helper module is told to move to ``_commands/_shared/``. ``_workflow.py`` in a context folder and
+    ``_split.py`` are reported by ``workflow_agent.split_file_problems`` with their own messages.
+    """
+    root = Path(workflow_folderpath) / "_commands"
+    if not root.is_dir():
+        return []
+    entries = sorted(root.iterdir())
+    contexts = [entry.name for entry in entries
+                if entry.is_dir() and not entry.name.startswith(("_", ".")) and entry.name != "__pycache__"]
+    problems = []
+    for entry in entries:
+        name = entry.name
+        if entry.is_dir():
+            if name in (SHARED_HELPERS_FOLDER, "__pycache__") or name.startswith("."):
+                continue
+            if name.startswith("_"):
+                problems.append(f"_commands/{name}/: a folder of _commands/ whose name starts with an underscore is "
+                                f"no context and is never read; helper modules belong in the package "
+                                f"_commands/{SHARED_HELPERS_FOLDER}/: move its modules there")
+                continue
+            for path in sorted(entry.glob("_*.py")):
+                # a file that defines class Context is reported by the loader (_check_context_class_file_name)
+                if path.name in ("__init__.py", f"_{name}.py", "_workflow.py", "_split.py") \
+                        or _defines_context_class(path):
+                    continue
+                problems.append(_stray_underscore_file(f"_commands/{name}/{path.name}", "..",
+                                                       {f"_{name}.py": f"_commands/{name}/_{name}.py"}))
+        elif name.startswith("_") and name.endswith(".py") and name not in ("__init__.py", "_workflow.py",
+                                                                              "_split.py"):
+            close = {"_workflow.py": "_commands/_workflow.py",
+                     **{f"_{context}.py": f"_commands/{context}/_{context}.py" for context in contexts}}
+            problems.append(_stray_underscore_file(f"_commands/{name}", ".", close))
+    return problems
+
+
+def _stray_underscore_file(label: str, dots: str, expected: dict[str, str]) -> str:
+    """The problem line of an underscore ``.py`` file the framework does not read: a did-you-mean when its name is
+    close to a file the framework reads there (*expected*: file name -> where it belongs), and where a helper goes."""
+    import difflib
+
+    name = label.rsplit("/", 1)[-1]
+    close = difflib.get_close_matches(name, list(expected), n=1, cutoff=0.85)
+    guess = f" Did you mean {expected[close[0]]}?" if close else ""
+    module = name[:-3].lstrip("_") or "helpers"
+    return (f"{label}: is not read: in _commands/ a file whose name starts with an underscore is no longer ignored, "
+            f"and only _workflow.py and a context folder's own _<Context>.py are read.{guess} A helper module belongs "
+            f"in the package _commands/{SHARED_HELPERS_FOLDER}/: move it to _commands/{SHARED_HELPERS_FOLDER}/"
+            f"{module}.py and import it as from {dots}{SHARED_HELPERS_FOLDER}.{module} import ...")
+
+
 class CommandLoadError(ValueError):
     """Raised when a class of a command that does not load is asked for; the message is the command's load errors
     (``command_load_errors``), each naming the file and what to write instead."""
@@ -991,18 +1056,24 @@ def _check_context_class_file_name(context_name: str, context_dir: Path) -> None
         # workflow_agent.split_file_problems
         if path.name in (f"_{context_name}.py", "_workflow.py"):
             continue
-        try:
-            source = path.read_text(encoding="utf-8")
-            if "class Context" not in source:
-                continue
-            tree = ast.parse(source, filename=str(path))
-        except (OSError, SyntaxError, ValueError):
-            continue    # a helper that cannot be read fails where it is imported
-        if any(isinstance(node, ast.ClassDef) and node.name == "Context" for node in tree.body):
+        if _defines_context_class(path):
             fix = (f"rename {path.name} to _{context_name}.py" if not (context_dir / f"_{context_name}.py").is_file()
                    else f"move the class to _{context_name}.py")
             raise ValueError(f"{path}: defines class Context, but the context class file of {context_name} is "
                              f"_{context_name}.py: {fix}")
+
+
+def _defines_context_class(path: Path) -> bool:
+    """Whether the file at *path* defines a top-level ``class Context`` (a file that cannot be read or parsed does not:
+    it fails where it is imported)."""
+    try:
+        source = path.read_text(encoding="utf-8")
+        if "class Context" not in source:
+            return False
+        tree = ast.parse(source, filename=str(path))
+    except (OSError, SyntaxError, ValueError):
+        return False
+    return any(isinstance(node, ast.ClassDef) and node.name == "Context" for node in tree.body)
 
 
 def _command_kind_from_ast(command_file_path: Path) -> tuple[str, bool]:
@@ -1075,11 +1146,11 @@ def missing_generator_problem(command_file_path: str | Path) -> str | None:
 
     One rule, the one the scanner classifies by (``_command_kind_from_ast``): a generator is a CLASS named
     ``ResponseGenerator`` or ``PlanGenerator`` defined at the file's top level (it may inherit a shared base from a
-    ``_`` module). So a file whose generator name is imported or assigned is refused, naming the class to define; a
-    file that binds ``Signature`` and defines no generator has a misspelled or missing one; and a file that defines
-    neither a ``Signature`` nor a generator is no command at all: a helper module, whose name starts with ``_``
-    (the scanner skips those before this is asked). A file with a generator and no ``Signature`` (a startup
-    command) is a command and is not reported.
+    module of ``_commands/_shared/``). So a file whose generator name is imported or assigned is refused, naming the
+    class to define; a file that binds ``Signature`` and defines no generator has a misspelled or missing one; and a
+    file that defines neither a ``Signature`` nor a generator is no command at all: a helper module, which lives in
+    ``_commands/_shared/`` (the scanner never reads that folder). A file with a generator and no ``Signature`` (a
+    startup command) is a command and is not reported.
     """
     try:
         tree = ast.parse(Path(command_file_path).read_text(encoding="utf-8"))
@@ -1093,11 +1164,11 @@ def missing_generator_problem(command_file_path: str | Path) -> str | None:
     if bound := sorted((names & generators) - defined):
         return (f"{command_file_path}: {bound[0]} is imported or assigned here, not defined; a generator is a class "
                 f"defined in the command file: write class {bound[0]}(<base>) in this file (it may inherit a base "
-                "from a _ helper module)")
+                "from a helper module of _commands/_shared/)")
     if "Signature" not in names:
         return (f"{command_file_path}: is not a command: it defines no Signature, ResponseGenerator or "
-                "PlanGenerator. A file in _commands/ is a command; name a helper module with a leading underscore "
-                f"(_{Path(command_file_path).name})")
+                "PlanGenerator. A file in _commands/ is a command; a helper module belongs in the package "
+                f"_commands/_shared/ (_commands/_shared/{Path(command_file_path).name})")
     return (f"{command_file_path}: has a Signature but no ResponseGenerator or PlanGenerator; the class name must be "
             "exactly ResponseGenerator (a command that runs code) or PlanGenerator (a planning command); "
             "check its spelling and case")

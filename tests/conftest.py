@@ -305,16 +305,25 @@ def reference_agent_window(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def split_gate_off(monkeypatch):
+def split_gate_off():
     """The one-job gate in front of the splitter (``workflow_agent._one_job_gate``, bd fix-qjne.26) is off in every test
     unless the test turns it on: with a remote decision model key in the developer's env files, the gate would ask the
     LIVE remote model before every split, and a test that scripts the splitter's answer would then see the request kept
     whole whenever the live model calls it one job. The gate's own tests (``tests/test_split_one_job_gate.py``) clear
     the setting and script the remote answer. Set in the process environment, which ``get_env_var`` reads after the env
-    files; a test that loads env files of its own sees the gate only if those files set it."""
+    files; a test that loads env files of its own sees the gate only if those files set it.
+
+    The patch has its own ``MonkeyPatch`` (not the test's): an autouse fixture that requests ``monkeypatch`` sets it up
+    before every other fixture, so a test's own patches would then be undone only after those fixtures' teardowns ran
+    (a fixture's teardown would call a function the test patched to raise)."""
     from fastworkflow import workflow_agent
 
-    monkeypatch.setenv(workflow_agent.SPLIT_GATE_THRESHOLD_SETTING, workflow_agent.SPLIT_GATE_OFF)
+    guard = pytest.MonkeyPatch()
+    guard.setenv(workflow_agent.SPLIT_GATE_THRESHOLD_SETTING, workflow_agent.SPLIT_GATE_OFF)
+    try:
+        yield
+    finally:
+        guard.undo()
 
 
 @pytest.fixture

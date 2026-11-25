@@ -24,7 +24,8 @@ class NavigatorStubGenerator:
     def __init__(
         self, 
         navigators_root: str | Path = "navigators", 
-        model_path: str | Path = "_commands/context_inheritance_model.json"
+        model_path: str | Path = "_commands/context_inheritance_model.json",
+        model: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Initialize the navigator stub generator.
 
@@ -35,7 +36,9 @@ class NavigatorStubGenerator:
         """
         self.navigators_root = Path(navigators_root)
         self.model_path = Path(model_path)
-        self._model_data: Optional[Dict[str, Any]] = None
+        # ``{context: {"base": [...]}}`` given by the caller (``fastworkflow build`` derives it from the classes and
+        # writes no file); without it the model is read from *model_path*
+        self._model_data: Optional[Dict[str, Any]] = model
 
     def load_context_model(self) -> Dict[str, Any]:
         """Load the context model using the JSON file if present or CommandContextModel fallback.

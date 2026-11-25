@@ -1,4 +1,4 @@
-"""fw.nlu.intent spans carry decision_uncertainty under real traced flows.
+"""fw.intent spans carry decision_uncertainty under real traced flows.
 
 Complements ``tests/test_nlu_observability/decision_signals.py``: that file proves the
 assembling functions and static no-read guards; this one proves the structured
@@ -87,26 +87,23 @@ def _signal(uncertainty: DecisionUncertainty, kind: str):
     return matching[0]
 
 
-def test_exact_prefix_intent_span_carries_decision_uncertainty(hello_ctx):
+def test_an_exact_name_writes_no_intent_span_and_its_command_says_how(hello_ctx):
+    """An exact name decided nothing (bd fix-qjne.34 decision b): no fw.intent, so no command-identity uncertainty is
+    recorded for it; the command's span says it was resolved by its exact name."""
     ctx, sink = hello_ctx
     CommandExecutor.invoke_command(
         ctx,
         "add_two_numbers <first_num>5</first_num><second_num>3</second_num>",
     )
-    span = sink.named(tracing.SPAN_NLU_INTENT)[-1]
-
-    assert "decision_uncertainty" in span.attributes
-    recorded = span.attributes["decision_uncertainty"]
-    assert recorded["decision_kind"] == "command-identity"
-    assert recorded["signals_absent_reason"] == "deterministic-resolution"
-    assert DecisionUncertainty(**recorded).candidate_count == 1
+    assert sink.named(tracing.SPAN_INTENT) == []
+    assert sink.named(tracing.SPAN_COMMAND)[-1].attributes["resolved_by"] == "exact_name"
 
 
 def test_fuzzy_prematch_intent_span_carries_distance_and_threshold(hello_ctx):
     ctx, sink = hello_ctx
     CommandExecutor.invoke_command(ctx, "what can i do")
 
-    span = sink.named(tracing.SPAN_NLU_INTENT)[-1]
+    span = sink.named(tracing.SPAN_INTENT)[-1]
     assert span.attributes["matcher_layer"] == "fuzzy_prematch"
     assert "decision_uncertainty" in span.attributes
 
@@ -122,7 +119,7 @@ def test_classifier_intent_span_carries_confidence_signal(hello_ctx):
 
     spans = [
         s
-        for s in sink.named(tracing.SPAN_NLU_INTENT)
+        for s in sink.named(tracing.SPAN_INTENT)
         if s.attributes.get("matcher_layer") == "classifier"
     ]
     assert spans, "classifier layer never ran"
@@ -141,23 +138,23 @@ def test_every_intent_span_carries_escalation_outcome(hello_ctx):
         ctx, "add_two_numbers <first_num>1</first_num><second_num>2</second_num>"
     )
 
-    spans = sink.named(tracing.SPAN_NLU_INTENT)
+    spans = sink.named(tracing.SPAN_INTENT)
     assert spans
     for span in spans:
         assert span.attributes["escalation_outcome"] in ESCALATION_OUTCOMES
         assert "decision_uncertainty" in span.attributes
 
 
-def test_param_extraction_span_carries_slot_binding_uncertainty(hello_ctx):
+def test_a_typed_extraction_writes_no_parameters_span(hello_ctx):
+    """Typed values read in code, all valid: the extraction decided nothing (bd fix-qjne.34 decision b), so no
+    fw.parameters (and no slot-binding uncertainty) is written; the command's span says the values were typed and
+    valid."""
     ctx, sink = hello_ctx
     CommandExecutor.invoke_command(
         ctx,
         "add_two_numbers <first_num>5</first_num><second_num>3</second_num>",
     )
+    assert sink.named(tracing.SPAN_PARAMETERS) == []
+    command = sink.named(tracing.SPAN_COMMAND)[-1]
+    assert command.attributes["parameters_read_by"] == "typed" and command.attributes["parameters_valid"] is True
 
-    span = sink.named(tracing.SPAN_NLU_PARAM_EXTRACTION)[-1]
-    assert "decision_uncertainty" in span.attributes
-    recorded = DecisionUncertainty(**span.attributes["decision_uncertainty"])
-    assert recorded.decision_kind == "slot-binding"
-    assert recorded.signals
-    assert recorded.signals[0].value == span.attributes["extraction_method"]

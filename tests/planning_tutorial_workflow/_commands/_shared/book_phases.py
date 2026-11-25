@@ -1,4 +1,4 @@
-"""_book_phases: the phases book_by_title and book_loans share.
+"""book_phases: the phases book_by_title and book_loans share.
 
 find lists the matches; book opens the one whose title is the request's title (run(..., named=...)), and
 is skipped when nothing matched; __result__ says what book found, or that no book matches. A
@@ -8,8 +8,8 @@ from pydantic import BaseModel
 
 from fastworkflow.planning import run
 
-from .find_book import Signature as FindBook
-from .show_book import Signature as ShowBook
+from ..find_book import Signature as FindBook
+from ..show_book import Signature as ShowBook
 
 
 class BookPhases:

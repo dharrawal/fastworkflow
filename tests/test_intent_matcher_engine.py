@@ -316,7 +316,7 @@ def test_a_failed_matcher_call_leaves_the_fallback_unchanged_and_marks_the_span(
 
     assert output.command is None or output.candidates                   # the question, as before the marker
     assert trace["remote_failed"] == {"error_class": "_CreditsExhausted", "status_code": 402}
-    assert trace["engine"] == "question" and trace["engine_chain"][-1] == "matcher"
+    assert trace["decided_by"] == "question" and trace["engine_chain"][-1] == "matcher"
 
 
 def test_the_chain_fallback_carries_the_failure_class_and_status(library_copy, matcher_model, fresh_outage_counter):
@@ -537,7 +537,7 @@ def test_the_cme_step_asks_the_matcher_for_a_scope_with_no_head(on_a_book, match
 
     assert output.command == "Book/list_loans" and output.outcome != "ambiguous"
     assert output.kind != "core" and output.bare_value is False
-    assert trace["matcher_layer"] == "matcher" and trace["engine"] == "matcher" and trace["engine_fallback"] is True
+    assert trace["matcher_layer"] == "matcher" and trace["decided_by"] == "remote" and trace["engine_fallback"] is True
     assert trace["engine_chain"] == ["matcher"] and "engine_mode" not in trace
     assert trace["matcher"]["top_label"] == "Book/list_loans" and trace["matcher"]["model"] == "dummy"
     assert trace["matcher"]["scope_path"] == ["Book", "Library", "*"] and trace["candidate_count"] == 1
@@ -574,7 +574,7 @@ def test_the_cme_step_turns_an_ambiguity_into_the_standard_question(on_a_book, m
     assert output.command is None and list(output.ambiguous) == labels
     assert output.outcome == "ambiguous" and output.decided_by == "question"
     assert trace["candidates"] == labels and trace["reducible"] is True and trace["candidate_count"] == 2
-    assert trace["engine"] == "question" and trace["engine_chain"] == ["matcher"]     # nobody was confident
+    assert trace["decided_by"] == "question" and trace["engine_chain"] == ["matcher"]     # nobody was confident
     assert "jev_tiebreak" not in trace and len(model.calls) == 1
 
 
@@ -596,7 +596,7 @@ def test_an_exact_name_needs_no_matcher(on_a_book, matcher_model):
     output = predictor.predict("list_loans")
     trace = predictor.trace
     assert output.command == "Book/list_loans" and trace["matcher_layer"] == "exact_prefix"
-    assert model.calls == [] and "engine" not in trace
+    assert model.calls == [] and trace["decided_by"] == "name" and "engine_chain" not in trace
 
 
 def test_a_router_a_test_supplies_is_asked_and_the_matcher_is_not(on_a_book, matcher_model, monkeypatch):
@@ -610,7 +610,7 @@ def test_a_router_a_test_supplies_is_asked_and_the_matcher_is_not(on_a_book, mat
     predictor = CommandNamePrediction(cme)
     output = predictor.predict("what is out on loan")
     trace = predictor.trace
-    assert output.command == "Book/show_book" and trace["engine"] == "classifier"
+    assert output.command == "Book/show_book" and trace["decided_by"] == "local"
     assert model.calls == []
     assert intent_detector.engine_choice(app.folderpath, "Book") == "chain"
     assert intent_detector.engine_choice(app.folderpath, "Member") == "matcher"
@@ -625,9 +625,10 @@ def test_without_the_planner_key_a_scope_with_no_head_has_no_matcher(on_a_book, 
 
 
 def test_the_span_contract_names_the_matchers_keys():
-    contract = tracing.SPAN_CONTRACTS[tracing.SPAN_NLU_INTENT]
-    assert contract.version == 13
-    assert {"engine", "engine_fallback", "engine_chain", "matcher", "matcher_layer", "remote_failed"} <= contract.attributes
+    contract = tracing.SPAN_CONTRACTS[tracing.SPAN_INTENT]
+    assert contract.version == 14
+    assert {"decided_by", "engine_fallback", "engine_chain", "matcher", "matcher_layer", "remote_failed"} <= contract.attributes
+    assert "engine" not in contract.attributes      # renamed decided_by (bd fix-qjne.34)
     assert not {"engine_mode", "jev_tiebreak"} & contract.attributes        # gone with the setting and the tie-break
     assert not {"cache_similarity", "cache_similarity_threshold"} & contract.attributes   # gone with the similarity cache
 
@@ -688,7 +689,7 @@ def test_one_context_without_its_head_runs_on_the_matcher_and_the_rest_on_their_
     trace = predictor.trace
 
     assert intent.command == "Library/list_branches" and intent.context == "Library"
-    assert trace["engine"] == "classifier" and trace["engine_chain"] == ["classifier"]
+    assert trace["decided_by"] == "local" and trace["engine_chain"] == ["classifier"]
     assert model.calls == []
     problems, notices = intent_detector.startup_report(folder)
     assert problems == [] and notices == [_untrained("Book", "global")]
@@ -939,7 +940,7 @@ def test_in_the_cme_step_a_confident_head_decides_with_no_model_call(on_a_book, 
     trace = predictor.trace
 
     assert output.command == "Book/show_book" and model.calls == []
-    assert trace["matcher_layer"] == "classifier" and trace["engine"] == "classifier"
+    assert trace["matcher_layer"] == "classifier" and trace["decided_by"] == "local"
     assert trace["engine_chain"] == ["classifier"] and "engine_mode" not in trace
     assert "matcher" not in trace and "jev_tiebreak" not in trace
 
@@ -957,7 +958,7 @@ def test_in_the_cme_step_an_unsure_head_hands_the_scope_to_the_matcher(on_a_book
     assert output.command == "Book/list_loans" and output.outcome != "ambiguous"
     assert len(model.calls) == 1 and model.calls[0][0].__doc__.strip() == \
         "Decide which command a message to a workflow asks for."          # the matcher's one call
-    assert trace["matcher_layer"] == "matcher" and trace["engine"] == "matcher"
+    assert trace["matcher_layer"] == "matcher" and trace["decided_by"] == "remote"
     assert trace["engine_fallback"] is False and trace["engine_chain"] == ["classifier", "matcher"]
     assert trace["classifier"] == UNSURE and trace["matcher"]["top_label"] == "Book/list_loans"
     assert "jev_tiebreak" not in trace and trace["candidate_count"] == 1
@@ -997,7 +998,7 @@ def test_in_the_cme_step_the_matchers_ambiguity_is_the_standard_question(on_a_bo
     labels = ["Book/show_book", "Book/list_loans"]                 # the matcher's candidates, not the head's three
     assert list(output.ambiguous) == labels
     # Neither link was confident: the question decides, and the trace says which links were asked.
-    assert trace["engine"] == "question" and trace["engine_chain"] == ["classifier", "matcher"]
+    assert trace["decided_by"] == "question" and trace["engine_chain"] == ["classifier", "matcher"]
 
 
 def test_in_the_cme_step_a_failed_matcher_call_leaves_the_local_candidates_for_the_question(
@@ -1013,7 +1014,7 @@ def test_in_the_cme_step_a_failed_matcher_call_leaves_the_local_candidates_for_t
     trace = predictor.trace
 
     assert output.outcome == "ambiguous" and list(output.ambiguous) == head and len(model.calls) == 1
-    assert trace["engine"] == "question" and trace["engine_chain"] == ["classifier", "matcher"]
+    assert trace["decided_by"] == "question" and trace["engine_chain"] == ["classifier", "matcher"]
     assert trace["matcher_layer"] == "classifier" and trace["matcher"]["error"] == "RuntimeError: the model is down"
 
 
@@ -1025,7 +1026,7 @@ def test_in_the_cme_step_a_failed_matcher_call_leaves_a_local_not_here_to_the_wa
     output = predictor.predict("which branches are there")
     trace = predictor.trace
     assert output.command is None and output.outcome != "ambiguous"        # a decline: the walk climbs
-    assert trace["engine"] == "classifier" and trace["escalation_outcome"] == "honored"
+    assert trace["decided_by"] == "local" and trace["escalation_outcome"] == "honored"
 
 
 def test_without_the_planner_key_the_chain_is_the_local_model_then_the_question(
@@ -1040,7 +1041,7 @@ def test_without_the_planner_key_the_chain_is_the_local_model_then_the_question(
     output = predictor.predict("the book")
     trace = predictor.trace
     assert output.outcome == "ambiguous" and list(output.ambiguous) == ["Book/show_book", "Book/list_loans"]      # the head's ambiguity
-    assert trace["engine"] == "question" and trace["engine_chain"] == ["classifier"] and "matcher" not in trace
+    assert trace["decided_by"] == "question" and trace["engine_chain"] == ["classifier"] and "matcher" not in trace
     assert intent_detector.startup_report(app.folderpath, []) == ([], [NO_KEY_LINE])
     assert intent_detector.startup_report(app.folderpath, ["Member"])[0]                # untrained: still refused
 
@@ -1067,7 +1068,7 @@ def test_the_removed_setting_does_not_keep_an_unsure_head_from_the_matcher(
     output = predictor.predict("the book")
     trace = predictor.trace
     assert output.command == "Book/list_loans" and len(model.calls) == 1
-    assert trace["engine"] == "matcher" and trace["engine_chain"] == ["classifier", "matcher"]
+    assert trace["decided_by"] == "remote" and trace["engine_chain"] == ["classifier", "matcher"]
     assert "engine_mode" not in trace
 
 
@@ -1093,7 +1094,7 @@ def test_with_no_remote_model_a_confident_local_plan_is_asked_not_run(on_a_book,
     trace = predictor.trace
 
     assert output.command is None and output.ambiguous[0] == PLAN and "Book/show_book" in output.ambiguous
-    assert trace["engine"] == "question" and trace["candidates"][0] == PLAN
+    assert trace["decided_by"] == "question" and trace["candidates"][0] == PLAN
 
 
 def test_a_remote_confirmation_lets_a_confident_local_plan_run(on_a_book, matcher_model, monkeypatch):
@@ -1107,7 +1108,7 @@ def test_a_remote_confirmation_lets_a_confident_local_plan_run(on_a_book, matche
     trace = predictor.trace
 
     assert output.command == PLAN and len(model.calls) == 1
-    assert trace["engine"] == "matcher" and trace["engine_chain"] == ["classifier", "matcher"]
+    assert trace["decided_by"] == "remote" and trace["engine_chain"] == ["classifier", "matcher"]
 
 
 def test_a_remote_answer_below_the_accept_bar_does_not_run_the_plan(on_a_book, matcher_model, monkeypatch):

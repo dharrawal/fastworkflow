@@ -120,21 +120,15 @@ def _value(span: dict, key: str, default: Any = None) -> Any:
 def _executed(
     step: dict, children: dict[str, list[dict]]
 ) -> Optional[tuple[str, dict, bool, str]]:
-    """(command name, parameters, success, response) of the command a step dispatched."""
-    for call in children.get(step.get("span_id"), ()):
-        if call.get("name") != tracing.SPAN_AGENT_TOOL_CALL:
-            continue
-        success = _attrs(call).get("success")
-        for run in children.get(call.get("span_id"), ()):
-            if run.get("name") == tracing.SPAN_COMMAND_EXECUTE and run.get("command_name"):
-                params = _attrs(run).get("parameters")
-                response = _value(run, "response_text") or _value(call, "response_text") or ""
-                return (
-                    run["command_name"],
-                    params if isinstance(params, dict) else {},
-                    bool(success) if success is not None else True,
-                    str(response),
-                )
+    """(command name, parameters, success, response) of the command a step dispatched: the step's own ``fw.command``
+    child, with the dispatch's success from the step."""
+    for run in children.get(step.get("span_id"), ()):
+        if run.get("name") == tracing.SPAN_COMMAND and run.get("command_name"):
+            params = _attrs(run).get("parameters")
+            success = _attrs(step).get("success")
+            response = _value(run, "response_text") or _value(step, "response_text") or ""
+            return (run["command_name"], params if isinstance(params, dict) else {},
+                    bool(success) if success is not None else True, str(response))
     return None
 
 
@@ -178,13 +172,13 @@ def replay_attempt(
         pending_question = ""
         for span in spans:
             name = span.get("name")
-            if name == tracing.SPAN_ASK_USER:
+            if name == tracing.SPAN_QUESTION:
                 reply = _value(span, "user_response")
                 if reply is not None:
-                    question = _value(span, "agent_query") or pending_question
+                    question = _value(span, "asked") or pending_question
                     policy.observe_reply(str(question or ""), str(reply))
                 continue
-            if name != tracing.SPAN_AGENT_STEP:
+            if name != tracing.SPAN_STEP:
                 continue
             attrs = _attrs(span)
             tool = attrs.get("tool_name")

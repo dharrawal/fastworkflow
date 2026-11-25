@@ -33,6 +33,8 @@ class _Host:
         return dspy.LM("openai/gpt-4o-mini", api_key="unused"), dspy.ChatAdapter()
 
     _call_agent_with_retry = WorkflowExecutionContext._call_agent_with_retry
+    # Where the loop's facts go (the run part or the phase); the method is only ever bound to the session itself.
+    _note_agent_run = WorkflowExecutionContext._note_agent_run
 
 
 def _attempts_for(trajectory):

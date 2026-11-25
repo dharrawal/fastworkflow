@@ -162,7 +162,7 @@ def _part_runs(parts: list[str]) -> list[dict[str, int]]:
 
 
 def _agent_result_attributes(result: Any, attempts: int) -> dict[str, Any]:
-    """Close-out attributes for fw.agent.execute — what the executor returned.
+    """What the agent loop returned (its run part's or its phase's facts).
 
     Read defensively: a suspended run returns a Prediction with no
     ``final_answer``, and distillation passes their own result shapes through
@@ -335,6 +335,9 @@ class WorkflowExecutionContext:
     _turn_not_run = _FreshDefault(list)
     _turn_plan_previews = _FreshDefault(dict)
     _ask_user_rounds = _FreshDefault(list)
+    #: Each question's span facts by its attempt number (``_question_span_facts``).
+    _turn_questions = _FreshDefault(dict)
+    _trace_stages = _FreshDefault(tracing.TurnStages)
 
     def __init__(
         self,
@@ -440,6 +443,9 @@ class WorkflowExecutionContext:
         self._server_incarnation: Optional[str] = None
         self._experiment_claim_store: Any = None
         self._trace_span_stack: list[tracing.Span] = []
+        # The turn's stage and part spans (bd fix-qjne.34): which is open, and how many times each was opened (saved
+        # with the turn, so a resumed turn reopens the same spans).
+        self._trace_stages = tracing.TurnStages()
         self._turn_root_span: Optional[tracing.Span] = None
 
         # Turn accumulator state (one logical turn = one key, across suspensions)
@@ -492,8 +498,8 @@ class WorkflowExecutionContext:
         # fix-1ma8.1: the draft's sub-tasks whose planning-command match was ambiguous (names only); the turn span
         # carries them as ``subtask_plan_ambiguity`` whether or not the review was opened.
         self._turn_plan_ambiguity: list = []
-        # fix-hfqv: the split the model was asked for this turn (request, raw, merged, changed_by, attempts); the turn
-        # span carries it as ``subtask_split``. Recording only.
+        # fix-hfqv: the split the model was asked for this turn (request, raw, merged, changed_by, attempts); the
+        # ``fw.split`` stage span carries it. Recording only.
         self._turn_split: dict = {}
         self._turn_agent_result: Any = None
         self._turn_history_baseline: int = 0
@@ -890,6 +896,18 @@ class WorkflowExecutionContext:
         """Open-span stack for parenting nested spans (single-turn: I5)."""
         return self._trace_span_stack
 
+    @property
+    def trace_stages(self) -> tracing.TurnStages:
+        """The turn's stage and part spans (``tracing.enter_stage``)."""
+        return self._trace_stages
+
+    @property
+    def trace_quiet(self) -> bool:
+        """Whether the work spans of what runs now (phases, steps, commands, their decisions) are not recorded: the
+        framework's own planning command (the turn's review) runs, and is recorded as its stage (``fw.review``) and the
+        review's own spans, never as a phase run by an agent (bd fix-qjne.34 step 5)."""
+        return any(self._is_framework_command(frame.command_name or "") for frame in self._frame_stack()[1:])
+
     def clear_action_log(self) -> None:
         """Clear in-memory action log for a new agent turn."""
         self._action_log.clear()
@@ -940,6 +958,8 @@ class WorkflowExecutionContext:
         self._turn_suspended_ms = 0
         self._suspend_began_at = None
         self._ask_user_rounds = []
+        self._turn_questions = {}
+        self._turn_answer_facts = None
         self._turn_agent_result = None
         self._turn_history_baseline = len(self.conversation_history.messages)
         approval_binding.on_new_turn(self, self._app_workflow, unattended=self._turn_unattended)
@@ -977,6 +997,7 @@ class WorkflowExecutionContext:
         # boundary). Off the stack: children parent to it via the deterministic
         # root id, which survives suspension where the stack does not.
         self._trace_span_stack.clear()
+        self._trace_stages = tracing.TurnStages()
         self._turn_root_span = tracing.start_span(
             self,
             tracing.SPAN_TURN,
@@ -1031,9 +1052,10 @@ class WorkflowExecutionContext:
         Role inversion: command_parameters holds the agent's question; the
         response holds the user's answer ("" + success=False while unanswered).
 
-        Also opens the fw.ask_user human-wait span (deterministic id per
+        Also opens the fw.question human-wait span (deterministic id per
         attempt; emitted at open so the wait is visible while the turn
-        is suspended). Both topologies funnel through here: Topology A via
+        is suspended), with its kind and parent (``_question_span_facts``).
+        Both topologies funnel through here: Topology A via
         _ask_user_tool, Topology B via _note_agent_suspension.
         """
         # `is_ask_user`, not the name: this count feeds a DETERMINISTIC span id,
@@ -1052,20 +1074,47 @@ class WorkflowExecutionContext:
         self.append_turn_output(entry)
 
         if self._turn_key:
+            facts = self._question_span_facts()
+            self._turn_questions[str(attempt)] = facts
             tracing.start_span(
                 self,
-                tracing.SPAN_ASK_USER,
+                tracing.SPAN_QUESTION,
                 kind=tracing.KIND_HUMAN_WAIT,
                 span_id=tracing.deterministic_span_id(
-                    self._turn_key, tracing.SPAN_ASK_USER, attempt
+                    self._turn_key, tracing.SPAN_QUESTION, attempt
                 ),
-                parent_span_id=tracing.root_span_id(self._turn_key),
+                parent_span_id=facts["parent"],
                 command_name="ask_user",
-                attributes={"agent_query": question, "attempt": attempt},
+                attributes={"kind": facts["kind"], "part": facts["part"], "asked": question, "attempt": attempt},
                 use_stack=False,
                 emit_open=True,
             )
         return entry
+
+    #: A question's ``kind`` on its span, by the kind of the turn's waiting record when it is asked.
+    _QUESTION_KINDS = {
+        waiting_module.KIND_INTENT: "which_command", waiting_module.KIND_PARAMETERS: "parameters",
+        waiting_module.KIND_REVIEW: "review", waiting_module.KIND_APPROVAL: "approval",
+        waiting_module.KIND_DECISION: "decision", waiting_module.KIND_AGENT: "agent"}
+
+    def _question_span_facts(self) -> dict[str, Any]:
+        """``{kind, part, parent}`` of the question being asked, from the turn's waiting record: a resolve part's question
+        (which command, its values) is a child of that part's span; a question of the run (an agent's, a decision
+        step's, an approval's, a running part's values) is a child of the run part it was asked for; any other is a
+        child of the open stage, else of the turn. Kept with the turn (``_turn_questions``), so the close in a later process has the same parent."""
+        from fastworkflow import parameter_clarification
+
+        held = self._waiting
+        kind = self._QUESTION_KINDS.get(held.kind, "agent") if held is not None else "agent"
+        part = parent = None
+        if (held is not None and held.owner == waiting_module.OWNER_PLAN and held.kind in waiting_module.CME_KINDS
+                and held.payload.get("after") != parameter_clarification.AFTER_RESUME_PART
+                and isinstance(held.payload.get("part"), int)):
+            part = held.payload["part"] + 1
+            parent = tracing.part_span_id(self, tracing.SPAN_RESOLVE_PART, part)
+        return {"kind": kind, "part": part,
+                "parent": parent or tracing.current_part_id(self) or tracing.open_stage_id(self)
+                or tracing.root_span_id(self._turn_key)}
 
     def complete_ask_user_entry(self, answer: str) -> None:
         """Fill the last unanswered ask_user entry with the user's answer.
@@ -1098,7 +1147,7 @@ class WorkflowExecutionContext:
     def _close_ask_user_span(
         self, entry_index: int, entry: fastworkflow.CommandOutput, answer: str
     ) -> None:
-        """Emit the closed fw.ask_user span for a just-answered entry."""
+        """Emit the closed fw.question span for a just-answered entry."""
         if not self._turn_key or tracing.get_sink(self) is None:
             return
         attempt = sum(
@@ -1106,14 +1155,15 @@ class WorkflowExecutionContext:
             for output in self._turn_outputs[:entry_index]
             if output.is_ask_user
         )
+        facts = self._turn_questions.get(str(attempt)) or {}
         span = tracing.Span(
             span_id=tracing.deterministic_span_id(
-                self._turn_key, tracing.SPAN_ASK_USER, attempt
+                self._turn_key, tracing.SPAN_QUESTION, attempt
             ),
             trace_id=self._turn_key,
-            name=tracing.SPAN_ASK_USER,
+            name=tracing.SPAN_QUESTION,
             kind=tracing.KIND_HUMAN_WAIT,
-            parent_span_id=tracing.root_span_id(self._turn_key),
+            parent_span_id=facts.get("parent") or tracing.root_span_id(self._turn_key),
             channel_id=self._channel_id,
             command_name="ask_user",
             start_ns=tracing.datetime_to_ns(entry.started_at) or 0,
@@ -1130,7 +1180,9 @@ class WorkflowExecutionContext:
             self,
             span,
             attributes={
-                "agent_query": entry.command_parameters,
+                "kind": facts.get("kind") or "agent",
+                "part": facts.get("part"),
+                "asked": entry.command_parameters,
                 "attempt": attempt,
                 "user_response": answer,
                 "user_responses": replies,
@@ -1392,6 +1444,10 @@ class WorkflowExecutionContext:
             "subtask_review": self._turn_subtask_review,
             "not_run": json.loads(json.dumps(self._turn_not_run, default=str)),
             "unattended": self._turn_unattended,
+            # The stage and part spans opened so far and the stage the turn waits in (reopened when it resumes), and
+            # each question's span facts (its parent, kind and part), so a later process closes the same spans.
+            "stages": self._trace_stages.to_state(),
+            "questions": {key: dict(facts) for key, facts in self._turn_questions.items()},
         }
 
     def _waiting_state(self, held: Optional[waiting_module.Waiting], cme_workflow,
@@ -1893,6 +1949,9 @@ class WorkflowExecutionContext:
         self._turn_subtask_review = turn.get("subtask_review") or "not_applicable"
         self._turn_not_run = list(turn.get("not_run") or [])
         self._turn_unattended = bool(turn.get("unattended"))
+        self._trace_stages = tracing.TurnStages.from_state(turn.get("stages"))
+        self._turn_questions = {str(key): dict(facts) for key, facts in (turn.get("questions") or {}).items()
+                                if isinstance(facts, dict)}
 
         if agent_result := turn.get("agent_result"):
             self._turn_agent_result = _RestoredAgentResult(
@@ -2260,9 +2319,12 @@ class WorkflowExecutionContext:
             # A message during suspension is the resume answer — never a reset.
             self._begin_turn(message, unattended=unattended)
 
-        # The trace host of the turn's own decisions (the plan path's ``fw.nlu.intent`` and ``fw.nlu.param_extraction``
+        # The trace host of the turn's own decisions (the plan path's ``fw.intent`` and ``fw.parameters``
         # spans are written several frames down, with no reference to this context, as the "/" path's are).
         with tracing.host_scope(self):
+            if not move.begin:
+                # A reply resumes the turn in the stage it waits in: that stage's span opens again (the same span).
+                tracing.resume_stage(self)
             self.push_active_workflow(self._app_workflow)
             try:
                 if move.action == waiting_module.ACT_MANAGE and (
@@ -2530,6 +2592,195 @@ class WorkflowExecutionContext:
             mutations["changed"] = changed
         return mutations or None
 
+    # ------------------------------------------------------------------
+    # The turn's stage and part spans (bd fix-qjne.34): the rebuilders
+    # ------------------------------------------------------------------
+    #
+    # ``tracing.close_stages`` hands each stage or part span it closes to ``_trace_close_stage``, which writes that
+    # span's attributes from the turn's saved state (the split record, the plan resolution, the draft, the review mark),
+    # never from facts kept in memory, so a close in a later process writes the whole span. One rebuilder per span name.
+
+    #: A part's ``means`` on its span, by the draft item's means kind.
+    _MEANS_ON_SPAN = {"planning": "planning_command", "plain": "command", "from_scratch": "ad_hoc"}
+
+    def _trace_close_stage(self, name: str, part: int, span: tracing.Span, status: str) -> None:
+        closers = {tracing.SPAN_SPLIT: self._close_split_span, tracing.SPAN_RESOLVE: self._close_resolve_span,
+                   tracing.SPAN_RESOLVE_PART: self._close_resolve_part_span,
+                   tracing.SPAN_REVIEW: self._close_review_span, tracing.SPAN_RUN: self._close_run_span,
+                   tracing.SPAN_RUN_PART: self._close_run_part_span, tracing.SPAN_ANSWER: self._close_answer_span}
+        closers[name](span, part, status)
+
+    def _close_split_span(self, span: tracing.Span, part: int, status: str) -> None:
+        tracing.close_stage_span(self, tracing.SPAN_SPLIT, span, status=status, attributes={
+            **tracing.split_stage_attributes(self._turn_split), **tracing.stage_segments(self, tracing.SPAN_SPLIT)})
+
+    def _close_resolve_span(self, span: tracing.Span, part: int, status: str) -> None:
+        record, plan = self._plan_resolution, self._turn_subtask_plan
+        tracing.close_stage_span(self, tracing.SPAN_RESOLVE, span, status=status, attributes={
+            "parts": len(record.parts) if record is not None else len(plan.items) if plan is not None else 1,
+            "asked": len(record.asked) if record is not None else 0,
+            # The parts whose planning-command match was ambiguous (was the turn's ``subtask_plan_ambiguity``).
+            "plan_ambiguity": list(getattr(self, "_turn_plan_ambiguity", None) or []) or None,
+            **tracing.stage_segments(self, tracing.SPAN_RESOLVE)})
+
+    def _close_resolve_part_span(self, span: tracing.Span, part: int, status: str) -> None:
+        part_attributes = self._resolve_part_attributes(part, status)
+        tracing.close_stage_span(
+            self, tracing.SPAN_RESOLVE_PART, span, status=status, command_name=part_attributes["command"],
+            attributes={**part_attributes, **tracing.stage_segments(self, tracing.SPAN_RESOLVE_PART, part)})
+
+    def _close_review_span(self, span: tracing.Span, part: int, status: str) -> None:
+        record = self._review_record_for_span()
+        plan = self._turn_subtask_plan
+        tracing.close_stage_span(self, tracing.SPAN_REVIEW, span, status=status, attributes={
+            "outcome": self._subtask_review_mark(),
+            "rounds": (record.turns_seen + (0 if self._gate_review_out() else 1)) if record is not None else None,
+            "items": len(plan.items) if plan is not None else None,
+            **tracing.stage_segments(self, tracing.SPAN_REVIEW)})
+
+    def _review_record_for_span(self):
+        """The approval store's record of the turn's review (the one out, else the last one), or None."""
+        from fastworkflow import review_engine
+
+        store = review_engine.store_for(self._app_workflow) if self._app_workflow is not None else None
+        records = [record for record in (getattr(store, "records", None) or [])
+                   if getattr(record, "kind", None) == review_engine.KIND_SUB_TASKS]
+        return records[-1] if records else None
+
+    def _close_run_span(self, span: tracing.Span, part: int, status: str) -> None:
+        outcomes = [self._run_part_outcome(tracing.part_facts(self, tracing.SPAN_RUN_PART, number), status)
+                    for number in tracing.part_numbers(self, tracing.SPAN_RUN_PART)]
+        tracing.close_stage_span(self, tracing.SPAN_RUN, span, status=status, attributes={
+            "parts": len(outcomes) or None, "ran": outcomes.count("ran"), "not_run": outcomes.count("not_run"),
+            "refused": outcomes.count("refused"), **tracing.stage_segments(self, tracing.SPAN_RUN)})
+
+    def _run_part_number(self, origin: int) -> int:
+        """The number of the run part that runs origin *origin* (0-based, the plan the run has): the turn's own number
+        for that part, which counts the parts dropped while the turn was resolved (``_note_dropped_run_parts``)."""
+        return tracing.part_number(self, tracing.SPAN_RUN_PART, origin)
+
+    def _enter_run_part(self, origin: int) -> None:
+        """The run part of origin *origin* (0-based) begins: the parts dropped at resolve numbered before it are recorded
+        first, then its span opens (``tracing.enter_part``) with what it is, read from the plan item it runs (none: a
+        request the agent runs as it stands)."""
+        part = self._run_part_number(origin)
+        self._open_dropped_run_parts(before=part)
+        tracing.enter_part(self, tracing.SPAN_RUN_PART, part)
+        item = self._bound_item(origin)
+        tracing.note_part(self, tracing.SPAN_RUN_PART, part,
+                          means=self._MEANS_ON_SPAN.get(item.means.kind) if item is not None else "ad_hoc",
+                          command=(item.means.name or None) if item is not None else None)
+
+    def _note_dropped_run_parts(self, record) -> None:
+        """The run numbers its parts as the turn's split did, and each part dropped while the turn was resolved (none,
+        cancel, two unreadable replies) is a run part that was not run, with why (bd fix-qjne.34 decision g): every part
+        of the turn appears under the run with an outcome. Its span opens when the run reaches it
+        (``_open_dropped_run_parts``)."""
+        from fastworkflow._workflows.plan_metadata_extraction import resolution
+
+        indexes = [index for index, part in enumerate(record.parts) if part["state"] == resolution.PART_DROPPED]
+        if not indexes:
+            return
+        tracing.number_parts(self, tracing.SPAN_RUN_PART, [
+            index + 1 for index, part in enumerate(record.parts) if part["state"] != resolution.PART_DROPPED])
+        for index, part in zip(indexes, resolution.dropped(record, self._turn_subtask_plan)):
+            tracing.note_part(self, tracing.SPAN_RUN_PART, index + 1, dropped=True, outcome="not_run",
+                              reason=f"dropped_at_resolve: {part['reason']}", answered_by="code",
+                              means=self._MEANS_ON_SPAN.get(part["means"]), command=part["command"])
+
+    def _open_dropped_run_parts(self, before: Optional[int] = None) -> None:
+        """Record the run parts dropped at resolve (``_note_dropped_run_parts``) not yet recorded, numbered before
+        *before* (every one when None), in order: each opens, and closes when the next part opens or the run ends."""
+        opened = set(tracing.part_numbers(self, tracing.SPAN_RUN_PART))
+        for part in tracing.noted_parts(self, tracing.SPAN_RUN_PART):
+            if (part not in opened and (before is None or part < before)
+                    and tracing.part_facts(self, tracing.SPAN_RUN_PART, part).get("dropped")):
+                tracing.enter_part(self, tracing.SPAN_RUN_PART, part)
+
+    @staticmethod
+    def _run_part_outcome(facts: dict[str, Any], status: str) -> Optional[str]:
+        """A run part's ``outcome`` from its noted facts (``_note_run_part``); the direct path's one part ran once its
+        command did; None while a part has not finished."""
+        return facts.get("outcome") or ("ran" if facts.get("direct") and status != tracing.STATUS_AWAITING_USER
+                                        else None)
+
+    def _close_run_part_span(self, span: tracing.Span, part: int, status: str) -> None:
+        facts = tracing.part_facts(self, tracing.SPAN_RUN_PART, part)
+        command, means = facts.get("command"), facts.get("means")
+        if facts.get("direct"):     # the direct path's one part: the command its turn ran
+            means = "command"
+            command = command or next((output.command_name for output in reversed(self._turn_outputs)
+                                       if output.command_name and not output.framework and not output.is_ask_user), None)
+        outcome = self._run_part_outcome(facts, status)
+        tracing.close_stage_span(
+            self, tracing.SPAN_RUN_PART, span, status=status, command_name=command,
+            attributes={"part": part, "means": means, "command": command, "outcome": outcome,
+                        "answered_by": facts.get("answered_by"), "reason": facts.get("reason"),
+                        "open_step": facts.get("open_step"), "decided_by": facts.get("decided_by"),
+                        "agent_input": facts.get("agent_input"), "model": facts.get("model"),
+                        "attempts": facts.get("attempts"), "final_answer": facts.get("final_answer"),
+                        "exhausted": facts.get("exhausted"), "error_type": facts.get("error_type"),
+                        **tracing.stage_segments(self, tracing.SPAN_RUN_PART, part)})
+
+    def _note_run_part(self, origin: int, result) -> None:
+        """The run part of origin *origin* (0-based) finished with *result*: whether it ran, was not run (a stop: why,
+        and at which step), or was a bound planning command refused and answered by the agent instead
+        (``_run_planning_means``), and who answered."""
+        part = self._run_part_number(origin)
+        stop = getattr(result, "not_run_here", None)
+        refused = tracing.part_facts(self, tracing.SPAN_RUN_PART, part).get("refused")
+        if isinstance(stop, dict):
+            open_step = stop.get("open_step") or None
+            reason = stop.get("reason") or (open_step or {}).get("reason")
+            tracing.note_part(self, tracing.SPAN_RUN_PART, part, outcome="not_run", reason=reason,
+                              open_step=open_step, answered_by="code")
+        elif refused:
+            tracing.note_part(self, tracing.SPAN_RUN_PART, part, outcome="refused", reason=refused,
+                              answered_by="agent")
+        else:
+            tracing.note_part(self, tracing.SPAN_RUN_PART, part, outcome="ran",
+                              answered_by="code" if self.no_agent_mode else "agent")
+
+    def _close_answer_span(self, span: tracing.Span, part: int, status: str) -> None:
+        facts = getattr(self, "_turn_answer_facts", None) or {}
+        tracing.close_stage_span(self, tracing.SPAN_ANSWER, span, status=status, attributes={
+            "written_by": facts.get("written_by"), "chars": facts.get("chars"),
+            "summary_failed": facts.get("summary_failed"), **tracing.stage_segments(self, tracing.SPAN_ANSWER)})
+
+    def _resolve_part_attributes(self, part: int, status: str) -> dict[str, Any]:
+        """The ``fw.resolve.part`` attributes of part *part* (1-based): from the plan resolution and the draft on the plan
+        path, from the turn's message and its command output on the direct ("/") path. ``outcome`` is ``asked`` while
+        the turn waits on that part's question."""
+        record, plan, held = self._plan_resolution, self._turn_subtask_plan, self._waiting
+        index = part - 1
+        facts = record.parts[index] if record is not None and index < len(record.parts) else {}
+        item = plan.items[index] if plan is not None and index < len(plan.items) else None
+        waiting_here = status == TurnStatus.AWAITING_USER.value and held is not None and held.kind in (
+            waiting_module.CME_KINDS) and (held.owner == waiting_module.OWNER_CME or held.payload.get("part") == index)
+        if item is not None:
+            command, means, request = item.means.name or None, self._MEANS_ON_SPAN.get(item.means.kind), item.goal
+        else:   # the direct path: the command the CME bound (``tracing.enter_direct_run``), else the one the turn ran
+            command = tracing.part_facts(self, tracing.SPAN_RESOLVE_PART, part).get("command") or next(
+                (output.command_name for output in reversed(self._turn_outputs) if output.command_name
+                 and not output.framework and not output.is_ask_user), None)
+            means, request = ("command" if command else None), self._turn_user_message
+        if facts.get("state") == "dropped":
+            outcome = "dropped"
+        elif waiting_here or (record is None and held is not None and held.owner == waiting_module.OWNER_CME
+                              and held.kind in waiting_module.CME_KINDS):
+            outcome = "asked"
+        else:
+            outcome = "bound" if command else ("ad_hoc" if item is not None else None)
+        from fastworkflow._workflows.plan_metadata_extraction import resolution
+
+        # No review for this part: the gate's fast path took it, or it is the turn's one kept part and the user picked
+        # its command (``resolution.single_part_chosen``, the turn's review mark ``fast_path``).
+        no_review = bool(facts.get("fast_path")) or (
+            resolution.single_part_chosen(record) and outcome != "dropped" if record is not None
+            else self._turn_subtask_review == "fast_path")
+        return {"part": part, "request": facts.get("text") or request, "outcome": outcome, "means": means,
+                "command": command, "fast_path": no_review}
+
     def _finalize_turn_trace(self, turn_result: TurnResult) -> None:
         """Emit the fw.turn root span update/close, the turn record, and turn
         metrics at the finalize chokepoint. Never raises (tracing helpers and
@@ -2571,6 +2822,9 @@ class WorkflowExecutionContext:
             self._turn_root_span = root
 
         awaiting = status == TurnStatus.AWAITING_USER
+        # The open stage and its parts close first: with the turn's status while it waits (they open again when it
+        # resumes), else ok.
+        tracing.close_stages(self, status.value if awaiting else tracing.STATUS_OK, waiting=awaiting)
         tracing.end_span(
             self,
             root,
@@ -2582,10 +2836,11 @@ class WorkflowExecutionContext:
                 "failure_reason": turn_output.failure_reason,
                 "suspended_ms": turn_result.suspended_ms,
                 "context_mutations": self._compute_context_mutations(),
-                "subtask_review": self._subtask_review_mark(),
                 "subtask_bindings": list(getattr(self, "_turn_subtask_bindings", None) or []) or None,
-                "subtask_plan_ambiguity": list(getattr(self, "_turn_plan_ambiguity", None) or []) or None,
-                "subtask_split": tracing.split_record_attribute(getattr(self, "_turn_split", None)),
+                # How the turn ran (span contract 63): the direct ("/") path or the stages of a plan, and whether an
+                # agent model was set. The review's outcome is on ``fw.review``, the plan ambiguity on ``fw.resolve``.
+                "path": tracing.turn_path(self),
+                "mode": "no_agent" if self.no_agent_mode else "agent",
             },
         )
         if not awaiting:
@@ -2839,10 +3094,10 @@ class WorkflowExecutionContext:
         omitted, the default agent context (LLM_AGENT) is used.
 
         This is the one choke point both the fresh forward and the resume pass
-        through, so it is where the executor phase is recorded: fw.agent.execute
-        wraps the whole loop (retries included), and ``host_scope`` binds this
-        context so ReAct's per-iteration fw.agent.step spans — several frames
-        down, with no reference to the WEC — reach the same sink.
+        through, so it is where the loop's facts are taken (the run part's or the
+        phase's, ``_note_agent_run``), and ``host_scope`` binds this context so
+        ReAct's per-iteration fw.step spans — several frames down, with no
+        reference to the WEC — reach the same sink.
         """
         from dspy.utils.exceptions import AdapterParseError
 
@@ -2859,15 +3114,9 @@ class WorkflowExecutionContext:
             if lm is None:
                 lm = default_lm
         max_retries = 2
-        span = tracing.start_span(
-            self,
-            tracing.SPAN_AGENT_EXECUTE,
-            attributes={
-                "agent_input": trace_input,
-                "resumed": resumed,
-                "model": getattr(lm, "model", None),
-            },
-        )
+        # The loop is recorded by what it ran for (bd fix-qjne.34 step 6): its facts go to the phase that runs it
+        # (``_run_planning_command_phase`` reads ``_agent_run_facts``), else to the run part (``tracing.note_part``).
+        run = {"agent_input": trace_input, "model": getattr(lm, "model", None), "attempts": 0}
         attempts = 0
         try:
             with tracing.host_scope(self):
@@ -2875,7 +3124,7 @@ class WorkflowExecutionContext:
                     attempts = attempt + 1
                     try:
                         with (contextlib.nullcontext() if no_model
-                              else dspy.context(lm=lm, adapter=agent_adapter)):
+                              else dspy_utils.role_context("LLM_AGENT", lm, adapter=agent_adapter)):
                             result = agent_call()
                     except AdapterParseError:
                         if attempt == max_retries - 1:
@@ -2889,25 +3138,24 @@ class WorkflowExecutionContext:
                         if any(str(key).startswith("observation_") for key in trajectory):
                             raise
                         continue
-                    tracing.end_span(
-                        self, span, attributes=_agent_result_attributes(result, attempts)
-                    )
+                    self._note_agent_run(run, _agent_result_attributes(result, attempts))
                     return result
         except BaseException as exc:
-            # CommandCancelledError/AskUserSuspend are control signals, not
-            # failures; either way the span must close rather than leak onto
-            # the parenting stack for the rest of the turn.
-            tracing.end_span(
-                self,
-                span,
-                status=tracing.status_for_dispatch_exception(exc),
-                attributes={"attempts": attempts, "error_type": type(exc).__name__},
-            )
+            self._note_agent_run(run, {"attempts": attempts, "error_type": type(exc).__name__})
             raise
-        # Every retry raised AdapterParseError but the last re-raise was
-        # swallowed by the loop shape: close the span rather than leak it.
-        tracing.end_span(self, span, status=tracing.STATUS_ERROR,
-                         attributes={"attempts": attempts})
+        # Every retry raised AdapterParseError but the last re-raise was swallowed by the loop shape.
+        self._note_agent_run(run, {"attempts": attempts})
+
+    def _note_agent_run(self, run: dict[str, Any], facts: dict[str, Any]) -> None:
+        """The agent loop's facts *run* with *facts* (``_call_agent_with_retry``): kept for the phase that runs it
+        (``_agent_run_facts``), or noted on the run part it ran for when no phase runs it."""
+        run.update(facts)
+        self._agent_run_facts = run
+        if getattr(self, "_phase_run", None) is None:
+            tracing.note_part(self, tracing.SPAN_RUN_PART, None, agent_input=run.get("agent_input"),
+                              model=run.get("model"), attempts=run.get("attempts"),
+                              final_answer=run.get("final_answer"), exhausted=run.get("exhausted"),
+                              error_type=run.get("error_type"))
 
     def _run_agent(self, message: str):
         """Fresh agent turn setup and ReAct forward call, with the turn's stage progress listened for (fix-kq49)."""
@@ -2951,6 +3199,7 @@ class WorkflowExecutionContext:
         if self._turn_use_plan:
             subtasks = [message]
         else:
+            tracing.enter_stage(self, tracing.SPAN_SPLIT)
             with workflow_agent.recording_split() as split_record:
                 subtasks = workflow_agent.split_into_subtasks(
                     message,
@@ -2971,6 +3220,7 @@ class WorkflowExecutionContext:
     def _run_turn_subtasks(self, subtasks: list[str], refined_user_query: str, message: str):
         """Run the turn's sub-tasks: several, one after another; or one, with the step-cap hand-off. A turn with a
         sub-task plan (accepted, or the draft) runs through _run_subtasks_from, which binds each goal to its means."""
+        tracing.enter_stage(self, tracing.SPAN_RUN)
         plan = self._turn_subtask_plan
         planned = plan is not None and len(plan.items) == len(subtasks)
         if planned:
@@ -2981,6 +3231,7 @@ class WorkflowExecutionContext:
             subtasks, plan = review_proposals.expand_joined_parts(
                 self._app_workflow, subtasks, plan, planner_lm=getattr(self, "_current_planner_lm", None))
             self._turn_subtask_plan = plan
+            tracing.number_parts(self, tracing.SPAN_RUN_PART, None)    # the expanded jobs are numbered 1, 2, ...
         if len(subtasks) > 1 or planned:
             self._subtasks = subtasks
             self._origins = list(range(len(subtasks)))
@@ -2990,8 +3241,11 @@ class WorkflowExecutionContext:
         self._subtasks = [refined_user_query]
         self._origins = [0]
         self._evidence_floors = {0: 0}
+        self._enter_run_part(0)
         result = self._call_agent_for_query(refined_user_query, message, evidence_floor=0)
         if getattr(result, "exhausted", None) is not True:
+            if getattr(result, "suspended", None) is not True:
+                self._note_run_part(0, result)
             return result
         self._record_subtask_answer(result)
         self._hand_off(0)
@@ -3014,6 +3268,7 @@ class WorkflowExecutionContext:
         from fastworkflow import review_proposals
         from fastworkflow._workflows.plan_metadata_extraction import resolution
 
+        tracing.enter_stage(self, tracing.SPAN_RESOLVE)
         workflow = self._app_workflow
         pinned = self._turn_use_plan
         # A pinned plan (``use_plan``) is not a fast path: the client chose the plan, not its arguments, so the part is
@@ -3148,8 +3403,12 @@ class WorkflowExecutionContext:
         record = self._plan_resolution
         subtasks = [item.goal for item in self._turn_subtask_plan.items]    # the parts' texts, as drafted
         self._note_dropped_parts(record)
+        self._note_dropped_run_parts(record)
         kept_parts = [part for part in record.parts if part["state"] != resolution.PART_DROPPED]
         draft, subtasks, self._turn_plan_ambiguity = resolution.finish(record, self._turn_subtask_plan, subtasks)
+        # The resolve stage ends here, while the resolution and the draft its spans are written from are as they stand
+        # (and its plan ambiguity is known).
+        tracing.leave_stage(self, tracing.SPAN_RESOLVE)
         # What each kept part's settling knew, by its text, with the command the draft shows for it (the review may
         # accept or switch it): `_record_planned_parts` writes the rows where the plan is run.
         self._turn_part_facts = {
@@ -3162,6 +3421,9 @@ class WorkflowExecutionContext:
         if not draft.items:
             self._turn_subtask_review = "declined"
             self._turn_subtask_plan = None
+            # Nothing runs, and every part is a run part that was not run (it was dropped at resolve).
+            tracing.enter_stage(self, tracing.SPAN_RUN)
+            self._open_dropped_run_parts()
             # No agent model: each cancelled part is a stop the client reads (``fw_not_run``), and the answer says why.
             answer = "\n\n".join(no_agent_mode.explanation(entry) for entry in self._turn_not_run)
             return dspy.Prediction(final_answer=answer or EVERY_PART_CANCELLED, exhausted=False)
@@ -3209,6 +3471,7 @@ class WorkflowExecutionContext:
         """Open the review of *draft* (the whole turn): the suspended review."""
         from fastworkflow import review_proposals
 
+        tracing.enter_stage(self, tracing.SPAN_REVIEW)
         if self.no_agent_mode:
             self._turn_plan_previews = self._ad_hoc_plan_previews(draft)
         self._give_review_reader()
@@ -3301,6 +3564,17 @@ class WorkflowExecutionContext:
         text = SUBTASK_REVIEW_DECLINED if declined else SUBTASK_REVIEW_EXPIRED
         return self._settle_agent_result(self._turn_user_message, dspy.Prediction(final_answer=text, exhausted=False))
 
+    def _plan_trigger(self, bound_command: Optional[str]) -> Optional[str]:
+        """Why the part's plan is made, for its ``fw.plan`` span: ``refused`` (its bound planning command was refused and
+        the agent takes over), ``handoff`` (a continuation of a run that hit the step cap), else None (``initial``)."""
+        if bound_command is not None and bound_command in self._planning_commands():
+            return "refused"
+        turn = self._turn_frame()
+        index = turn.subtask_index
+        if 0 < index < len(turn.origins) and turn.origins.index(turn.origins[index]) != index:
+            return "handoff"
+        return None
+
     def _call_agent_for_query(self, query: str, planner_user_query: str, *,
                               first_step: int | None = None,
                               template_text: str | None = None,
@@ -3368,6 +3642,7 @@ class WorkflowExecutionContext:
             plan_template=plan_template or None,
             planning_command=planning_command,
             planning_probabilities=planning_distribution or None,
+            plan_trigger=self._plan_trigger(bound_command),
         )
         refusal, self._planning_command_refusal = self._planning_command_refusal, None
         if refusal is not None and self._part_question_out:
@@ -3783,12 +4058,12 @@ class WorkflowExecutionContext:
                                command_output=command_output)
 
     def _record_result_failure(self, command, phases, response) -> None:
-        """A span for a ``__result__`` that failed (fix-qjne.12): ``fw.skill.answer`` with status error and
-        ``error_type`` (the exception class; none for a ``fastworkflow.Refused``, which is a decision), the
-        span that records the answer of a call, though no model call is made here. A refusal ends it with status ok."""
-        span = tracing.start_span(self, tracing.SPAN_PLANNING_COMMAND_ANSWER, attributes={
-            "skill": command.name, "phase": phases[-1].name,
-            "phase_index": len(phases) - 1, "phase_count": len(phases)})
+        """A span for a ``__result__`` that failed (fix-qjne.12): the call's answer step (``fw.step``, ``kind`` answer,
+        ``run_by`` code: no model call is made here) with status error and ``error_type`` (the exception class; none
+        for a ``fastworkflow.Refused``, which is a decision). A refusal ends it with status ok."""
+        span = tracing.start_span(self, tracing.SPAN_STEP, attributes=tracing.step_record(
+            run_by="code", kind="answer", command=command.name, phase=phases[-1].name,
+            phase_index=len(phases) - 1, phase_count=len(phases)))
         error_type = response.artifacts.get("error_type")
         if error_type:
             tracing.end_span(self, span, status=tracing.STATUS_ERROR, attributes={"error_type": error_type})
@@ -3820,9 +4095,9 @@ class WorkflowExecutionContext:
             outputs = self._phase_outputs(phases, deferred["index"] + 1)
             facts = "\n\n".join(planning_phases.found_facts(outputs))
             query = f"{deferred['query']}\n\n{facts}" if facts else deferred["query"]
-            span = tracing.start_span(self, tracing.SPAN_PLANNING_COMMAND_ANSWER, attributes={
-                "skill": self._phase_run["skill"], "phase": phase.name,
-                "phase_index": deferred["index"], "phase_count": len(phases)})
+            span = tracing.start_span(self, tracing.SPAN_STEP, attributes=tracing.step_record(
+                run_by="model", kind="answer", command=self._phase_run["skill"], phase=phase.name,
+                phase_index=deferred["index"], phase_count=len(phases)))
             try:
                 result = self._call_agent_with_retry(
                     lambda: dspy.Prediction(
@@ -4833,7 +5108,7 @@ class WorkflowExecutionContext:
         With *skip* the phase's callable ``when`` was false (or, with *skip_error*, could
         not be decided): only its span is written (``skipped``), nothing runs, and the
         result is ``("done", None)`` (``("failed", skip_error)``).
-        One ``fw.skill.phase`` span per run (a resumed run opens a new one). An
+        One ``fw.phase`` span per run (a resumed run opens a new one). An
         answer-only phase (``planning_phases.is_answer_only``) is not an executor run: one
         model call with no tools writes its answer (``planning_phases.write_answer``).
         """
@@ -4858,7 +5133,7 @@ class WorkflowExecutionContext:
                   if len(phases) == 1 else None) or planning_phases.phase_step_budget()
         resumed = resume_observation is not None
         attributes = {
-            "skill": state["skill"],
+            "command": state["skill"],
             "phase": phase.name,
             "phase_index": index,
             "phase_count": len(phases),
@@ -4878,7 +5153,7 @@ class WorkflowExecutionContext:
             last_item = k == len(items) - 1
         else:
             last_item = True
-        span = tracing.start_span(self, tracing.SPAN_PLANNING_COMMAND_PHASE, attributes=attributes)
+        span = tracing.start_span(self, tracing.SPAN_PHASE, attributes=attributes)
         if skip:
             if skip_error is not None:
                 tracing.end_span(self, span, status=tracing.STATUS_ERROR,
@@ -5052,7 +5327,7 @@ class WorkflowExecutionContext:
                 tracing.end_span(self, span, status=tracing.STATUS_CANCELLED,
                                  attributes={"steps": plan_text, "steps_used": steps_used,
                                              "answer_only": False, "suspended": True,
-                                             **by_code})
+                                             **by_code, **self._phase_agent_facts(result)})
                 return "suspended", result
             if indices:
                 # Never backwards: a nested frame this phase ran (run_planning_command) may be past it.
@@ -5083,7 +5358,7 @@ class WorkflowExecutionContext:
             # The call (run_planning_command) reports it as the frame's failure.
             state["exhausted"] = True
         closing = {"steps": plan_text, "steps_used": steps_used, "exhausted": exhausted,
-                   "suspended": False, "answer_only": answer_only, **by_code}
+                   "suspended": False, "answer_only": answer_only, **by_code, **self._phase_agent_facts(result)}
         record = None
         facts = None
         issues = None
@@ -5161,6 +5436,11 @@ class WorkflowExecutionContext:
             state.setdefault("step_results", {}).update(self._step_results(phase, state, plan_text, names, code))
         return "done", None
 
+    def _phase_agent_facts(self, result) -> dict[str, Any]:
+        """The ``fw.phase`` keys of the agent loop that ran the phase (were its fw.agent.execute child's)."""
+        return {"attempts": (getattr(self, "_agent_run_facts", None) or {}).get("attempts"),
+                "clarification": getattr(result, "clarification", None)}
+
     def _phase_code_steps(self, plan_text: str, own_steps: int, names: dict, *,
                           answers: bool, resume: Optional[dict[str, Any]] = None):
         """The steps code runs at the start of this phase run (``planning_phases.CodeSteps``),
@@ -5191,6 +5471,7 @@ class WorkflowExecutionContext:
         archive aliases stay unique across the turn. A run that hits the step cap
         is continued by a fresh executor, inserted as the next entry (see _hand_off).
         """
+        tracing.enter_stage(self, tracing.SPAN_RUN)
         k = start
         # A while loop: a hand-off inserts an entry after the current one, so the end moves.
         while k < len(self._subtasks):
@@ -5208,6 +5489,7 @@ class WorkflowExecutionContext:
             outputs_before = len(self._turn_outputs)
             if first:
                 self._part_outputs_start = outputs_before
+            self._enter_run_part(origin)
             result = self._run_entry(k, origin, query, first=first, floor=floors[origin])
             if getattr(result, "suspended", None) is True:
                 return result
@@ -5218,6 +5500,7 @@ class WorkflowExecutionContext:
                 self._note_partial_read(origin)
             k += 1
 
+        self._open_dropped_run_parts()
         combined = self._combined_answer()
         # Read now: the turn frame is gone by the time the answer is finalized.
         self._turn_parts_of_answer = (combined, self._answer_parts(combined))
@@ -5360,6 +5643,9 @@ class WorkflowExecutionContext:
                 reason=f"it cannot run as planned ({gaps.describe() if gaps is not None and gaps.names else refusal}), "
                        "and the agent model that would take over is not set (LLM_AGENT)")
         if refusal is not None:
+            # The part stays the planning command's, refused, and the agent answers it (its run part says so).
+            tracing.note_part(self, tracing.SPAN_RUN_PART, self._run_part_number(origin),
+                              refused=f"refused: {refusal}")
             return self._call_agent_for_query(
                 f"{query}\n\nThe planning command {name} cannot run as planned: {refusal}.",
                 query, first_step=self._next_step, template_text=self._original_text(origin),
@@ -5631,6 +5917,9 @@ class WorkflowExecutionContext:
             logger.warning(f"turn stops not recorded: {type(exc).__name__}: {exc}")
 
     def _record_subtask_answer(self, result, typed: str = "") -> None:
+        turn = self._turn_frame()
+        self._note_run_part(turn.origins[turn.subtask_index] if 0 <= turn.subtask_index < len(turn.origins) else 0,
+                            result)
         outputs = self._subtask_outputs
         # Padded first: a blob written before the typed outputs were kept has answers and no outputs.
         outputs.extend([""] * (len(self._subtask_answers) - len(outputs)))
@@ -5690,9 +5979,18 @@ class WorkflowExecutionContext:
 
         command_response = fastworkflow.CommandResponse(response=result_text)
 
-        conversation_summary, _ = self.summarize_and_record_turn(
+        # The answer stage (bd fix-qjne.34 step 7): the turn's answer is written and the conversation summarized under
+        # fw.answer (the run before it closes), so the summary's model call is the answer's, not the turn's.
+        tracing.enter_stage(self, tracing.SPAN_ANSWER)
+        conversation_summary, traces = self.summarize_and_record_turn(
             original_message, self._action_log, result_text
         )
+        self._turn_answer_facts = {
+            "written_by": "code" if self.no_agent_mode or getattr(agent_result, "capabilities", None) is not None
+            else "agent",
+            "chars": len(result_text),
+            "summary_failed": "summary_fallback_error_type" in (traces or ""),
+        }
         if self._action_log:
             command_response.artifacts["conversation_summary"] = conversation_summary
 
@@ -5939,20 +6237,14 @@ class WorkflowExecutionContext:
         return self._finalize_agent_output(original_message, agent_result)
 
     # ------------------------------------------------------------------
-    # Shared capture for the fw.agent.tool_call emission sites
+    # Shared capture for the direct action's fw.command span
     # ------------------------------------------------------------------
     #
-    # _process_message and _process_action both open fw.agent.tool_call and both
-    # owe §12.1.1's shared capture, so the projection lives here once rather than
-    # being written twice and drifting. Everything below is additive recording:
-    # no fastWorkflow control flow reads a recorded context type or a
-    # consequence class, which arch §17.3 requires.
-    #
-    # "Here" is in fact `tracing`, because workflow_agent.py
-    # opens the same span from a third site and owes the same record. These two
-    # methods stay as the WEC-shaped entry points — they supply the app-workflow
-    # fallback that the free functions cannot know about — but the projection
-    # itself is written once, for all three sites.
+    # _process_action opens fw.command (a direct action dispatches through no other span) and owes §12.1.1's shared
+    # capture. Everything below is additive recording: no fastWorkflow control flow reads a recorded context type or a
+    # consequence class, which arch §17.3 requires. The projection itself is `tracing`'s, written once for every
+    # site that records a dispatch (a step's dispatch in workflow_agent.py too); these methods supply the app-workflow
+    # fallback that the free functions cannot know about.
 
     def _context_before(
         self, span, workflow: Optional[fastworkflow.Workflow] = None
@@ -6023,6 +6315,19 @@ class WorkflowExecutionContext:
         output.context = getattr(exc, "_fw_context", None) or ""
         return output
 
+    def _open_direct_resolve(self) -> None:
+        """The direct ("/") path has one part (bd fix-qjne.34): the CME's decisions are written under fw.resolve >
+        fw.resolve.part 1 (``tracing.direct_part_id``), and its command spans keep their parents (not pushed)."""
+        tracing.enter_stage(self, tracing.SPAN_RESOLVE, push=False)
+        tracing.open_direct_part(self, tracing.SPAN_RESOLVE_PART)
+
+    def _open_direct_run(self, command_name: str) -> None:
+        """A direct action's run: ``fw.run > fw.run.part`` 1, its command named by the caller (not pushed: the
+        command's span names the part as its parent, ``tracing.direct_part_id``)."""
+        tracing.enter_stage(self, tracing.SPAN_RUN, push=False)
+        tracing.open_direct_part(self, tracing.SPAN_RUN_PART)
+        tracing.note_part(self, tracing.SPAN_RUN_PART, 1, direct=True, decided_by="caller", command=command_name)
+
     def _process_message(self, message: str) -> fastworkflow.CommandOutput:
         if self._command_trace_queue is not None:
             self._command_trace_queue.put(
@@ -6038,15 +6343,10 @@ class WorkflowExecutionContext:
                 )
             )
 
-        # Span emission sits OUTSIDE the trace-queue guard: the sink is reached
-        # via this context, not the transport-queue contract [R28].
-        span = tracing.start_span(
-            self,
-            tracing.SPAN_AGENT_TOOL_CALL,
-            kind=tracing.KIND_TOOL,
-            attributes={"raw_command": message},
-        )
-        context_before = self._context_before(span)
+        # The direct path's stages (bd fix-qjne.34): its one part is resolved under fw.resolve, and its command runs under
+        # fw.run (``tracing.enter_direct_run``, where the CME hands the bound command over). The command's own span
+        # (fw.command, ``CommandExecutor.invoke_command``) is the dispatch's record; this path opens none of its own.
+        self._open_direct_resolve()
 
         invoke_started_at = datetime.now(timezone.utc)
         try:
@@ -6058,15 +6358,6 @@ class WorkflowExecutionContext:
                 command_output = failed
                 self.end_round()
             else:
-                # One arm, not two: a separate `except CommandCancelledError` left
-                # AskUserSuspend — the other control signal — falling through to the
-                # BaseException arm below and closing as STATUS_ERROR. fix-ajv.19.
-                tracing.end_span(
-                    self,
-                    span,
-                    status=tracing.status_for_dispatch_exception(exc),
-                    attributes={"error_type": type(exc).__name__},
-                )
                 raise
         command_output.started_at = invoke_started_at
         command_output.duration_ms = int(
@@ -6083,21 +6374,6 @@ class WorkflowExecutionContext:
             params_dict = params.dict()
         else:
             params_dict = params
-
-        tracing.end_span(
-            self,
-            span,
-            status=(
-                tracing.STATUS_OK if command_output.success else tracing.STATUS_ERROR
-            ),
-            command_name=command_output.command_name or None,
-            context=command_output.context or None,
-            attributes={
-                "response_text": response_text,
-                "success": bool(command_output.success),
-                **self._capture_attributes(span, command_output, context_before),
-            },
-        )
 
         if self._command_trace_queue is not None:
             self._command_trace_queue.put(
@@ -6168,16 +6444,21 @@ class WorkflowExecutionContext:
                 )
             )
 
-        # Outside the trace-queue guard [R28]; see _process_message.
+        # A direct action (an MCP tool call, a client's action) has no resolution: the caller named the command, so the
+        # turn is ``fw.run > fw.run.part`` (``decided_by`` caller) with the command's span under it (bd fix-qjne.34).
+        # Outside the trace-queue guard [R28]. CommandExecutor.perform_action opens no span of its own, so this is where
+        # §12.1.1's shared capture lands for this row of the matrix.
+        self._open_direct_run(action.command_name)
         span = tracing.start_span(
             self,
-            tracing.SPAN_AGENT_TOOL_CALL,
+            tracing.SPAN_COMMAND,
             kind=tracing.KIND_TOOL,
-            attributes={"raw_command": raw_command},
+            command_name=action.command_name,
+            parent_span_id=tracing.direct_part_id(self),
+            attributes={"raw_command": raw_command, "parameters": params_dict, tracing.ATTR_PARENT_CALL_ID: None,
+                        tracing.ATTR_CHILD_CALLS: [], "resolved_by": "caller", "parameters_read_by": "caller",
+                        "parameters_valid": None},
         )
-        # The direct-action path's only span: CommandExecutor.perform_action
-        # opens none of its own, so this is where §12.1.1's shared capture has
-        # to land for this row of the matrix.
         context_before = self._context_before(span, workflow)
 
         action_started_at = datetime.now(timezone.utc)
@@ -6191,7 +6472,8 @@ class WorkflowExecutionContext:
                 self,
                 span,
                 status=tracing.status_for_dispatch_exception(exc),
-                attributes={"error_type": type(exc).__name__},
+                attributes={"error_type": type(exc).__name__,
+                            **({} if tracing.is_control_signal(exc) else {"success": False})},
             )
             raise
         command_output.started_at = action_started_at
@@ -6318,7 +6600,7 @@ class WorkflowExecutionContext:
         inputs = bounded_summary_inputs(user_query, workflow_actions, final_agent_response)
         try:
             planner_lm = dspy_utils.get_lm("LLM_PLANNER", "LITELLM_API_KEY_PLANNER")
-            with dspy.context(lm=planner_lm):
+            with dspy_utils.role_context("LLM_PLANNER", planner_lm), tracing.model_purpose("conversation_summary"):
                 prediction = dspy.ChainOfThought(ConversationSummarySignature)(**inputs)
             summary = prediction.conversation_summary
         except Exception as exc:

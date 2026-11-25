@@ -444,7 +444,7 @@ class ManifestAgainstRealSteps(unittest.TestCase):
         trajectory: dict = {}
         with tracing.host_scope(host):
             agent._run_loop(trajectory, 0, {"user_query": "who holds it"}, 3, 0)
-        steps = [span for span in sink.spans if span.name == tracing.SPAN_AGENT_STEP]
+        steps = [span for span in sink.spans if span.name == tracing.SPAN_STEP]
         self.assertEqual(len(steps), 1)
         recorded = steps[0].attributes["observation"]
         digest = (

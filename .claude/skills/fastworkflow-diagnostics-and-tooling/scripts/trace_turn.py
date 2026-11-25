@@ -17,9 +17,12 @@ Where the data lives:
    Persists across turns and processes — unlike action.jsonl, which only ever
    held the last turn.
 
-   Span names: fw.turn (root), fw.planner.plan / fw.planner.replan,
-   fw.agent.tool_call, fw.command.execute, fw.ask_user, fw.nlu.intent,
-   fw.nlu.param_extraction, fw.llm.call, fw.train.*.
+   Span names (contract 63): fw.turn (root) > the stages fw.split (fw.split.gate,
+   .splitter, .merge, .referent), fw.resolve > fw.resolve.part (fw.intent,
+   fw.parameters, fw.question), fw.review (fw.question, fw.review.reply, .edit,
+   .revision, fw.approval), fw.run > fw.run.part (fw.plan, fw.phase > fw.step >
+   fw.command), fw.answer; fw.llm.call (with its `role`) under any of them.
+   The tree below is printed by parent links, as stored.
 
 2. The in-memory action log: WorkflowExecutionContext.append_action_log()
    accumulates per-turn tool-call/ask_user records; the agent's final-answer

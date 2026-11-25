@@ -8,6 +8,7 @@ from fastworkflow.command_context_model import (
     CommandContextModel,
     CommandContextModelValidationError,
 )
+from tests.context_declarations import declare_inherits
 
 
 @pytest.fixture
@@ -126,9 +127,7 @@ def test_ordered_base_contexts_diamond_and_two_level_chain(tmp_path: Path):
         "ChainTop": {"base": ["ChainMid"]},
         "ChainMid": {"base": ["ChainBase"]},
     }
-    (commands_dir / "context_inheritance_model.json").write_text(
-        json.dumps(inheritance, indent=2) + "\n", encoding="utf-8"
-    )
+    declare_inherits(tmp_path, {name: entry["base"] for name, entry in inheritance.items()})
 
     model = CommandContextModel.load(str(tmp_path))
     assert model.ordered_base_contexts("Leaf") == ["MidA", "RootBase", "MidB", "Extra"]

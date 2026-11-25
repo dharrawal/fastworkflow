@@ -683,31 +683,14 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
         turn_key=tracing.get_turn_key(chat_session_obj),
         ))
 
-    # fw.agent.tool_call span — deliberately OUTSIDE the trace-queue guard:
-    # the sink is reached via the WEC/ChatSession core, not the transport-queue
-    # contract, so queue-less embedders still trace [R28].
-    span = tracing.start_span(
-        chat_session_obj,
-        tracing.SPAN_AGENT_TOOL_CALL,
-        kind=tracing.KIND_TOOL,
-        attributes={"raw_command": command},
-    )
-
-    # §12.1.1's shared capture for the agent-tool path (arch §12.0 deltas 1-2/4).
-    # This was the one fw.agent.tool_call emitter it had not reached, which is why
-    # the agent-tool, resumed-turn and distillation rows of the conformance matrix
-    # could not claim P0 — and why a single contract version for this span name
-    # would have described three different attribute sets.
-    #
-    # The projection is `tracing`'s, not a copy of the WorkflowExecutionContext
-    # methods: the same record written three ways is three things to drift.
-    # Resolving the workflow is gated on a span having opened, so with
-    # observability off this seam costs a `start_span` that already declined. One
-    # workflow reference serves both context reads, matching the sibling sites —
-    # the type is re-read after execution, so a context the command MOVED is
-    # still recorded as a transition.
-    workflow = tracing.active_workflow(chat_session_obj) if span is not None else None
-    context_before = tracing.context_before(span, workflow)
+    # The dispatch is recorded on the step that made it (bd fix-qjne.34: the step's fw.step span, ``tracing.note``;
+    # nothing when no step is open) — deliberately OUTSIDE the trace-queue guard: the sink is reached via the
+    # WEC/ChatSession core, not the transport-queue contract, so queue-less embedders still trace [R28]. §12.1.1's
+    # shared capture (arch §12.0 deltas 1-2/4) is `tracing`'s projection; the context type is re-read after execution,
+    # so a context the command MOVED is still recorded as a transition.
+    tracing.note(tracing.SPAN_STEP, raw_command=command)
+    workflow = tracing.active_workflow(chat_session_obj)
+    context_before = tracing.context_type(workflow)
 
     # Directly invoke the command without going through queues
     # This allows the agent to synchronously call workflow tools
@@ -736,35 +719,17 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
         # turn nested under it, and it never got an end time or a status.
         # fix-ajv.21.
         if tracing.is_control_signal(e):
-            tracing.end_span(
-                chat_session_obj,
-                span,
-                status=tracing.status_for_dispatch_exception(e),
-            )
             raise
         if not isinstance(e, Exception):
-            # Any other BaseException (KeyboardInterrupt, SystemExit): close the
-            # span so it does not leak, but do not build a failure CommandOutput
+            # Any other BaseException (KeyboardInterrupt, SystemExit): do not build a failure CommandOutput
             # for it — that is reserved for real command failures, and this
             # frame must not dress an interpreter-level signal as one.
-            tracing.end_span(
-                chat_session_obj,
-                span,
-                status=tracing.STATUS_ERROR,
-                attributes={"error_type": type(e).__name__},
-            )
             raise
         if isinstance(e, CommandNotFoundError):
             # Routing guidance, not a command failure: no command ran, and the
             # caller hands the agent the message as its observation. Recording
             # it as a failed CommandOutput put a traceback artifact in the
             # turn's answer and marked the turn unsuccessful.
-            tracing.end_span(
-                chat_session_obj,
-                span,
-                status=tracing.STATUS_ERROR,
-                attributes={"error_type": type(e).__name__},
-            )
             raise
         # Capture the failed tool call as a CommandOutput(success=False).
         # This block must never mask the original exception.
@@ -805,12 +770,7 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
             _append_turn_output(chat_session_obj, failure_output)
         except Exception:
             pass  # capture failed — swallow, never mask the original exception
-        tracing.end_span(
-            chat_session_obj,
-            span,
-            status=tracing.STATUS_ERROR,
-            attributes={"error_type": type(e).__name__},
-        )
+        tracing.note(tracing.SPAN_STEP, success=False)
         raise
 
     command_output.started_at = started
@@ -838,20 +798,9 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
             guard.pending = ((name or token).split("/")[-1], _REPEAT_REASON, key[1])
         guard.last_results[key] = response_text
 
-    tracing.end_span(
-        chat_session_obj,
-        span,
-        status=tracing.STATUS_OK if command_output.success else tracing.STATUS_ERROR,
-        command_name=name or None,
-        context=command_output.context or None,
-        attributes={
-            "response_text": response_text,
-            "success": bool(command_output.success),
-            **tracing.capture_attributes(
-                span, command_output, context_before, workflow
-            ),
-        },
-    )
+    tracing.note(tracing.SPAN_STEP, response_text=response_text, success=bool(command_output.success),
+                 command_call_id=getattr(command_output, "command_call_id", None), context_before=context_before,
+                 context_after=tracing.context_type(workflow))
 
     if chat_session_obj.command_trace_queue is not None:
         chat_session_obj.command_trace_queue.put(fastworkflow.CommandTraceEvent(
@@ -1462,8 +1411,8 @@ def _read_planning_command_file(name: str, path: str, workflow_folderpath: str):
     *name* is ``"<Context>/<stem>"``).
 
     The file is imported as a command file is (``python_utils.get_module`` under the
-    workflow's package, so package-relative imports work: ``from ._helpers import ...`` reads
-    ``_commands/_helpers.py``). Raises PlanningCommandFormatError when the file stem is not a Python
+    workflow's package, so package-relative imports work: ``from ._shared.helpers import ...`` reads
+    ``_commands/_shared/helpers.py``). Raises PlanningCommandFormatError when the file stem is not a Python
     identifier or the declaration is malformed, and the import's own error for a file that
     does not import.
     """
@@ -1504,9 +1453,9 @@ def _planning_command_files(root: str) -> list[tuple[str, str]]:
     classifies it): a root one is ``_commands/<name>.py``, named by its file stem, and a context
     one is ``_commands/<Context>/<name>.py``, named ``"<Context>/<stem>"`` (the file stem is a
     Python identifier, snake_case; ``_read_planning_command_file`` refuses another). A ``.py`` file or subfolder
-    whose name starts with ``_`` or ``.`` (such as ``__pycache__`` or a ``_helpers.py`` module the
-    planning command files import) is skipped silently at both levels; ``_workflow.py`` is the workflow's
-    settings (``split_settings``). Execution commands and other files are not returned.
+    whose name starts with ``_`` or ``.`` (such as ``__pycache__`` or the helper package ``_shared/``) is skipped at
+    both levels (``command_directory.helper_file_problems`` reports any other underscore file); ``_workflow.py`` is
+    the workflow's settings (``split_settings``). Execution commands and other files are not returned.
     """
     out = []
     for entry in sorted(os.listdir(root)) if os.path.isdir(root) else ():
@@ -1654,7 +1603,7 @@ def load_planning_commands(workflow_folderpath: str) -> tuple[tuple[str, str, tu
     here, the other planning commands still load, and it is a load problem (``command_preview.load_problems``, which
     ``fastworkflow run``, ``train``, the server and ``command preview`` report); a malformed workflow settings
     file raises PlanningCommandFormatError. ``_commands`` also holds the workflow's
-    settings, ``_workflow.py`` (``split_settings``), and helper modules named ``_<name>.py``.
+    settings, ``_workflow.py`` (``split_settings``), and the helper package ``_shared/``.
     """
     return tuple((name, description, steps) for name, description, steps, *_ in _parsed_planning_commands(workflow_folderpath))
 
@@ -1997,7 +1946,7 @@ def split_demos(workflow_folderpath: str | None, job_types: str) -> list[dspy.Ex
             .with_inputs("job_types", "user_query") for example in examples]
 
 
-#: ``subtask_split.prompt_source`` on the turn span: the splitter's own instructions, or the built-in rules with a
+#: ``prompt_source`` on the ``fw.split`` span: the splitter's own instructions, or the built-in rules with a
 #: workflow's ``split_examples`` as demos in place of the generic examples.
 SPLIT_PROMPT_BUILT_IN = "built_in"
 SPLIT_PROMPT_BUILT_IN_AND_WORKFLOW = "built_in+workflow"
@@ -2237,7 +2186,11 @@ def _jev_lm():
     # default="" (not None): get_env_var warns about a variable that is missing and has no default,
     # and the missing key is the INFO line of 3.9, not a warning.
     key = fastworkflow.get_env_var("JEV_API_KEY", default="")
-    return TypeSafe(api_key=key, cache=dspy_utils.lm_cache_enabled()) if key else None
+    if not key:
+        return None
+    lm = TypeSafe(api_key=key, cache=dspy_utils.lm_cache_enabled())
+    lm.fastworkflow_role = "JEV"    # its model-call spans say whose call it is (``dspy_logger``), as a role's LM does
+    return lm
 
 
 @functools.lru_cache(maxsize=None)
@@ -2354,7 +2307,7 @@ def classify_user_reply(reply: str, question: str) -> str:
         return "answer"
     try:
         predictor = _classify_reply_predictor()
-        with dspy.context(lm=jev_lm):
+        with dspy_utils.role_context("JEV", jev_lm):
             choice = predictor(question=question, reply=reply).intent
         value, probability = _choice_value_and_probability(choice)
         logger.info(f"reply intent for {reply!r}: {value} (confidence {probability:.2f})")
@@ -2533,8 +2486,11 @@ def _one_job_gate(user_query: str, job_types: str) -> dict | None:
     threshold = split_gate_threshold()
     if threshold is None:
         return None
+    # The gate's own span, in the split stage (bd fix-qjne.34): its model call is the span's child.
+    host = tracing.current_host()
+    span = tracing.start_span(host, tracing.SPAN_SPLIT_GATE, attributes={"threshold": threshold})
     try:
-        with dspy.context(lm=jev_lm):
+        with dspy_utils.role_context("JEV", jev_lm):
             choice = dspy.Predict(OneOrSeveralJobs)(request=user_query, job_types=job_types).jobs
         label, probability = _choice_value_and_probability(choice)
         score = probability if label == "one" else float((choice.probabilities or {}).get("one", 1.0 - probability))
@@ -2542,8 +2498,11 @@ def _one_job_gate(user_query: str, job_types: str) -> dict | None:
         from fastworkflow import remote_outage
 
         remote_outage.report(error, "split gate")
+        tracing.end_span(host, span, status=tracing.STATUS_ERROR,
+                         attributes={"score": None, "label": None, "skipped": False})
         return None
     skipped = label == "one" and score >= threshold
+    tracing.end_span(host, span, attributes={"score": score, "label": label, "skipped": skipped})
     logger.info(f"split gate: {label} (p(one) {score:.2f}, bar {threshold}); "
                 f"{'the request is one part, no split' if skipped else 'the splitter runs'}")
     return {"score": score, "label": label, "threshold": threshold, "skipped": skipped}
@@ -2573,7 +2532,7 @@ def split_into_subtasks(user_query: str, planner_lm=None,
     return result
 
 
-#: ``subtask_split.failed`` on the turn span: why the split gave no answer and the request ran as one part. Every
+#: ``failed`` on the ``fw.split`` span (and on the ``fw.split.splitter`` span of the attempt): why the split gave no answer and the request ran as one part. Every
 #: answer stopped at the output cap (the retry without the reasoning field included), or the model call raised.
 SPLIT_FAILED_CUT_OFF = "cut_off"
 SPLIT_FAILED_ERROR = "error"
@@ -2639,7 +2598,7 @@ def _split(user_query: str, planner_lm, workflow_folderpath: str | None, convers
         reasoned = not cut_off
 
         def split(lm) -> str:
-            with dspy.context(lm=lm, adapter=CommandsSystemPreludeAdapter()):
+            with dspy_utils.role_context("LLM_PLANNER", lm, adapter=CommandsSystemPreludeAdapter()):
                 signature = _split_signature(workflow_folderpath) if workflow_folderpath else SplitIntoSubtasks
                 state["prompt"] = split_prompt(workflow_folderpath)
                 inputs = {"job_types": job_types, "user_query": user_query}
@@ -2653,6 +2612,9 @@ def _split(user_query: str, planner_lm, workflow_folderpath: str | None, convers
                     predictor.demos = demos
                 return module(**inputs).subtasks or ""
 
+        # One span per model attempt, in the split stage (bd fix-qjne.34): its model call is the span's child.
+        host = tracing.current_host()
+        splitter = tracing.start_span(host, tracing.SPAN_SPLIT_SPLITTER, attributes={"attempt": attempt + 1})
         try:
             with watch_cut_off_replies() as replies:
                 text = dspy_utils.call_dropping_rejected_params(
@@ -2660,8 +2622,11 @@ def _split(user_query: str, planner_lm, workflow_folderpath: str | None, convers
         except Exception as error:  # noqa: BLE001 - splitting is an optimisation; never fail the turn
             if any(replies):
                 logger.warning(f"the split was cut off at {split_max_tokens()} tokens and did not parse")
+                tracing.end_span(host, splitter, attributes={"raw": None, "failed": SPLIT_FAILED_CUT_OFF})
                 cut_off = True
                 continue
+            tracing.end_span(host, splitter, status=tracing.STATUS_ERROR,
+                             attributes={"raw": None, "failed": SPLIT_FAILED_ERROR})
             _log_split_failure(planner_lm, error)
             state["failed"] = SPLIT_FAILED_ERROR
             return [user_query]
@@ -2670,11 +2635,13 @@ def _split(user_query: str, planner_lm, workflow_folderpath: str | None, convers
             # always the call's last one, so a complete fallback reply (the library's JSON retry of a cut-off first
             # reply, inside the same call) is the answer and is used.
             logger.warning(f"the split was cut off at {split_max_tokens()} tokens; not using it")
+            tracing.end_span(host, splitter, attributes={"raw": None, "failed": SPLIT_FAILED_CUT_OFF})
             cut_off = True
             continue
         cut_off = False
         subtasks = [without_repeated_clauses(item.translate(_HYPHENS)) for item in _split_items(text)]
         state["raw"] = list(subtasks)
+        tracing.end_span(host, splitter, attributes={"raw": list(subtasks), "failed": None})
         # Disabled after benchmark pass 4 (fix-kdag never fired in 840 runs):
         # if not subtasks and text.strip():
         #     # A non-empty sub-tasks field with no numbered item ("it") is a visibly broken reply: retried once.
@@ -2775,13 +2742,20 @@ def _merged(user_query: str, subtasks: list[str], workflow_folderpath: str | Non
     if sum(1 for item in subtasks if item and item.strip()) < 2:
         return [user_query]
     applied: list[str] = []
+    # The merge's own span, in the split stage (bd fix-qjne.34): its model calls (rule 3's checks) are its children.
+    host = tracing.current_host()
+    span = tracing.start_span(host, tracing.SPAN_SPLIT_MERGE)
     try:
         identifiers = identifier_patterns(workflow_folderpath) if workflow_folderpath else ()
         merged = merge_subtasks(user_query, subtasks, identifiers, same_job=_same_request_check(user_query),
                                 context=conversation, applied=applied, doubts=doubts)
     except Exception:  # noqa: BLE001 - the merge is a clean-up; never fail the turn
         logger.warning("could not merge the split; keeping it as the model gave it", exc_info=True)
+        tracing.end_span(host, span, status=tracing.STATUS_ERROR,
+                         attributes={"merged": None, "rules": list(applied) or None, "doubts": None})
         return subtasks
+    tracing.end_span(host, span, attributes={"merged": [str(text) for text in merged], "rules": list(applied) or None,
+                                             "doubts": list(doubts) if doubts else None})
     if rules is not None:
         rules.extend(applied)
     return resolve_referents(user_query, merged, workflow_folderpath) if len(merged) > 1 else merged
@@ -2827,7 +2801,7 @@ def _same_request_check(user_query: str, threshold: float = SAME_REQUEST_THRESHO
 
     def same_job(earlier: str, later: str) -> bool | None:
         try:
-            with dspy.context(lm=jev_lm):
+            with dspy_utils.role_context("JEV", jev_lm):
                 choice = dspy.Predict(SameRequest)(request=user_query, earlier=earlier, later=later).relation
             value, probability = _choice_value_and_probability(choice)
             one = probability if value == "one" else float((choice.probabilities or {}).get("one", 1 - probability))
@@ -2867,7 +2841,11 @@ def resolve_referents(user_query: str, subtasks: list[str], workflow_folderpath:
     identifiers = identifier_patterns(workflow_folderpath) if workflow_folderpath else ()
     notes = (split_settings(workflow_folderpath).subject_hints if workflow_folderpath else None) or "(none)"
 
-    def resolved(text: str) -> str:
+    def resolved(number: int, text: str) -> str:
+        # One span per sub-task, in the split stage (bd fix-qjne.34): its model calls are the span's children.
+        host = tracing.current_host()
+        span = tracing.start_span(host, tracing.SPAN_SPLIT_REFERENT, attributes={"part": number})
+        subject = description = None
         try:
             candidates = unnamed_subjects(user_query, text, identifiers)
             subject = _choose_referent(user_query, text, candidates, notes, jev_lm) if candidates else None
@@ -2878,10 +2856,13 @@ def resolve_referents(user_query: str, subtasks: list[str], workflow_folderpath:
         except Exception:  # noqa: BLE001 - resolving a referent is a clean-up; never fail the turn
             logger.warning("could not resolve the sub-task's referent", exc_info=True)
             return text
+        finally:
+            tracing.end_span(host, span, attributes={"subject": subject, "description": description})
 
     # Each sub-task is resolved from the request and its own original text, never from another's resolved text, so the
     # calls are independent: they wait on Jev together (subtask_pool), and the results keep the sub-tasks' order.
-    return subtask_pool.map_in_order([functools.partial(resolved, text) for text in subtasks])
+    return subtask_pool.map_in_order([functools.partial(resolved, number, text)
+                                      for number, text in enumerate(subtasks, 1)])
 
 
 def _choose_referent(user_query: str, text: str, candidates: list[str], notes: str, jev_lm) -> str | None:
@@ -2899,7 +2880,7 @@ def _choose_referent(user_query: str, text: str, candidates: list[str], notes: s
                  "(through words like 'it', 'its', 'that team', 'the customer')? 'none' if it names "
                  "every record it is about.")
 
-    with dspy.context(lm=jev_lm):
+    with dspy_utils.role_context("JEV", jev_lm):
         choice = dspy.Predict(ChooseReferent)(request=user_query, subtask=text, notes=notes).record
     value, probability = _choice_value_and_probability(choice)
     logger.info(f"referent for {text!r}: {value} (confidence {probability:.2f})")
@@ -2924,7 +2905,7 @@ def _choose_description(user_query: str, text: str, subject: str, descriptions: 
                  "a customer named earlier)? 'none' if each phrase means something else, such as a tag, a "
                  "request, another record or a record the work is to find.")
 
-    with dspy.context(lm=jev_lm):
+    with dspy_utils.role_context("JEV", jev_lm):
         choice = dspy.Predict(ChooseDescription)(request=user_query, subtask=text, record=subject,
                                                  notes=notes).phrase
     value, probability = _choice_value_and_probability(choice)
@@ -2940,7 +2921,8 @@ def build_query_with_next_steps(user_query: str,
     plan_template: str | None = None,
     done_only: bool = False,
     planning_command: PlanningCommandCommand | None = None,
-    planning_probabilities: Mapping[str, float] | None = None) -> str:
+    planning_probabilities: Mapping[str, float] | None = None,
+    plan_trigger: str | None = None) -> str:
     """
     Generate a todo list.
     Return a string that combine the user query and todo list
@@ -2952,7 +2934,7 @@ def build_query_with_next_steps(user_query: str,
         planner_lm: Optional planner LM to use (if None, uses LLM_PLANNER from env)
         trace_trigger: What re-triggered planning mid-turn (e.g.
             "ask_user_response", "parameter_extraction_error"). None means the
-            turn's initial plan; set, it marks the span fw.planner.replan.
+            part's first plan; set, it is the fw.plan span's ``trigger``.
         planner_user_query: Current-turn text for the planner LLM only. When prior
             turns are supplied via ``previous_turn_summaries``, pass the raw user
             message here so ``user_query`` (often a refined string that already
@@ -2971,6 +2953,8 @@ def build_query_with_next_steps(user_query: str,
             (PlanningCommandInputError) on a turn that may ask (``_planning_command_refusal_may_ask``): its question
             is left on ``chat_session_obj._planning_command_refusal``, no plan is made, and the execution
             context suspends the turn on it. Ignored on a replan.
+        plan_trigger: Why a first plan is made, for its span only (``refused``: a bound planning command was
+            refused and the agent takes over; ``handoff``: a run that hit the step cap is continued).
     """
     current_workflow = chat_session_obj.get_active_workflow()
     base_docstring = PLANNER_INSTRUCTIONS
@@ -3004,15 +2988,16 @@ def build_query_with_next_steps(user_query: str,
         planner_lm = dspy_utils.get_lm("LLM_PLANNER", "LITELLM_API_KEY_PLANNER")
     agent_adapter = CommandsSystemPreludeAdapter()
 
-    # fw.planner.plan for the turn's initial plan, fw.planner.replan for
-    # mid-turn re-planning (trace_trigger names what re-triggered it).
+    # One fw.plan per plan, a child of the part it plans for (bd fix-qjne.34): `trigger` is what planned again mid-turn
+    # (trace_trigger), else the caller's reason for a first plan (*plan_trigger*: refused, handoff), else initial. The
+    # steps that follow carry its id (``tracing.note_plan``).
     span = tracing.start_span(
         chat_session_obj,
-        tracing.SPAN_PLANNER_REPLAN if trace_trigger else tracing.SPAN_PLANNER_PLAN,
+        tracing.SPAN_PLAN,
         kind=tracing.KIND_LLM,
         attributes={
             "model": getattr(planner_lm, "model", None),
-            "replan_trigger": trace_trigger,
+            "trigger": trace_trigger or plan_trigger or "initial",
         },
     )
 
@@ -3065,7 +3050,7 @@ def build_query_with_next_steps(user_query: str,
         # A refused planning command call the turn asks the user about (set below; read by the execution context).
         chat_session_obj._planning_command_refusal = None
     try:
-        with dspy.context(lm=planner_lm, adapter=agent_adapter):
+        with dspy_utils.role_context("LLM_PLANNER", planner_lm, adapter=agent_adapter):
             if planning_command is not None and initial_plan:
                 try:
                     # The typed planning call gets the trimmed listing (design 3.4); the text planner keeps the full one.
@@ -3106,14 +3091,15 @@ def build_query_with_next_steps(user_query: str,
         attributes={
             "plan": plan_text,
             "plan_source": plan_source,
-            "skill": planning_command.name if planning_command is not None and initial_plan else None,
-            "skill_args": planning_command_args,
-            "skill_notes": planning_command_notes,
-            "skill_fallback": planning_command_fallback,
-            "skill_refusal_asked": True if refusal_ask is not None else None,
+            "command": planning_command.name if planning_command is not None and initial_plan else None,
+            "command_args": planning_command_args,
+            "command_notes": planning_command_notes,
+            "command_fallback": planning_command_fallback,
+            "command_refusal_asked": True if refusal_ask is not None else None,
             "argument_check_not_in_request": planning_command_not_in_request,
         },
     )
+    tracing.note_plan(chat_session_obj, span)
 
     if not with_agent_inputs_and_trajectory:
         # The run's initial plan, with its line breaks, for the finish check.

@@ -51,75 +51,100 @@ labels; the catalog corpus itself lives under the workflow's `benchmarks/` direc
 tree. Attribute values over the cap (`tracing.MAX_ATTR_BYTES`, 16 KiB)
 are replaced by `{"truncated": true, "original_length", "sha256", "value"}`.
 
+### Span contract 63: the stage tree, and the old names
+
+A turn's spans follow its stages (span contract 63, bd fix-qjne.34). A store written
+before contract 63 holds other names (fw.planner.*, fw.skill.*, fw.agent.*,
+fw.command.execute, fw.ask_user, fw.nlu.*) and is not read by the framework's
+tools; the CHANGELOG entry for contract 63 lists every rename. The tree:
+
+```
+fw.turn (path plan|direct, mode agent|no_agent)
+  fw.split > fw.split.gate | fw.split.splitter | fw.split.merge | fw.split.referent
+  fw.resolve (plan_ambiguity) > fw.resolve.part (part, outcome) > fw.intent | fw.parameters | fw.question
+  fw.review (outcome) > fw.question kind=review | fw.review.reply | fw.review.edit | fw.review.revision | fw.approval
+  fw.run > fw.run.part (part, means, outcome ran|not_run|refused, reason)
+             > fw.plan | fw.phase > fw.step > fw.command | fw.step > fw.command | fw.question
+  fw.answer (written_by) > fw.llm.call purpose=conversation_summary
+```
+
+A command's own `fw.intent` / `fw.parameters` that decided nothing (exact name,
+typed call, no model call, nothing refused) is not written; read `fw.command`'s
+`resolved_by` / `parameters_read_by` / `parameters_valid`. Find a span by name
+and by its nearest ancestor of a kind, not by its exact parent. Stage and part
+spans have deterministic ids: a turn that waits on a person keeps one span per
+stage and part (`resumed`, `segments`). A part dropped at resolve is a
+`fw.run.part` with `outcome` not_run and `reason` `dropped_at_resolve: ...`.
+
 ### `fw.turn` (root; kind `internal`)
 One per logical turn; stays open across ask_user suspensions
 (`status: awaiting_user`, `end_ns` NULL) and closes at terminal finalize.
 Attributes: `turn_key`, `channel_id`, `conversation_id`, `user_message`,
 `unattended` (the turn ran with no ask_user tool), `status`, `success`, `failure_reason`,
-`suspended_ms`, and:
+`suspended_ms`, `path` (`plan` or `direct`), `mode` (`agent` or `no_agent`), and:
 
 - **`context_mutations`**: a shallow diff of the app workflow's context across
   the turn: `{"added": {key: value_repr}, "changed": {key: {"from", "to"}},
   "removed": [keys]}`, or `null` when nothing changed (also `null` after a
   cross-process resume; the baseline is not serialized).
-- **`subtask_split`**: for a turn whose request the model was asked to split (never with
-  `use_plan`), `{request, raw, merged, attempts, changed_by}`: the text the splitter saw, the
-  model's parts, the parts the turn ran after the code rules, the model calls made (1 or 2),
-  and the code rules that changed the list (absent when none did), plus `prompt_digest` and
-  `prompt_source` (`built_in`, or `built_in+workflow` when `_workflow.py` declares `split_examples`;
-  spans recorded before the replacement prompt was retired may say `workflow`): which splitter prompt produced it
-  (`workflow_agent.split_prompt`). `null` when not split.
-- **`subtask_plan_ambiguity`**: one `{subtask, means, alternatives}` per part whose command
-  was asked (the which-command question); `null` when none was.
-- **`subtask_review`**: `fast_path` (no review needed), `open` (the review is out),
-  `reviewed`, `declined`, `expired`, `not_reviewed` (no one could answer; the draft ran) or
-  `not_applicable`.
 - **`subtask_bindings`**: per bound part, the values the review showed and the arguments it
   ran with (`shown`, `ran`, `match`, `deviation`).
 
-### `fw.planner.plan` / `fw.planner.replan` (kind `llm`)
-Around the planner calls. Attributes: `model`, `plan` (capped) and
-`replan_trigger` (`parameter_extraction_error`, `ask_user_response`, or a progress check's
-trigger; null on a first plan). `plan_source`: `skill_call` (a planning command's typed call
-filled its arguments and code expanded its steps), `text` (the text planner) or `none`. For a
-planning command: `skill` (its name), `skill_args`, `skill_notes` (what the argument guards
-changed), `skill_fallback` (why the typed call fell back to the text planner) and
-`skill_refusal_asked` (its missing or refused arguments were asked of the user).
+### The stages: `fw.split`, `fw.resolve`, `fw.review`, `fw.run`, `fw.answer`
+- **`fw.split`**: `request`, `raw` (the model's parts), `merged` (the parts the turn ran), `rules` (the code rules
+  that changed the list), `failed` (`cut_off`, `error`), `attempts`, `prompt_digest`, `prompt_source` (`built_in` or
+  `built_in+workflow`), `parts`. Children: `fw.split.gate` (`score`, `label`, `threshold`, `skipped`),
+  `fw.split.splitter` (one per model attempt: `attempt`, `raw`, `failed`), `fw.split.merge` (`merged`, `rules`,
+  `doubts`), `fw.split.referent` (`part`, `subject`, `description`), each with its model call.
+- **`fw.resolve`**: `parts`, `asked`, `plan_ambiguity` (one `{subtask, means, alternatives}` per part whose command
+  was asked). **`fw.resolve.part`**: `part`, `request`, `outcome` (`bound`, `ad_hoc`, `dropped`, `asked`), `means`
+  (`planning_command`, `command`, `ad_hoc`), `command`, `fast_path`.
+- **`fw.review`**: `outcome` (`open`, `reviewed`, `declined`, `expired`), `rounds`, `items`; a turn with no review
+  has no `fw.review` (a fast path says so on `fw.resolve.part`). Children: `fw.question` (kind review),
+  `fw.review.reply` (`read_as`, `by` code/head/model, `reason`, `explicit_yes_required`), `fw.review.edit`
+  (`edits_read`, `edits_applied`, `repaired`, `refused_names`), `fw.review.revision` (`round`, `items_changed`,
+  `rechecked`), `fw.approval`.
+- **`fw.run`**: `parts`, `ran`, `not_run`, `refused`. **`fw.run.part`**: `part`, `means`, `command`, `outcome`
+  (`ran`, `not_run`, `refused`), `answered_by` (code/agent), `reason`, `open_step`, `decided_by` (caller, for a
+  direct action), and when an agent ran it `agent_input`, `model`, `attempts`, `final_answer`, `exhausted`,
+  `error_type`.
+- **`fw.answer`**: `written_by` (code, agent), `chars`, `summary_failed`; the conversation summary's model call is its
+  child (`purpose` `conversation_summary`).
 
-### `fw.agent.execute` (kind `internal`): the ReAct loop as a phase
-Sibling of `fw.planner.plan` under the turn; NOT `fw.command.execute` (that is
-one command inside a tool call; this is the whole loop). Attributes include
-`agent_input`, `resumed`, `attempts`, `suspended`, `final_answer`.
+### `fw.plan` (kind `llm`)
+A plan of the text planner, a child of the run part it plans for. Attributes: `model`, `plan` (capped) and
+`trigger` (`initial`, `refused`, `handoff`, `parameter_extraction_error`, `ask_user_response`, or a progress
+check's trigger). `plan_source`: `skill_call` (a planning command's typed call filled its arguments and code
+expanded its steps), `text` (the text planner) or `none`. For a planning command: `command` (its name),
+`command_args`, `command_notes` (what the argument guards changed), `command_fallback` (why the typed call fell
+back to the text planner) and `command_refusal_asked` (its missing or refused arguments were asked of the user).
+The steps that follow carry its id (`plan_span_id`).
 
-### `fw.skill.phase` (kind `internal`): one phase run of a planning command
-A planning command runs each phase as its own run, so a turn has one
-`fw.skill.phase` span per phase run, each the parent of that run's
-`fw.agent.execute`. Opened with `skill`, `phase`, `phase_index` (0-based) of
-`phase_count`, `step_budget`, `first_step` and `resumed` (a run resumed after
-ask_user opens a new span); closed with `steps` (the phase's numbered plan),
-`steps_used`, `exhausted` (reached its budget), `suspended`, `record` (the
-`"<Context> <label>"` its output was filled on) and `facts` (the filled output,
-`null` for a phase with none). A failed phase has status `error` and
-`facts_error`: its steps could not be built, or a required fact had no source
-run; no later phase of that call ran. Code runs a phase's mechanical steps before any model:
-`steps_by_code` counts them and `code_stop` says why code stopped (`done`, `open step N`,
-`step N failed`, `no path for step N`, `stopped`, `off`); each such `fw.agent.step` has
-`by_code: true`. Also `answer_only` / `answer_by_code` (an answer-only phase, written by code
-when true), `skipped` (its `when` was false), and for a fan-out item `item`, `item_index`,
-`item_count`, `items_total`, `record_issues`.
+### `fw.phase` (kind `internal`): one phase run of a planning command
+A planning command runs each phase as its own run, so a part has one `fw.phase` span per phase run, its steps
+its children. Opened with `command`, `phase`, `phase_index` (0-based) of `phase_count`, `step_budget`,
+`first_step` and `resumed`; closed with `steps` (the phase's numbered plan), `steps_used`, `exhausted` (reached its
+budget), `suspended`, `record` (the `"<Context> <label>"` its output was filled on), `facts` (the filled output,
+`null` for a phase with none), and the agent loop's `attempts` and `clarification`. A failed phase has status
+`error` and `facts_error`: its steps could not be built, or a required fact had no source run; no later phase of
+that call ran. Code runs a phase's mechanical steps before any model: `steps_by_code` counts them and `code_stop`
+says why code stopped (`done`, `open step N`, `step N failed`, `no path for step N`, `stopped`, `off`); each such
+`fw.step` has `run_by: code`. Also `answer_only` / `answer_by_code` (an answer-only phase, written by code when
+true), `skipped` (its `when` was false), and for a fan-out item `item`, `item_index`, `item_count`, `items_total`,
+`record_issues`.
 
-`fw.skill.answer` is the one model call that writes a planning command's answer when its
-`__result__` gives none.
+A `fw.step` with `kind` answer (`run_by` model) is the one model call that writes a planning command's answer when
+its `__result__` gives none.
 
-### `fw.agent.step` (kind `internal`): one reasoning step
-Child of `fw.agent.execute`; the step's reasoning `fw.llm.call` and its
-`fw.agent.tool_call` nest under it. Attributes: `step_index`, `thought`,
-`tool_name`, `tool_args`, `observation`; on failures `error_type`/`tool_error`
-and `recovered`; on suspension `clarification` (status `awaiting_user`);
-`folded_command` when the model passed parameters as tool arguments beside
-`command` and the tool folded them into the command text (`tool_args` keeps
-what was sent; the observation ends with a "(Ran as: ...)" note); `by_code` on a
-step code ran.
+### `fw.step` (kind `internal`): one step, whoever ran it
+A child of its phase, or of its run part for a command or ad hoc part; the step's model call (when the agent ran
+it) and its `fw.command` nest under it. Attributes: `step_index`, `run_by` (`code`, `agent`, `model`), `kind`
+(`command`, `ask`, `finish`, `tool`, `answer`), `plan_span_id`, `thought`, `tool_name`, `tool_args`,
+`observation`; the dispatch's `raw_command` (the exact command text sent, after any folding), `response_text`,
+`success`, `command_call_id`, `context_before`, `context_after`; on failures `error_type`/`tool_error` and
+`recovered`; on suspension `clarification` (status `awaiting_user`); `folded_command` when the model passed
+parameters as tool arguments beside `command` and the tool folded them into the command text (`tool_args` keeps
+what was sent; the observation ends with a "(Ran as: ...)" note).
 On a step a policy verifier rule rewrote (the workflow's `_policy/table.py`; see the
 `distill-policy-verifiers` skill), these are added:
 - `policy_source`: the rule's id.
@@ -130,24 +155,21 @@ On a step a policy verifier rule rewrote (the workflow's `_policy/table.py`; see
 - `answer`: on a `finish` step, the answer the rule sent back.
 
 The `observation` is the rule's text, and the tool did not run. A command the
-rule blocked still has its `fw.command.execute` span (the dispatch happened),
+rule blocked still has its `fw.command` span (the dispatch happened),
 with `success` false and the rule's text as `response_text`. Nothing executed,
 and distillation leaves it out of the agent's actions.
 
-### `fw.agent.tool_call` (kind `tool`)
-One per agent → workflow invocation; `raw_command` is the exact command text
-the agent sent (after any folding of extra tool arguments, see `fw.agent.step`), with `response_text`/`success` (and `error_type` on failure)
-added at close.
-
-### `fw.command.execute` (kind `tool`)
+### `fw.command` (kind `tool`)
 Wraps command resolution + execution. Attributes: `raw_command` (what was
 asked), `parameters` (the extracted dict), `response_text`, `success`, `error_type`,
+`resolved_by` (`exact_name`, `fuzzy`, `model`, `caller`, ...), `parameters_read_by` (`typed`, `none`, `model`),
+`parameters_valid`,
 `command_call_id` (the same id is on the command output in `record_json`),
 `context_before` / `context_after` (context type names); columns
 `command_name` and `context` hold what actually ran and where. Comparing
 `raw_command` to `command_name` is the first routing check.
 
-### `fw.nlu.intent` (kind `internal`): one intent decision
+### `fw.intent` (kind `internal`): one intent decision
 One span per request: `intent_loop.resolve` decides the whole context walk at once. A reply to
 the which-command question is a span of its own. The turn's resolution of a request writes one per part's
 decision too, from the same writer (span contract v58), carrying `part`, the part's 1-based number (absent on the
@@ -155,9 +177,9 @@ decision too, from the same writer (span contract v58), carrying `part`, the par
 
 | Attribute | Meaning |
 |---|---|
-| `context`, `stage`, `utterance` | `context` is the scope the decision settled in (the current one when nothing was decided). `stage` is `INTENT_DETECTION` for a request, `INTENT_AMBIGUITY_CLARIFICATION` or `INTENT_MISUNDERSTANDING_CLARIFICATION` for a reply |
+| `context`, `reads_reply`, `question_kind`, `utterance` | `context` is the scope the decision settled in (the current one when nothing was decided). `reads_reply` is true for the reading of a reply to the which-command question, with `question_kind` `ambiguity` or `misunderstanding` |
 | `matcher_layer` | Which layer decided: `exact_prefix`, `known_name_foreign_context` (with `known_name_owner_contexts` and `known_name_foreign_context_hint`), `fuzzy_prematch` (`fuzzy_distance`, `fuzzy_threshold`), `classifier`, `matcher`, or `question_reply` for a reply. Older spans may carry other values; show them as recorded |
-| `engine`, `engine_chain` | Who decided: `classifier` (the local model), `matcher` (the remote model), `question` (no link was confident) or `user` (a reply); the links asked, in order |
+| `decided_by`, `engine_chain` | Who decided: `name`, `fuzzy`, `foreign_name`, `local` (the local model), `remote` (the remote model), `question` (no link was confident) or `reply`; the links asked, in order |
 | `classifier` | The local model's facts: `{model_tier (embedding, large or tiny), confidence, ambiguous_threshold, threshold_source, confident, top_label, topk_labels, topk_scores, p_in, p_out, outside_labels, outside_scores, handed_on, head_version}` (keys vary by layout) |
 | `matcher` | The remote model's facts when it was asked: `{confident, top_label, confidence, topk_labels, topk_scores, none_score, threshold (accept), decline_threshold, unsure_threshold, scope_path, model, latency_ms, calls, error}` |
 | `remote_failed` | `{error_class, status_code}`: the remote call failed and the local answer or the question stood in |
@@ -168,7 +190,7 @@ decision too, from the same writer (span contract v58), carrying `part`, the par
 | `fuzzy_prematch_tie` | Names that matched equally well (not a match; the chain decided) |
 | `command_name`, `resolved`, `is_cme_command` | The outcome; `resolved: false` means no command (a misunderstanding, or a routing hint) |
 
-### `fw.nlu.param_extraction` (kind `internal`)
+### `fw.parameters` (kind `internal`)
 Wraps parameter extraction + validation for the resolved command. The plan path writes it too, for the extraction
 of a part's own command (the draft), from the same writer, with `part`, the part's 1-based number (span contract v58;
 absent on the `/` path and on a nested step command's span).
@@ -178,19 +200,20 @@ absent on the `/` path and on a nested step command's span).
 | `command_name`, `extraction_method` | `xml_regex` (read in code from the command text), `llm` (the model fill), `stored_merge` (a reply to the parameter question merged into the values kept) |
 | `deterministic_form` | With `xml_regex`: `key_value` (`name=value` pairs) or `positional` (`command value`) when one of those code parsers bound the parameters; absent for XML tags |
 | `unbound_value` | A lone value (`command value`) that bound to no parameter and was refused instead of running with defaults |
-| `retry_round`, `retry_round_ordinal` | true when this extraction reads a reply to the parameter question; which round it is |
+| `retry_round`, `retry_round_ordinal`, `reads_reply` | true when this extraction reads a reply to the parameter question; which round it is |
 | `parameters_valid` | The overall verdict (span `status` stays `ok`; only exceptions mark `error`) |
 | `missing_fields` / `invalid_fields` | Structured field lists (no prose parsing needed) |
 | `argument_check_refusals`, `argument_check_retry`, `argument_check_refusals_final`, `argument_check_respelled` | The guards: values the model produced that a guard refused (a placeholder; on a field marked `copied_from_command_text`, a value the request does not write), the one second fill, what stayed refused (treated as not given), and values respelled to the request's or the declared spelling |
-| `argument_check_not_in_request` | Advisory (span contract v57; `fw.nlu.param_extraction` v13, `fw.planner.plan` / `fw.planner.replan` v10): the field names, sorted, of UNMARKED `str` / `int` fields whose extracted value the request does not write; never the values; nothing was refused. Absent on an extraction span when empty, null on a planner span |
+| `argument_check_not_in_request` | Advisory (on `fw.parameters` and `fw.plan`): the field names, sorted, of UNMARKED `str` / `int` fields whose extracted value the request does not write; never the values; nothing was refused. Absent on an extraction span when empty, null on a planner span |
 | `part` | The 1-based part of the turn this extraction is for (plan path only; span contract v58) |
 | `argument_refusal` | A refusal of the call as a whole that names no input; it is not asked, the command ends as a failed output |
 | `fields_reset_not_given`, `placeholder_values`, `word_screen_values`, `command_name_values`, `out_of_range_values` | Values the screens treated as not given or refused |
 | `validation_hook` | `{ran, is_valid, message, raised?, changed_fields, refused_fields}` from the command's `Input` model validators (always emitted; `ran: false` when the Input declares none). `changed_fields` lists the fields the hook corrected in place; `refused_fields` lists the fields a `fastworkflow.Refused(..., field=...)` reset to missing. `raised` is set only when the hook crashed with a non-`Refused` exception |
 
-### `fw.ask_user` (kind `human_wait`)
-One per clarifying question (deterministic per-attempt span ids). Attributes:
-`agent_query`, `user_response` (the final reply), `user_responses` (every reply, in
+### `fw.question` (kind `human_wait`)
+One per wait for a person (deterministic per-attempt span ids), under the part, review or run part it asks for.
+Attributes: `kind` (`which_command`, `parameters`, `review`, `approval`, `decision`, `agent`), `part`,
+`asked` (the question), `user_response` (the final reply), `user_responses` (every reply, in
 order), `attempt`, `human_wait_ms`; the wall-clock wait also equals `end_ns - start_ns`.
 
 ### `fw.llm.call` (kind `llm`): one per DSPy LM invocation
@@ -204,7 +227,7 @@ Emitted by a DSPy callback, so it appears under whichever stage made the call
 | `output`, `provider_response`, `reasoning` | What came back (incl. provider-native reasoning when present) |
 | `usage`, `cost`, `cache_hit`, `response_model`, `history_uuid`, `capture_source` | Cost accounting; **`cache_hit: true` means the completion came from the DSPy cache**: the classic "stale/frozen LLM output" tell; a hit records `cost` 0 and empty `usage` (nothing was billed) |
 | `usage_capture` | Present when usage was unavailable: the LM's result never reached the capture hook and DSPy history was off (spans recorded before fix-sgsp all carry it) |
-| `role`, `timeout_s`, `num_retries` | The model role (`LLM_PARAM_EXTRACTION`, `LLM_AGENT`, ...), the per-attempt timeout and the retries configured (attempts made are not recorded) |
+| `role`, `timeout_s`, `num_retries`, `purpose` | The model role (`LLM_PARAM_EXTRACTION`, `LLM_AGENT`, `JEV` for the remote decision model, ...; always set), the per-attempt timeout and the retries configured (attempts made are not recorded); `purpose` `conversation_summary` for the summary |
 | `outcome`, `timed_out`, `exception`, `exception_type` | `ok`, `timeout` or `error` (span `status: error`): auth errors, timeouts |
 
 ### Other spans
@@ -285,7 +308,7 @@ connection rather than mutating anything.
 -- Confidently wrong routing: what was asked vs what ran
 SELECT s.trace_id, json_extract(s.attributes,'$.raw_command') AS asked,
        s.command_name AS ran
-FROM spans s WHERE s.name='fw.command.execute'
+FROM spans s WHERE s.name='fw.command'
 ORDER BY s.start_ns DESC LIMIT 20;
 
 -- Requests no link was confident about, per context, with the local model's numbers
@@ -295,15 +318,20 @@ SELECT s.context,
        json_extract(s.attributes,'$.engine_chain') AS chain,
        json_extract(s.attributes,'$.candidates') AS candidates
 FROM spans s
-WHERE s.name='fw.nlu.intent' AND json_extract(s.attributes,'$.engine')='question';
+WHERE s.name='fw.intent' AND json_extract(s.attributes,'$.decided_by')='question';
 
 -- How each split turn's request was split
-SELECT trace_id, json_extract(attributes,'$.subtask_split') FROM spans
-WHERE name='fw.turn' AND json_extract(attributes,'$.subtask_split') IS NOT NULL;
+SELECT trace_id, json_extract(attributes,'$.raw'), json_extract(attributes,'$.merged') FROM spans
+WHERE name='fw.split';
+
+-- What happened to each part of a turn
+SELECT trace_id, json_extract(attributes,'$.part') AS part, command_name,
+       json_extract(attributes,'$.outcome') AS outcome, json_extract(attributes,'$.reason') AS reason
+FROM spans WHERE name='fw.run.part' ORDER BY trace_id, part;
 
 -- Parameter-correction loops (users stuck re-entering values)
 SELECT trace_id, COUNT(*) AS rounds FROM spans
-WHERE name='fw.nlu.param_extraction'
+WHERE name='fw.parameters'
   AND json_extract(attributes,'$.retry_round')
 GROUP BY trace_id HAVING rounds > 1;
 
@@ -311,13 +339,13 @@ GROUP BY trace_id HAVING rounds > 1;
 SELECT trace_id, json_extract(attributes,'$.validation_hook.refused_fields') AS refused,
        json_extract(attributes,'$.validation_hook.message') AS message
 FROM spans
-WHERE spans.name='fw.nlu.param_extraction'
+WHERE spans.name='fw.parameters'
   AND json_extract(attributes,'$.validation_hook.refused_fields') <> '[]';
 
 -- values the validation hook corrected in place
 SELECT trace_id, json_extract(attributes,'$.validation_hook.changed_fields') AS changed
 FROM spans
-WHERE spans.name='fw.nlu.param_extraction'
+WHERE spans.name='fw.parameters'
   AND json_extract(attributes,'$.validation_hook.changed_fields') <> '[]';
 
 -- Turns that "completed" over a failed command (the quiet failures)

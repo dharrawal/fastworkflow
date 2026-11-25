@@ -722,11 +722,11 @@ def load_models(workflow_folderpath: str) -> dict[str, Any]:
     # (Phase 9 step 5: parents come from the live chain). It is read here only to measure the
     # recorded positions of a workflow's artifacts, which is a measurement of recorded inputs.
     hierarchy_path = os.path.join(workflow_folderpath, "context_hierarchy_model.json")
-    inheritance_path = os.path.join(workflow_folderpath, "_commands", "context_inheritance_model.json")
     snapshot_path = os.path.join(workflow_folderpath, "___command_info", SNAPSHOT_FILENAME)
     hierarchy = _load_json(hierarchy_path) if os.path.isfile(hierarchy_path) else {}
-    raw_inheritance = _load_json(inheritance_path) if os.path.isfile(inheritance_path) else {}
-    inheritance = {name: list((definition or {}).get("base") or []) for name, definition in raw_inheritance.items()}
+    from fastworkflow.command_context_model import CommandContextModel
+
+    inheritance = CommandContextModel.declared_bases(workflow_folderpath)   # each context's declared inherits
     if not os.path.isfile(snapshot_path):
         raise SystemExit(f"{snapshot_path} does not exist; the trainer writes it, train the copy first")
     snapshot = _load_json(snapshot_path)

@@ -34,7 +34,7 @@ from fastworkflow.command_directory import (
     CommandLoadError,
     command_load_errors,
 )
-from fastworkflow.command_context_model import CommandContextModel
+from fastworkflow.command_context_model import CommandContextModel, read_declarations
 from fastworkflow.utils import python_utils
 from fastworkflow.utils.logging import logger
 
@@ -516,7 +516,10 @@ class RoutingRegistry:
                 definition = RoutingDefinition.build(workflow_folderpath)
                 definition.save()
             # Checked on every path, a persisted definition included: one saved before the
-            # retirement of enter_command would otherwise load without the load error (design 3.15).
+            # retirement of enter_command would otherwise load without the load error (design 3.15). So are the
+            # context declarations: one saved before context_inheritance_model.json was removed would load without
+            # the removed file's load error.
+            read_declarations(workflow_folderpath)
             check_retired_entry_declarations(workflow_folderpath, definition.context_model)
             _check_approval_annotations(workflow_folderpath, definition)
             cls._definitions[workflow_folderpath] = definition

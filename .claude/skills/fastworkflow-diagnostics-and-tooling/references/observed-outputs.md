@@ -117,6 +117,8 @@ routing_definition.json: STALE
   stamped: 6e99bab0787f78a8...
 ```
 
+(This output predates the removal of `context_inheritance_model.json`, now a removed spelling: a context's bases are `inherits` on its `class Context`.)
+
 Reading it: the newest-source list is the tell — `get_all_children.py` was
 modified 2026-07-08, after the snapshots were stamped. Next fastworkflow load
 of this workflow silently rebuilds both JSONs (seconds, harmless). This is the

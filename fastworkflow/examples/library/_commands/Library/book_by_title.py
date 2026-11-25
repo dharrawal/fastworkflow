@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 from fastworkflow import CommandResponse
 from fastworkflow.planning import run
 
-from ._wording import copies
+from .._shared.wording import copies
 from .find_book import Signature as FindBook
 from .open_book import Signature as OpenBook
 

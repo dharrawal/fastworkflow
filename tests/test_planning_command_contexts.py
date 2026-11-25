@@ -60,6 +60,9 @@ BRANCH_CONTEXT = """from ...application.library import Branch, Library
 
 
 class Context:
+    inherits = ["Library"]
+    parents = ["Library"]
+
     @classmethod
     def get_parent(cls, record: Branch) -> Library:
         return record.library
@@ -118,14 +121,9 @@ def _library_workflow(tmp_path, extra_planning_commands: dict[str, str] | None =
     app_lib = folder / "application" / "library.py"
     app_lib.write_text(app_lib.read_text(encoding="utf-8") + BRANCH_APP_ADDITION, encoding="utf-8")
 
-    with open(os.path.join(LIBRARY, "_commands", "context_inheritance_model.json"),
-              encoding="utf-8") as handle:
-        inheritance = json.load(handle)
-    inheritance["Branch"] = {"base": ["Library"]}
+    # the copied context classes carry the library's inherits; BRANCH_CONTEXT declares Branch's
     commands_dir = folder / "_commands"
     commands_dir.mkdir(parents=True, exist_ok=True)
-    (commands_dir / "context_inheritance_model.json").write_text(
-        json.dumps(inheritance, indent=2) + "\n", encoding="utf-8")
 
     for rel in (*_COPIED_CONTEXT_CLASSES, *_COPIED_COMMANDS):
         src = os.path.join(LIBRARY, rel)
@@ -646,7 +644,8 @@ def _with_rule_check(tmp_path) -> str:
     """A library copy with the rule_check planning command, loaded as a workflow's commands are."""
     folder = _library_workflow(tmp_path)
     # The Library planning command the rule test reads (its extraction sentences), and its helper.
-    for rel in ("_commands/Library/_wording.py", "_commands/Library/book_by_title.py"):
+    for rel in ("_commands/_shared/__init__.py", "_commands/_shared/wording.py", "_commands/Library/book_by_title.py"):
+        Path(folder, rel).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(os.path.join(LIBRARY, rel), Path(folder, rel))
     Path(folder, RULE_CHECK_FILE).write_text(RULE_CHECK_SOURCE, encoding="utf-8")
     fastworkflow.RoutingRegistry.clear_registry()

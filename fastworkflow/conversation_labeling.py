@@ -15,7 +15,7 @@ import litellm  # noqa: F401  (must precede dspy; see fastworkflow/utils/dspy_ut
 import dspy
 
 import fastworkflow
-from fastworkflow.utils.dspy_utils import get_lm
+from fastworkflow.utils.dspy_utils import get_lm, role_context
 
 # Topic generation is the only LLM call this module makes, and async callers run
 # it in an executor so it does not block the event loop. That offload is only
@@ -126,7 +126,7 @@ def generate_topic_and_summary(turns: list[dict[str, Any]]) -> tuple[str, str]:
         timeout=topic_generation_timeout_seconds(),
         num_retries=TOPIC_GENERATION_MAX_RETRIES,
     )
-    with dspy.context(lm=lm):
+    with role_context("LLM_CONVERSATION_STORE", lm):
         generator = dspy.ChainOfThought(TopicSummarySignature)
         result = generator(conversation_turns=turns_str)
         return result.topic, result.summary

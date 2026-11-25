@@ -113,7 +113,7 @@ def _span(**overrides) -> tracing.Span:
     fields = {
         "span_id": "span-1",
         "trace_id": "20260828T000000.000000Z-aaaaaaaaaaaa",
-        "name": tracing.SPAN_COMMAND_EXECUTE,
+        "name": tracing.SPAN_COMMAND,
         "kind": tracing.KIND_INTERNAL,
         "channel_id": "chan-1",
         "command_name": "get_user_details",

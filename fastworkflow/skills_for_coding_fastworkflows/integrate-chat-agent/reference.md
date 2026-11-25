@@ -346,12 +346,29 @@ class ResponseGenerator:
   (`command_text`, `workflow`, `command`). Value lookups (`DatabaseValidator.fuzzy_match`) go there too.
 - A command may also return a `str`, or raise `fastworkflow.Refused(message)` to fail with that message.
 
-### Contexts: folders, and `_commands/context_inheritance_model.json`
+### Contexts: folders, and the declarations on `class Context`
 A context is a folder `_commands/<Context>/` holding its commands and `_<Context>.py` (its `Context` class:
 `get_parent`, `get_displayname`, and `get_state` / `from_state` so the server can checkpoint a session). Commands at
-the top of `_commands/` are in the root context. The JSON file only declares inheritance: each entry is
-`{"<Context>": {"base": ["<Parent>", ...]}}` (an empty `{}` is valid; a `"/"` key is a load error). See
-[design-context-models](../design-context-models/SKILL.md).
+the top of `_commands/` are in the root context. The class declares two lists of context names, written as string
+literals and read without importing the file: `inherits = ["<Context>", ...]` (the contexts whose commands it also has;
+`"*"` the global commands) and `parents = ["<Context>", ...]` (every context a record of it can sit in; declared exactly
+when it has `get_parent`; none for a top-level context or the root). From the library example:
+
+```python
+class Context:
+    inherits = ["Record"]
+    parents = ["Library"]
+
+    @classmethod
+    def get_parent(cls, record: Book) -> Library:
+        return record.library
+```
+
+A name that is no context, a name given twice, or `get_parent` without `parents` (or the reverse) stops the workflow
+with one line naming the file. `fastworkflow build` prints the `inherits` line it derives for each context and writes it
+only into a `_<Context>.py` it creates; write `parents` by hand. `fastworkflow command preview` generates the object model
+(`_object_models/<workflow>.md`). A workflow with the removed `_commands/context_inheritance_model.json` does not load:
+run `fastworkflow migrate-contexts <workflow>`. See [design-context-models](../design-context-models/SKILL.md).
 
 ## Environment variables
 

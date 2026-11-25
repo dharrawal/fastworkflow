@@ -409,9 +409,7 @@ class Gadget:
 
 NO_HOOK_CONTEXT = '''
 class Context:
-    @classmethod
-    def get_parent(cls, record) -> None:
-        return None
+    pass
 '''
 
 EPHEMERAL_CONTEXT = '''
@@ -420,10 +418,6 @@ import fastworkflow
 
 class Context:
     state_version = 1
-
-    @classmethod
-    def get_parent(cls, record) -> None:
-        return None
 
     @classmethod
     def get_state(cls, record):
@@ -455,7 +449,6 @@ def write_scratch_workflow(tmp_path: Path) -> Path:
         context_folder.mkdir(parents=True)
         (context_folder / f"_{context_name}.py").write_text(context_body)
         (context_folder / "poke.py").write_text(POKE_COMMAND)
-    (commands / "context_inheritance_model.json").write_text("{}")
     return folderpath
 
 
@@ -524,10 +517,6 @@ class Gizmo:
 
 SAVES_BUT_CANNOT_REBUILD = '''
 class Context:
-    @classmethod
-    def get_parent(cls, record) -> None:
-        return None
-
     @classmethod
     def get_state(cls, record):
         return {"saved": True}

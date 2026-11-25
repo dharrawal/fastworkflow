@@ -138,7 +138,7 @@ def hello_ctx():
 
 # The recorder wrappers skip their work when no span was opened; a real one stands
 # in wherever the test is about what gets recorded rather than about that skip.
-_ANY_SPAN = tracing.Span(span_id="test", trace_id="test", name=tracing.SPAN_NLU_INTENT)
+_ANY_SPAN = tracing.Span(span_id="test", trace_id="test", name=tracing.SPAN_INTENT)
 
 
 def _kinds(uncertainty: DecisionUncertainty) -> list[str]:
@@ -203,7 +203,7 @@ def test_fuzzy_threshold_is_a_maximum_and_is_recorded_beside_the_distance(hello_
 
     ctx, sink = hello_ctx
     CommandExecutor.invoke_command(ctx, "what can i do")
-    span = sink.named(tracing.SPAN_NLU_INTENT)[-1]
+    span = sink.named(tracing.SPAN_INTENT)[-1]
     assert span.attributes["matcher_layer"] == "fuzzy_prematch"
     assert span.attributes["fuzzy_threshold"] == _FUZZY_PREMATCH_MAX_DISTANCE
     assert span.attributes["fuzzy_distance"] <= _FUZZY_PREMATCH_MAX_DISTANCE
@@ -556,42 +556,45 @@ class TestRoutingIsUnchanged:
             "add_two_numbers <first_num>5</first_num><second_num>3</second_num>",
         )
         assert out.success
-        span = sink.named(tracing.SPAN_NLU_INTENT)[-1]
-        assert span.attributes["matcher_layer"] == "exact_prefix"
-        assert span.attributes["command_name"] == "add_two_numbers"
-        assert span.attributes["resolved"] is True
-        assert span.attributes["ambiguous"] is False
+        # An exact name decides nothing (no model, no question): no fw.intent is written, and the command's own
+        # span says how it was resolved (span contract v63, bd fix-qjne.34).
+        assert sink.named(tracing.SPAN_INTENT) == []
+        span = sink.named(tracing.SPAN_COMMAND)[-1]
+        assert span.command_name == "add_two_numbers"
+        assert span.attributes["resolved_by"] == "exact_name"
+        assert span.attributes["success"] is True
 
     def test_fuzzy_prematch_still_routes_to_what_can_i_do(self, hello_ctx):
         ctx, sink = hello_ctx
         CommandExecutor.invoke_command(ctx, "what can i do")
-        span = sink.named(tracing.SPAN_NLU_INTENT)[-1]
+        span = sink.named(tracing.SPAN_INTENT)[-1]
         assert span.attributes["matcher_layer"] == "fuzzy_prematch"
         assert span.attributes["command_name"] == "IntentDetection/what_can_i_do"
         assert span.attributes["is_cme_command"] is True
 
 class TestSpansCarryTheRecords:
     def test_intent_span_carries_a_decision_uncertainty(self, hello_ctx):
+        # An exact name writes no fw.intent (v63), so the written decision here is a fuzzy match, which measured a
+        # distance; the exact name's deterministic record is pinned by
+        # test_exact_prefix_is_deterministic_and_states_no_confidence.
         ctx, sink = hello_ctx
-        CommandExecutor.invoke_command(
-            ctx,
-            "add_two_numbers <first_num>5</first_num><second_num>3</second_num>",
-        )
-        span = sink.named(tracing.SPAN_NLU_INTENT)[-1]
+        CommandExecutor.invoke_command(ctx, "what can i do")
+        span = sink.named(tracing.SPAN_INTENT)[-1]
+        assert span.attributes["matcher_layer"] == "fuzzy_prematch"
         recorded = span.attributes["decision_uncertainty"]
         assert recorded["decision_kind"] == "command-identity"
-        assert recorded["signals_absent_reason"] == "deterministic-resolution"
-        assert recorded["signals"] == []
+        assert recorded["signals_absent_reason"] is None
+        assert {signal["kind"] for signal in recorded["signals"]} >= {"fuzzy-score"}
         # Re-parses into the contract, so what lands on the span is not a
         # look-alike dict that would fail validation on the way back in.
-        assert DecisionUncertainty(**recorded).candidate_count == 1
+        assert DecisionUncertainty(**recorded).candidate_count >= 1
 
     @pytest.mark.usefixtures("no_planner_key")
     def test_intent_span_always_carries_an_escalation_outcome(self, hello_ctx):
         ctx, sink = hello_ctx
         CommandExecutor.invoke_command(ctx, "what can i do")
         CommandExecutor.invoke_command(ctx, CLASSIFIER_REQUEST)
-        spans = sink.named(tracing.SPAN_NLU_INTENT)
+        spans = sink.named(tracing.SPAN_INTENT)
         assert spans
         for span in spans:
             assert span.attributes["escalation_outcome"] in ESCALATION_OUTCOMES
@@ -610,7 +613,7 @@ class TestSpansCarryTheRecords:
         CommandExecutor.invoke_command(ctx, CLASSIFIER_REQUEST)
         spans = [
             s
-            for s in sink.named(tracing.SPAN_NLU_INTENT)
+            for s in sink.named(tracing.SPAN_INTENT)
             if s.attributes.get("matcher_layer") == "classifier"
         ]
         assert spans, "classifier layer never ran"
@@ -627,12 +630,15 @@ class TestSpansCarryTheRecords:
         )
 
     def test_param_extraction_span_carries_a_slot_binding_record(self, hello_ctx):
+        # A typed call whose values are all valid decides nothing and writes no fw.parameters (v63); an invalid
+        # typed value is a decision (a refusal, no model call), so its extraction is written.
         ctx, sink = hello_ctx
         CommandExecutor.invoke_command(
             ctx,
-            "add_two_numbers <first_num>5</first_num><second_num>3</second_num>",
+            "add_two_numbers <first_num>abc</first_num><second_num>3</second_num>",
         )
-        span = sink.named(tracing.SPAN_NLU_PARAM_EXTRACTION)[-1]
+        span = sink.named(tracing.SPAN_PARAMETERS)[-1]
+        assert span.attributes["invalid_fields"] == ["first_num"]
         recorded = DecisionUncertainty(**span.attributes["decision_uncertainty"])
         assert recorded.decision_kind == "slot-binding"
         source = _signal(recorded, "slot-binding-source")

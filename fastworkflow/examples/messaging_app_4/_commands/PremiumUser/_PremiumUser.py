@@ -7,6 +7,9 @@ from ...application.user import PremiumUser, User
 
 
 class Context:
+    inherits = ["User"]
+    parents = ["ChatRoom"]
+
     state_version = 1
 
     @classmethod

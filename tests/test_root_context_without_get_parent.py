@@ -142,7 +142,8 @@ SHIPPED_ROOT_CALLBACKS = [
 
 
 #: messaging_app_3 never sets a root (its startup assigns ``workflow.record``), so its User and PremiumUser are not
-#: roots: they keep ``get_parent`` returning None, which sends the climb straight to the global commands (bd fix-ftdl.8.1).
+#: roots: with no root, no ``get_parent`` sends the climb straight to the global commands as ``return None`` did
+#: (bd fix-ftdl.8.1), and a ``get_parent`` must declare ``parents`` (bd fix-qjne.36), so they write none.
 ROOTLESS_CALLBACKS = [
     "fastworkflow/examples/messaging_app_3/_commands/User/_User.py",
     "fastworkflow/examples/messaging_app_3/_commands/PremiumUser/_PremiumUser.py",
@@ -150,8 +151,8 @@ ROOTLESS_CALLBACKS = [
 
 
 @pytest.mark.parametrize("relative", ROOTLESS_CALLBACKS)
-def test_a_context_of_a_workflow_with_no_root_keeps_its_get_parent(relative):
-    assert _has_get_parent(REPO / relative), f"{relative}: not a root, so the climb asks it for the enclosing record"
+def test_a_context_of_a_workflow_with_no_root_writes_no_get_parent_that_only_returns_none(relative):
+    assert not _has_get_parent(REPO / relative), f"{relative}: no root, so no get_parent means the global commands"
 
 
 @pytest.mark.parametrize("relative", SHIPPED_ROOT_CALLBACKS)
@@ -193,7 +194,7 @@ def test_a_context_with_no_get_parent_under_a_root_still_raises_on_the_climb(tmp
     callback = workflow_path / "_commands" / "TodoItem" / "_TodoItem.py"
     callback.write_text(callback.read_text().replace(
         "    @classmethod\n    def get_parent(cls, record: TodoItem) -> Optional[TodoList]:\n        return record.parent",
-        "    pass"))
+        "    pass").replace('    parents = ["TodoList"]\n', ""))
     assert not _has_get_parent(callback)
     app = fastworkflow.Workflow.create(workflow_folderpath=str(workflow_path), workflow_id_str=f"rooted-{tmp_path.name}")
     manager = TodoListManager(file_path=str(tmp_path / "lists.json"), load_from_file=False)

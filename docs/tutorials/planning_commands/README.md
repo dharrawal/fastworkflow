@@ -38,7 +38,7 @@ Patel, Mia Chen) and their loans. Fetch your own copy with
 
 Its contexts, and what each one's object is:
 
-| context | the object | its parent (`get_parent()`) | its bases |
+| context | the object | its parent (`get_parent()`, declared as `parents`) | its bases (`inherits`) |
 |---|---|---|---|
 | global (`_commands/` root) | none: these commands run from anywhere | | |
 | `Library` | the library, the workflow's root object | none | |
@@ -80,7 +80,7 @@ of their context: eight in `_commands/Library/` and two in `_commands/Book/`.
 3. [A fact passed on, and an answer written in code](03-a-fact.md): a phase that hands on a
    command's `Output`, reading a phase by its name, `__result__`.
 4. [Skipping a phase, picking a row](04-skipping-and-picking.md): `return []`, a skipped
-   phase as `None`, `run(..., named=...)` from an earlier phase's listing, a `_` helper.
+   phase as `None`, `run(..., named=...)` from an earlier phase's listing, a helper module.
 5. [Where a command leaves the workflow](05-where-a-command-leaves-the-workflow.md): a
    navigation command and its `@descends_to`, a producer `from_command_output`, the record a call
    ends on.
@@ -97,7 +97,7 @@ of their context: eight in `_commands/Library/` and two in `_commands/Book/`.
     the answer, and who reads it.
 12. [Calling a planning command](12-calling-a-planning-command.md): a step that names a
     planning command, the cycle guard, the step budget.
-13. [Reuse without a call](13-reuse.md): `_` helpers, a base class in a `_` module, and when
+13. [Reuse without a call](13-reuse.md): helper modules, a base class in one, and when
     to call instead.
 14. [Where a request finds its command](14-where-a-request-finds-its-command.md): contexts,
     the lookup path, how the agent plans a request and calls, extends or adapts a planning

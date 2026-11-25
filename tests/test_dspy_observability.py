@@ -240,7 +240,7 @@ def _run_vote(*, early_stop: bool):
             next(as_completed(futures)).result()  # the vote is decided
         else:
             time.sleep(0.1)  # the slower calls are still running
-        plan = tracing.start_span(host, "fw.planner.plan")
+        plan = tracing.start_span(host, tracing.SPAN_PLAN)
         with dspy.context(lm=_SlowLM(9, 0.0)):
             dspy.Predict("question -> answer")(question="question-9")
         tracing.end_span(host, plan)
@@ -260,7 +260,7 @@ def test_a_model_call_span_is_never_a_parent(early_stop):
     assert host.trace_span_stack == []
     if early_stop:
         turn = next(span for span in spans if span.name == tracing.SPAN_TURN)
-        plan = next(span for span in spans if span.name == "fw.planner.plan")
+        plan = next(span for span in spans if span.name == tracing.SPAN_PLAN)
         assert plan.parent_span_id == turn.span_id
 
 

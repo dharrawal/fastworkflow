@@ -666,7 +666,7 @@ def _ask_matcher(utterance: str, groups: Sequence[tuple[str, Sequence[Candidate]
 
         listing = matcher_listing(groups, workflow_agent.MATCHER_EXAMPLES)
         result["calls"] = 1
-        with dspy.context(lm=jev_lm):
+        with workflow_agent.dspy_utils.role_context("JEV", jev_lm):
             choice = dspy.Predict(workflow_agent.command_match_signature(options))(
                 message=utterance, commands=listing).command
         value, probability = workflow_agent._choice_value_and_probability(choice)

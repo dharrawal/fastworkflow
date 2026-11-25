@@ -37,7 +37,7 @@ NOTE_MEMBER = "Library/note_member"
 WRITES_FILES = (
     "_commands/Library/author_books.py",
     "_commands/Library/note_member.py",
-    "_commands/Library/_wording.py",
+    "_commands/_shared/__init__.py", "_commands/_shared/wording.py",
 )
 
 

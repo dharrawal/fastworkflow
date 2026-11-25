@@ -93,26 +93,23 @@ def hello_ctx():
 
 class TestIntentSpan:
     def test_exact_prefix_layer(self, hello_ctx):
+        """An exact name with no model and no question decided nothing (bd fix-qjne.34 decision b, on every path): no
+        fw.intent is written, and the command's fw.command span says how it was resolved."""
         ctx, sink = hello_ctx
         out = CommandExecutor.invoke_command(
             ctx,
             "add_two_numbers <first_num>5</first_num><second_num>3</second_num>",
         )
         assert out.success
-        span = sink.named(tracing.SPAN_NLU_INTENT)[-1]
-        assert span.status == "ok"
-        assert span.attributes["matcher_layer"] == "exact_prefix"
-        assert span.attributes["command_name"] == "add_two_numbers"
-        assert span.attributes["resolved"] is True
-        assert span.attributes["ambiguous"] is False
-        assert span.attributes["stage"] == "INTENT_DETECTION"
-        # Nested under the enclosing fw.command.execute span via the stack.
-        assert span.parent_span_id is not None
+        assert sink.named(tracing.SPAN_INTENT) == []
+        command = sink.named(tracing.SPAN_COMMAND)[-1]
+        assert command.status == "ok" and command.command_name == "add_two_numbers"
+        assert command.attributes["resolved_by"] == "exact_name"
 
     def test_fuzzy_prematch_layer(self, hello_ctx):
         ctx, sink = hello_ctx
         CommandExecutor.invoke_command(ctx, "what can i do")
-        span = sink.named(tracing.SPAN_NLU_INTENT)[-1]
+        span = sink.named(tracing.SPAN_INTENT)[-1]
         assert span.attributes["matcher_layer"] == "fuzzy_prematch"
         assert span.attributes["command_name"] == "IntentDetection/what_can_i_do"
         assert span.attributes["is_cme_command"] is True
@@ -125,7 +122,7 @@ class TestIntentSpan:
         CommandExecutor.invoke_command(ctx, CLASSIFIER_REQUEST)
         spans = [
             s
-            for s in sink.named(tracing.SPAN_NLU_INTENT)
+            for s in sink.named(tracing.SPAN_INTENT)
             if s.attributes.get("matcher_layer") == "classifier"
         ]
         assert spans, "classifier layer never ran"
@@ -145,31 +142,25 @@ class TestIntentSpan:
 
 class TestParamExtractionSpan:
     def test_xml_extraction_valid(self, hello_ctx):
+        """Typed values read in code, all valid, no model call: the extraction decided nothing, so no fw.parameters is
+        written (bd fix-qjne.34 decision b); fw.command carries how the values were read and that they were valid."""
         ctx, sink = hello_ctx
         CommandExecutor.invoke_command(
             ctx,
             "add_two_numbers <first_num>5</first_num><second_num>3</second_num>",
         )
-        span = sink.named(tracing.SPAN_NLU_PARAM_EXTRACTION)[-1]
-        assert span.status == "ok"
-        assert span.command_name == "add_two_numbers"
-        assert span.attributes["extraction_method"] == "xml_regex"
-        assert span.attributes["retry_round"] is False
-        assert span.attributes["parameters_valid"] is True
-        # add_two_numbers declares no Input validator, so the validation step did not run
-        # (ran=False is the honest fact). The facts are still emitted; a command with a
-        # validator reports ran=True (test_validation_hook_outcomes_are_structured).
-        assert span.attributes["validation_hook"]["ran"] is False
-        assert span.attributes["validation_hook"]["is_valid"] is True
+        assert sink.named(tracing.SPAN_PARAMETERS) == []
+        command = sink.named(tracing.SPAN_COMMAND)[-1]
+        assert command.attributes["parameters_read_by"] == "typed"
+        assert command.attributes["parameters_valid"] is True
 
     def test_key_value_extraction_valid(self, hello_ctx):
-        # ``name=value`` is parsed in code, not by the LLM (fix-hia1.10): the method
-        # stays the deterministic regex one (an LLM fallback would record "llm").
+        # ``name=value`` is parsed in code, not by the LLM (fix-hia1.10): read as typed values, no span of its own.
         ctx, sink = hello_ctx
         CommandExecutor.invoke_command(ctx, "add_two_numbers first_num=5 second_num=3")
-        span = sink.named(tracing.SPAN_NLU_PARAM_EXTRACTION)[-1]
-        assert span.attributes["extraction_method"] == "xml_regex"
-        assert span.attributes["parameters_valid"] is True
+        assert sink.named(tracing.SPAN_PARAMETERS) == []
+        command = sink.named(tracing.SPAN_COMMAND)[-1]
+        assert command.attributes["parameters_read_by"] == "typed" and command.attributes["parameters_valid"] is True
 
 
 class TestStructuredValidationDiagnostics:
@@ -346,7 +337,7 @@ class TestHostScope:
         # Deep sites outside any host_scope must silently no-op.
         assert tracing.current_host() is None
         span = tracing.start_span(
-            tracing.current_host(), tracing.SPAN_NLU_INTENT, attributes={"x": 1}
+            tracing.current_host(), tracing.SPAN_INTENT, attributes={"x": 1}
         )
         assert span is None
         tracing.end_span(None, span)  # no-op, no raise

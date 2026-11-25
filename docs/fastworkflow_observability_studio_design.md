@@ -181,6 +181,50 @@ Reserved-for-v2 names as originally scoped: `fw.nlu.intent`,
 `cache_hit=true`); only `fw.train.*` remains reserved. `CommandTraceEvent`
 gains `turn_key` (additive); live CLI trace rendering is unchanged.
 
+*Amendment (span contract 63, bd fix-qjne.34) — the tree follows the turn's
+stages.* The tables above are the taxonomy of contract 62 and earlier, kept as
+history. Since 63 a turn's spans are:
+
+```
+fw.turn                     path = plan | direct, mode = agent | no_agent
+├─ fw.split                 the split record (was the turn's subtask_split)
+│  ├─ fw.split.gate         the one-job gate's verdict
+│  ├─ fw.split.splitter     one per model attempt
+│  ├─ fw.split.merge        the merge rules that changed the list
+│  └─ fw.split.referent     part=N
+├─ fw.resolve               plan_ambiguity (was the turn's subtask_plan_ambiguity)
+│  └─ fw.resolve.part       part=N, outcome bound | ad_hoc | dropped | asked
+│     ├─ fw.intent          (was fw.nlu.intent; decided_by)
+│     ├─ fw.parameters      (was fw.nlu.param_extraction)
+│     └─ fw.question        kind which_command | parameters | did_you_mean
+├─ fw.review                outcome (was the turn's subtask_review)
+│  ├─ fw.question kind=review, fw.review.reply, fw.review.edit, fw.review.revision
+│  └─ fw.approval           the review record's transitions
+├─ fw.run
+│  └─ fw.run.part           part=N, means, outcome ran | not_run | refused, reason
+│     ├─ fw.plan            (was fw.planner.plan / .replan; trigger)
+│     ├─ fw.phase           (was fw.skill.phase)
+│     │  └─ fw.step         (was fw.agent.step + fw.agent.tool_call; run_by code | agent)
+│     │     └─ fw.command   (was fw.command.execute; resolved_by, parameters_read_by)
+│     ├─ fw.step            (a command or ad hoc part's steps; kind answer was fw.skill.answer)
+│     └─ fw.question        kind agent | decision | parameters (was fw.ask_user)
+└─ fw.answer                written_by; the summary's fw.llm.call (purpose conversation_summary)
+```
+
+Stage and part spans have deterministic ids, so a turn that waits on a person
+keeps ONE span per stage and part across the wait and across processes
+(`resumed`, `segments`). `fw.agent.execute` is gone (its facts are on the run
+part or the phase); a command's own `fw.intent` / `fw.parameters` that decided
+nothing is not written (the command's span carries the facts); every
+`fw.llm.call` has a `role`. A part dropped at resolve is a run part not run.
+The direct ("/") path has `fw.resolve` and `fw.run` with one part each. The
+framework's readers (the debug page, diagnosis, comparisons, replay and
+distillation) read these names only: a store written before contract 63 is not
+read by them (owner decision; the benchmark's dump tool, outside the repo, is
+the one place that maps old names). The history paragraph of
+`SPAN_CONTRACT_VERSION` 63 in `fastworkflow/tracing.py` lists every rename,
+move, removal and new span.
+
 ### 3.2 The black box: `observability.sqlite3`
 
 One DB per workflow at `state_paths.observability_db()`. Schema (v1):

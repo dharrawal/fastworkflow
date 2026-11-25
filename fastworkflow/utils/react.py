@@ -445,12 +445,12 @@ class fastWorkflowReAct(Module):
 
         With *code* (``planning_phases.CodeSteps``) the steps are code's, not the model's:
         each ``(thought, command)`` it gives runs as an ``execute_workflow_query`` step,
-        written, traced (``by_code``) and hooked like any other, and is reported back to
+        written, traced (``run_by`` code) and hooked like any other, and is reported back to
         it (``code.ran``). They do not count toward ``iteration_counter``. The loop ends
         when *code* gives no more (``code.stop`` "stopped" when ``on_step_complete`` did).
         """
         self._exhausted_last_run = False
-        # Host for the fw.agent.step spans, bound by the caller around the whole
+        # Host for the fw.step spans, bound by the caller around the whole
         # agent run. None outside an observed turn, where every helper no-ops.
         host = tracing.current_host()
         while True:
@@ -459,10 +459,13 @@ class fastWorkflowReAct(Module):
                 break
             # Opened before the reasoning call so a step that fails to pick a
             # tool is still a recorded step rather than a gap in the trace.
+            # One fw.step per step, whoever ran it (bd fix-qjne.34): code (`planned`) or the agent model, whose call is
+            # then the step's child; the command it dispatches is recorded on it (``tracing.note``).
             step_span = tracing.start_span(
                 host,
-                tracing.SPAN_AGENT_STEP,
-                attributes={"step_index": idx},
+                tracing.SPAN_STEP,
+                attributes=tracing.step_record(step_index=idx, run_by="code" if planned is not None else "agent",
+                                               plan_span_id=tracing.current_plan_id(host)),
             )
             repaired_tool_name = None
             reopened = False
@@ -532,14 +535,13 @@ class fastWorkflowReAct(Module):
             step_status = tracing.STATUS_OK
             step_attributes = {
                 "step_index": idx,
+                "kind": _STEP_KINDS.get(pred.next_tool_name, "tool"),
                 "thought": pred.next_thought,
                 "tool_name": pred.next_tool_name,
                 "tool_args": pred.next_tool_args,
             }
             if repaired_tool_name is not None:
                 step_attributes["repaired_tool_name"] = repaired_tool_name
-            if planned is not None:
-                step_attributes["by_code"] = True
             run_state = getattr(self, "run_state", None)
             if isinstance(run_state, dict):
                 run_state["by_code"] = planned is not None
@@ -549,6 +551,8 @@ class fastWorkflowReAct(Module):
             # it like any result and keeps going.
             policy = self.policy if self.policy is not None and self.policy.enabled else None
             decision = None
+            dispatch_scope = tracing.facts_for(tracing.SPAN_STEP)
+            dispatch = dispatch_scope.__enter__()
             try:
                 if pred.next_tool_name in self.disabled_tools:
                     observation = f"{pred.next_tool_name} is not available now."
@@ -600,6 +604,7 @@ class fastWorkflowReAct(Module):
                     })
                 trajectory[f"observation_{idx}"] = observation
                 step_attributes["observation"] = _as_text(observation)
+                step_attributes.update(_dispatch_attributes(dispatch))
                 # The command text a tool built from arguments passed beside
                 # ``command`` (fix-5jss); `tool_args` keeps what the model sent.
                 run_state = getattr(self, "run_state", None)
@@ -621,6 +626,7 @@ class fastWorkflowReAct(Module):
                 # fw.ask_user's to record, and this span must not stay open
                 # across a suspension that may resume in another process.
                 step_attributes["clarification"] = err.clarification_request
+                step_attributes.update(_dispatch_attributes(dispatch))
                 tracing.end_span(
                     host,
                     step_span,
@@ -639,6 +645,7 @@ class fastWorkflowReAct(Module):
                 trajectory[f"observation_{idx}"] = error_observation
                 step_attributes["observation"] = error_observation
                 step_attributes["tool_error"] = type(err).__name__
+                step_attributes.update(_dispatch_attributes(dispatch))
                 step_status = tracing.STATUS_ERROR
             except BaseException as err:
                 # Control signals from a tool (e.g. CommandCancelledError) end
@@ -651,6 +658,8 @@ class fastWorkflowReAct(Module):
                     attributes={**step_attributes, "error_type": type(err).__name__},
                 )
                 raise
+            finally:
+                dispatch_scope.__exit__(None, None, None)
 
             tracing.end_span(
                 host, step_span, status=step_status, attributes=step_attributes
@@ -946,6 +955,24 @@ def _fmt_exc(err: BaseException, *, limit: int = 5) -> str:
 _FIELD_MARKER = re.compile(r"\[\[ ## (\w+) ## \]\]")
 _COMMAND_TOKEN = re.compile(r"[A-Za-z_][\w/]*")
 _COMMAND_TOOL = "execute_workflow_query"
+
+#: A step's ``kind`` on its span, by the tool it ran (any other tool is ``tool``).
+_STEP_KINDS = {_COMMAND_TOOL: "command", "ask_user": "ask", "finish": "finish"}
+
+
+def _dispatch_attributes(dispatch: dict) -> dict:
+    """The ``fw.step`` keys of the command a step dispatched (``workflow_agent._execute_workflow_query`` notes them);
+    none when it dispatched none."""
+    if not dispatch:
+        return {}
+    return {
+        "raw_command": dispatch.get("raw_command"),
+        "response_text": dispatch.get("response_text"),
+        "success": dispatch.get("success"),
+        tracing.ATTR_COMMAND_CALL_ID: dispatch.get(tracing.ATTR_COMMAND_CALL_ID),
+        tracing.ATTR_CONTEXT_BEFORE: dispatch.get(tracing.ATTR_CONTEXT_BEFORE),
+        tracing.ATTR_CONTEXT_AFTER: dispatch.get(tracing.ATTR_CONTEXT_AFTER),
+    }
 # Finish reviews per agent run (the finish check, observation_offloading.finish_check): a second finish is
 # reviewed too, so a run whose first note the agent did not act on is reopened once more. Past the cap the
 # run may finish. The review itself still declines when too few iterations are left.

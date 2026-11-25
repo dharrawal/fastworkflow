@@ -1,7 +1,7 @@
 """A context class may inherit its serialization hooks from a plain base class in a helper module.
 
 A temp copy of the bundled ``library`` example has its hooks moved, unchanged in behaviour, onto one base class
-in ``_commands/_checkpoint.py`` (the scanner ignores a file whose name starts with ``_``); each ``Context`` of the
+in ``_commands/_shared/checkpoint.py`` (the helper package, which the scanner never reads); each ``Context`` of the
 copy then inherits it. The same flow is driven through ``project_command_contexts`` and
 ``restore_command_contexts`` on the untouched copy and on the inheriting copy, and the two must agree. Nothing here
 calls a model.
@@ -27,7 +27,7 @@ from typing import Any, Optional
 
 import fastworkflow
 
-from ..application.library import Library
+from ...application.library import Library
 
 
 class CheckpointHooks:
@@ -63,25 +63,24 @@ def _find(library, uid):
 '''
 
 LIBRARY_CLASS = '''\
-from .._checkpoint import CheckpointHooks
+from .._shared.checkpoint import CheckpointHooks
 from ...application.library import Library
 
 
 class Context(CheckpointHooks):
-    @classmethod
-    def get_parent(cls, record: Library) -> None:
-        return None
-
     @classmethod
     def get_displayname(cls, record: Library) -> str:
         return "Library"
 '''
 
 RECORD_CLASS = '''\
-from .._checkpoint import CheckpointHooks
+from .._shared.checkpoint import CheckpointHooks
 
 
 class Context(CheckpointHooks):
+    inherits = ["Record"]
+    parents = ["Library"]
+
     @classmethod
     def get_parent(cls, record):
         return record.library
@@ -106,7 +105,8 @@ def _copy(tmp_path: Path, name: str, *, inherit: bool) -> Path:
         "___command_info", "___convo_info", "__pycache__"))
     if inherit:
         commands = folder / "_commands"
-        (commands / "_checkpoint.py").write_text(HELPER)
+        (commands / "_shared").mkdir(exist_ok=True)   # the library keeps its own helper there
+        (commands / "_shared" / "checkpoint.py").write_text(HELPER)
         (commands / "Library" / "_Library.py").write_text(LIBRARY_CLASS)
         (commands / "Book" / "_Book.py").write_text(RECORD_CLASS.replace("@@EXTRA@@", ""))
         (commands / "Member" / "_Member.py").write_text(RECORD_CLASS.replace("@@EXTRA@@", MEMBER_OWN_STATE))
@@ -222,7 +222,7 @@ def test_c_the_helper_module_is_not_registered(initialized_fastworkflow, inherit
         assert not [n for n in directory.map_context_2_metadata if "checkpoint" in n.lower()]
         model = fastworkflow.CommandContextModel.load(str(folder))
         assert not [n for n in model._command_contexts if "checkpoint" in n.lower()]
-    assert (inheriting / "_commands" / "_checkpoint.py").is_file()
+    assert (inheriting / "_commands" / "_shared" / "checkpoint.py").is_file()
 
 
 # (d) a class that overrides one inherited hook gets its own
@@ -250,7 +250,7 @@ def test_e_the_relative_import_of_the_helper_resolves_from_a_callback_file(initi
     library = context_model.get_context_class("Library", fastworkflow.ModuleType.CONTEXT_CLASS)
     base = library.__mro__[1]
     assert base.__name__ == "CheckpointHooks"
-    assert base.__module__.endswith("._commands._checkpoint")
+    assert base.__module__.endswith("._commands._shared.checkpoint")
     # one base class for every context, not one copy per file
     book = context_model.get_context_class("Book", fastworkflow.ModuleType.CONTEXT_CLASS)
     assert book.__mro__[1] is base
@@ -263,17 +263,20 @@ def test_the_other_class_members_are_read_with_getattr_so_they_inherit(initializ
     from fastworkflow.entry_declarations import declared_occupiable
 
     commands = inheriting / "_commands"
-    (commands / "_checkpoint.py").write_text(HELPER.replace(
+    (commands / "_shared" / "checkpoint.py").write_text(HELPER.replace(
         "    state_version = 1\n",
         '    state_version = 1\n    instance_label_attr = "uid"\n    occupiable = False\n', 1))
     # a base that also declares the shared get_parent and get_displayname
-    (commands / "_checkpoint.py").write_text((commands / "_checkpoint.py").read_text().replace(
+    (commands / "_shared" / "checkpoint.py").write_text((commands / "_shared" / "checkpoint.py").read_text().replace(
         "    @classmethod\n    def get_state",
         "    @classmethod\n    def get_parent(cls, record):\n        return record.library\n\n"
         "    @classmethod\n    def get_displayname(cls, record) -> str:\n        return 'inherited'\n\n"
         "    @classmethod\n    def get_state", 1))
-    (commands / "Book" / "_Book.py").write_text("from .._checkpoint import CheckpointHooks\n\n\n"
-                                                "class Context(CheckpointHooks):\n    pass\n")
+    (commands / "Book" / "_Book.py").write_text("from .._shared.checkpoint import CheckpointHooks\n\n\n"
+                                                "class Context(CheckpointHooks):\n    inherits = [\"Record\"]\n")
+    # the base now declares occupiable = False for Member too, which then declares no parents (bd fix-qjne.36)
+    member = commands / "Member" / "_Member.py"
+    member.write_text(member.read_text().replace('    parents = ["Library"]\n', ""))
     workflow, library = make_workflow(inheriting), _library()
     workflow.root = library
     book = library.books["b3"]

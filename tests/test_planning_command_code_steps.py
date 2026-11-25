@@ -471,7 +471,7 @@ def todo(initialized_fastworkflow, todo_workflow_path, monkeypatch):
 
 
 def _phases(sink):
-    return sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
+    return sink.named(tracing.SPAN_PHASE)
 
 
 def test_a_phase_of_mechanical_steps_runs_with_no_model_call(todo):
@@ -506,18 +506,19 @@ def test_code_steps_are_ordinary_trajectory_steps_spans_and_archive_rows(todo):
     assert trajectory[f"tool_args_{first}"] == {"command": "get_properties"}
     # Code steps never count toward the budget (a finish ends the loop uncounted, as ever).
     assert todo.agent.iteration_counter == 0
-    steps = todo.sink.named(tracing.SPAN_AGENT_STEP)
-    assert len(steps) == 5 and all(s.attributes["by_code"] is True for s in steps[:4])
-    assert steps[4].attributes["tool_name"] == "finish" and "by_code" not in steps[4].attributes
-    calls = todo.sink.named(tracing.SPAN_AGENT_TOOL_CALL)
-    assert [c.parent_span_id for c in calls] == [s.span_id for s in steps[:4]]
+    steps = todo.sink.named(tracing.SPAN_STEP)
+    assert len(steps) == 5 and all(s.attributes["run_by"] == "code" for s in steps[:4])
+    assert steps[4].attributes["tool_name"] == "finish" and steps[4].attributes["run_by"] == "agent"
+    # Each code step records the command it dispatched (bd fix-qjne.34: was its fw.agent.tool_call child).
+    assert not todo.sink.named("fw.agent.tool_call")
+    assert all(s.attributes["raw_command"] for s in steps[:4]) and "raw_command" not in steps[4].attributes
     runs = todo.ctx._archived_command_runs()
     assert [(r["step_index"], r["command"].split("/")[-1]) for r in runs] == [
         (0, "list_todo_lists"), (1, "get_todo_list"), (2, "get_all_children"),
         (3, "get_properties")]
-    contract = tracing.SPAN_CONTRACTS[tracing.SPAN_AGENT_STEP].attributes
+    contract = tracing.SPAN_CONTRACTS[tracing.SPAN_STEP].attributes
     assert all(set(s.attributes) - tracing.ENVELOPE_ATTRIBUTES <= contract for s in steps)
-    phase_contract = tracing.SPAN_CONTRACTS[tracing.SPAN_PLANNING_COMMAND_PHASE].attributes
+    phase_contract = tracing.SPAN_CONTRACTS[tracing.SPAN_PHASE].attributes
     assert all(set(s.attributes) - tracing.ENVELOPE_ATTRIBUTES <= phase_contract
                for s in _phases(todo.sink))
 
@@ -612,8 +613,8 @@ def test_an_answer_step_and_a_negated_step_do_not_stop_code(todo):
 
 def test_a_phase_whose_answer_is_not_shown_makes_no_call_and_the_last_one_call(todo):
     todo.turn()
-    spans = todo.sink.named(tracing.SPAN_AGENT_EXECUTE)
-    assert len(spans) == 3
+    spans = todo.sink.named(tracing.SPAN_PHASE)     # one agent loop per phase (each phase records its own)
+    assert len(spans) == 3 and not todo.sink.named("fw.agent.execute")
     # One answer call in all: the last phase's.
     assert len(todo.model.answers) == 1 and "part 3 of 3 (report)" in todo.model.answers[0]
 

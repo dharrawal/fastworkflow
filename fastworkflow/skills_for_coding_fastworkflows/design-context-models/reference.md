@@ -6,20 +6,20 @@ Companion to [SKILL.md](SKILL.md). Read when a specific number or a specific sym
 
 ### Surface of a context
 
-Own commands (the `.py` files in `_commands/<Context>/`, excluding leading-underscore files) plus
-the transitive closure over `base`, an own command hiding an inherited one with the same leaf name.
+Own commands (the `.py` files in `_commands/<Context>/`, excluding its `_<Context>.py` and `__init__.py`) plus
+the transitive closure over `inherits`, an own command hiding an inherited one with the same leaf name.
 Files directly under `_commands/` are the global `*` context.
 
 ```python
 def surface(ctx):
     out = set(own.get(ctx, []))
-    for b in inheritance.get(ctx, {}).get("base", []):
+    for b in inherits.get(ctx, []):   # each context's declared inherits
         out |= surface(b)
     return out
 ```
 
 Cross-check against the framework's own loader rather than trusting the hand computation. It
-validates the JSON at the same time:
+checks the declarations at the same time:
 
 ```python
 import fastworkflow
@@ -31,8 +31,9 @@ crd.get_command_names(ctx)                     # the surface plus the four core 
 crd.get_planning_command_names(ctx)            # its planning commands, own and inherited
 ```
 
-The enclosing contexts are not in any file: they are whatever each `get_parent` returns for the
-live record.
+The enclosing contexts are each context's declared `parents` (`CommandContextModel.declared_parents(workflow_path)`);
+at run time they are whatever each `get_parent` returns for the live record, which must be one of them. The generated
+`_object_models/<workflow>.md` (`fastworkflow command preview`) shows both declarations and the entering commands.
 
 ### Label space and mask
 
@@ -64,8 +65,9 @@ pat_new = re.compile(r"(\w+)\s*=\s*(\w+)\(")   # resolve the local back to its c
 ```
 
 The result maps `Context/command -> entered class`. Each such command must declare that class
-with `@descends_to`; a move it does not declare fails the command at run time. There is no hierarchy
-file to diff against: parents are whatever each `get_parent` returns for the live record.
+with `@descends_to`; a move it does not declare fails the command at run time, and a target whose `parents` do not
+name the command's context fails the command's load. Diff the entered classes against the generated object model's
+"Entered by" column.
 
 ### Which producers a context needs
 
@@ -167,7 +169,7 @@ A command's qualified name is `<Folder>/<command>`, so moving it is a rename. Up
 - the module's location on disk, and the scaffold or generator that emits it
 - every `from_command_output` producer edge naming it (`"from_command_output": "<Context>/<command>..."`)
 - every import of its module by path (a planning command's `from ..Book.list_loans import Signature`)
-- the inheritance model, and any `inherits:` prose in generated docs
+- any `inherits = [...]` or `parents = [...]` naming its context (when the folder itself moves), and the regenerated object model
 - benchmark and end-to-end case tables
 - navigation docs and command maps
 

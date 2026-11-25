@@ -3,7 +3,7 @@
 
 READ-ONLY: the observability DB is opened with ``mode=ro``; nothing is run.
 
-Every ``fw.skill.phase`` span in the DB carries the phase's numbered plan
+Every ``fw.phase`` span in the DB carries the phase's numbered plan
 (``steps``). Each plan is read the way the runner reads it before a phase run
 (``planning_phases.plan_code_steps``), with the workflow's own command schemas:
 a step is MECHANICAL (code runs it), PASSED over (an answer or negated step:
@@ -43,10 +43,11 @@ def _plan_text(value):
 
 
 def stored_plans(db, experiments=()):
-    """``(span_id, skill, phase, item, plan_text)`` of each phase run with an executor."""
+    """``(span_id, command, phase, item, plan_text)`` of each phase run with an executor."""
     conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     try:
-        query = "SELECT span_id, attributes, experiment_id FROM spans WHERE name = 'fw.skill.phase'"
+        # One `fw.phase` span per phase run (span contract 63; a store written before it is not read).
+        query = "SELECT span_id, attributes, experiment_id FROM spans WHERE name = 'fw.phase'"
         rows = conn.execute(query + " ORDER BY trace_id, start_ns").fetchall()
     finally:
         conn.close()
@@ -57,7 +58,7 @@ def stored_plans(db, experiments=()):
         plan = _plan_text(a.get("steps"))
         if a.get("skipped") or a.get("answer_only") or not plan.strip():
             continue
-        yield span_id, a.get("skill"), a.get("phase"), a.get("item"), plan
+        yield span_id, a.get("command"), a.get("phase"), a.get("item"), plan
 
 
 def replay(folder, db, experiments=()):

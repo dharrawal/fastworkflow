@@ -25,23 +25,21 @@ def _seed_turn(store, key, message, spans, *, channel='chat', cid=9):
 
 
 def _recorded_spans(prefix):
-    """Planning has no span of its own; Execution and its steps do."""
+    """A turn of span contract 63: its run stage, one run part, the part's plan and two steps."""
     return [
-        (prefix + '-plan', None, 'fw.planner.plan', 1, 1000, {}),
-        (prefix + '-exec', None, 'fw.agent.execute', 2000, 9000, {}),
-        (prefix + '-step-1', prefix + '-exec', 'fw.agent.step', 2100, 5000,
-         {'tool_name': 'first_tool'}),
-        (prefix + '-step-2', prefix + '-exec', 'fw.agent.step', 5100, 8900,
-         {'tool_name': 'second_tool'}),
+        (prefix + '-run', None, 'fw.run', 1, 9500, {}),
+        (prefix + '-part', prefix + '-run', 'fw.run.part', 2, 9400, {'part': 1, 'outcome': 'ran'}),
+        (prefix + '-plan', prefix + '-part', 'fw.plan', 3, 1000, {'trigger': 'initial'}),
+        (prefix + '-step-1', prefix + '-part', 'fw.step', 2100, 5000,
+         {'tool_name': 'first_tool', 'run_by': 'agent'}),
+        (prefix + '-step-2', prefix + '-part', 'fw.step', 5100, 8900,
+         {'tool_name': 'second_tool', 'run_by': 'agent'}),
     ]
 
 
-# Recorded before fw.agent.step existed: the steps are inferred from ReAct's
-# calls, so neither they nor their execution phase carry a span.
-LEGACY_SPANS = [
-    ('legacy-r1', None, 'fw.llm.call', 100, 200, {'module_chain': 'fastWorkflowReAct.Predict'}),
-    ('legacy-t1', None, 'fw.agent.tool_call', 210, 300, {}),
-    ('legacy-r2', None, 'fw.llm.call', 310, 400, {'module_chain': 'fastWorkflowReAct.Predict'}),
+# A second turn, in a conversation of its own (the rail's conversation page).
+OTHER_SPANS = [
+    ('other-run', None, 'fw.run', 100, 400, {}),
 ]
 
 
@@ -58,7 +56,7 @@ def test_page_names_pages_without_adding_history_entries():
 def test_page_links_round_trip_dom(hierarchy_server):
     server, spec, eid, default, _store = hierarchy_server
     _seed_turn(default, 'crumb-turn', 'climb the crumbs', _recorded_spans('crumb'))
-    _seed_turn(default, 'legacy-turn', 'an older recording', LEGACY_SPANS,
+    _seed_turn(default, 'other-turn', 'another conversation', OTHER_SPANS,
                channel='cli:local', cid=10)
     status, data = _request(server, f'/api/experiment/{eid}/tasks')
     assert status == 200

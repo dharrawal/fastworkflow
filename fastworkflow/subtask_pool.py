@@ -7,9 +7,9 @@ earlier sub-tasks, which the match stage has already fixed), so the steps of one
 
 - one worker per call, at most ``FW_SUBTASK_WORKERS`` (default 4) at a time; with one call, or the setting at 1, nothing
   is pooled and the calls run in the caller's thread in order, exactly as before;
-- each call runs under its own copy of the caller's context (``contextvars.copy_context``), the pattern the argument
-  checks already use, so the turn's trace spans, observability host, progress listener and per-turn memo are the ones the
-  caller has;
+- each call runs under its own copy of the caller's context (``tracing.traced_call``), the pattern the argument
+  checks already use, so the turn's observability host, progress listener and per-turn memo are the ones the caller has,
+  and each call's spans are parented by the span that was current when it was submitted, never by a sibling call's;
 - results come back in call order whatever the completion order;
 - every call is awaited before the function returns or raises (no thread outlives it); the exception of the first call
   in order is raised and the other calls' exceptions are logged, not dropped.
@@ -20,10 +20,10 @@ default of 4 workers that is four times that width, plus the one extraction of a
 """
 from __future__ import annotations
 
-import contextvars
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Optional, Sequence, TypeVar
 
+from fastworkflow import tracing
 from fastworkflow.utils.logging import logger
 
 T = TypeVar("T")
@@ -73,7 +73,7 @@ def map_in_order(calls: Sequence[Callable[[], T]], *, before: Optional[Callable[
         for index, call in enumerate(calls):
             if before is not None:
                 before(index)
-            futures.append(pool.submit(contextvars.copy_context().run, call))
+            futures.append(pool.submit(tracing.traced_call(call)))
         results: list[T] = []
         failures: list[BaseException] = []
         for future in futures:

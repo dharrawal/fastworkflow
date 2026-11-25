@@ -349,7 +349,8 @@ class TestEndToEnd:
         spans = _rows(db_path, "SELECT * FROM spans WHERE trace_id=?", (turn_output.turn_key,))
         names = {s["name"] for s in spans}
         assert tracing.SPAN_TURN in names
-        assert tracing.SPAN_AGENT_TOOL_CALL in names
+        # the direct path's stages (bd fix-qjne.34: no tool-call span; its command's own span is fw.command)
+        assert tracing.SPAN_RESOLVE in names and "fw.agent.tool_call" not in names
         root = next(s for s in spans if s["name"] == tracing.SPAN_TURN)
         assert root["end_ns"] is not None  # close upserted over the open emission
         assert root["status"] == "completed"
@@ -385,11 +386,11 @@ class TestEndToEnd:
         row = _rows(db_path, "SELECT status, success FROM turns WHERE turn_key=?", (first.turn_key,))[0]
         assert row["status"] == "completed"  # guarded transition [R2]
 
-        # fw.ask_user span closed with the human wait
+        # fw.question span (fw.ask_user before bd fix-qjne.34) closed with the human wait
         ask = _rows(
             db_path,
             "SELECT * FROM spans WHERE trace_id=? AND name=?",
-            (first.turn_key, tracing.SPAN_ASK_USER),
+            (first.turn_key, tracing.SPAN_QUESTION),
         )
         assert len(ask) == 1
         assert ask[0]["end_ns"] is not None
@@ -710,7 +711,7 @@ class TestWriterDiscipline:
             for i in range(50):
                 sink.emit_span(
                     tracing.Span(
-                        span_id=f"s{i}", trace_id="t", name="fw.agent.tool_call",
+                        span_id=f"s{i}", trace_id="t", name="fw.step",
                         start_ns=i, status="ok",
                     )
                 )
@@ -755,7 +756,7 @@ class TestWriterDiscipline:
         for i in range(20):
             sink.emit_span(
                 tracing.Span(
-                    span_id=f"c{i}", trace_id="t", name="fw.agent.tool_call",
+                    span_id=f"c{i}", trace_id="t", name="fw.step",
                     start_ns=i, status="ok",
                 )
             )

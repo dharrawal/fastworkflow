@@ -286,7 +286,7 @@ def test_error_span_names_the_command_and_context(monkeypatch):
         ctx.pop_active_workflow()
         ctx.close()
 
-    span = sink.named(tracing.SPAN_COMMAND_EXECUTE)[-1]
+    span = sink.named(tracing.SPAN_COMMAND)[-1]
     assert span.status == tracing.STATUS_ERROR
     assert span.command_name == "fail"
     assert span.context == expected_context
@@ -304,7 +304,7 @@ def test_error_span_records_success_false_and_control_signals_do_not(monkeypatch
     finally:
         ctx.pop_active_workflow()
         ctx.close()
-    span = sink.named(tracing.SPAN_COMMAND_EXECUTE)[-1]
+    span = sink.named(tracing.SPAN_COMMAND)[-1]
     assert span.attributes["success"] is False
 
     ctx, sink, _wf = _failing_ctx(monkeypatch, lambda: CommandCancelledError("cancelled"))
@@ -314,7 +314,7 @@ def test_error_span_records_success_false_and_control_signals_do_not(monkeypatch
     finally:
         ctx.pop_active_workflow()
         ctx.close()
-    span = sink.named(tracing.SPAN_COMMAND_EXECUTE)[-1]
+    span = sink.named(tracing.SPAN_COMMAND)[-1]
     assert "success" not in span.attributes
 
 
@@ -343,7 +343,7 @@ def test_failure_output_names_the_command_and_joins_its_record(monkeypatch):
 
     call_id = failure_output.command_call_id
     assert call_id
-    span = sink.named(tracing.SPAN_COMMAND_EXECUTE)[-1]
+    span = sink.named(tracing.SPAN_COMMAND)[-1]
     assert span.attributes[tracing.ATTR_COMMAND_CALL_ID] == call_id
     assert [r for r in records if r.command_call_id == call_id]
 
@@ -548,7 +548,7 @@ def test_a_cme_hop_failure_reaches_the_failure_output_and_the_error_span(monkeyp
     assert failure_output.context == ctx.cme_workflow._current_command_context_displayname
     assert failure_output.command_call_id
 
-    span = sink.named(tracing.SPAN_COMMAND_EXECUTE)[-1]
+    span = sink.named(tracing.SPAN_COMMAND)[-1]
     assert span.command_name == "wildcard"
     assert span.context == failure_output.context
 
@@ -615,7 +615,7 @@ def test_a_control_signal_never_closes_its_span_as_an_error(monkeypatch, exc_fac
         ctx.pop_active_workflow()
         ctx.close()
 
-    span = sink.named(tracing.SPAN_COMMAND_EXECUTE)[-1]
+    span = sink.named(tracing.SPAN_COMMAND)[-1]
     assert span.status == tracing.STATUS_CANCELLED
     assert span.status != tracing.STATUS_ERROR
 
@@ -632,7 +632,7 @@ def test_the_two_decisions_agree_for_every_control_signal(monkeypatch, exc_facto
         ctx.pop_active_workflow()
         ctx.close()
 
-    span = sink.named(tracing.SPAN_COMMAND_EXECUTE)[-1]
+    span = sink.named(tracing.SPAN_COMMAND)[-1]
     assert not records
     assert getattr(excinfo.value, "_fw_call_id", None) is None
     assert span.status != tracing.STATUS_ERROR
@@ -687,7 +687,7 @@ def test_the_agent_tool_span_is_closed_even_when_a_control_signal_escapes(
     """fix-ajv.21: AskUserSuspend used to unwind past this frame uncaught.
 
     The arm named only CommandCancelledError, so the other control signal — a
-    BaseException by design — closed no span. The fw.agent.tool_call span opened
+    BaseException by design — closed no span. The fw.agent.tool_call span (until bd fix-qjne.34) opened
     for the tool leaked onto the parenting stack: every later span in the turn
     nested under it, and it never got an end time or a status.
     """
@@ -701,7 +701,11 @@ def test_the_agent_tool_span_is_closed_even_when_a_control_signal_escapes(
         ctx.pop_active_workflow()
         ctx.close()
 
-    tool_spans = sink.named(tracing.SPAN_AGENT_TOOL_CALL)
-    assert tool_spans, "the agent tool span must be emitted at all"
+    # The tool opens no span of its own any more (bd fix-qjne.34: its dispatch is recorded on its step); the command's
+    # fw.command span it reached is closed, cancelled, and nothing is left on the parenting stack.
+    assert not sink.named("fw.agent.tool_call")
+    tool_spans = sink.named(tracing.SPAN_COMMAND)
+    assert tool_spans, "the command span must be emitted at all"
     assert tool_spans[-1].status == tracing.STATUS_CANCELLED
     assert tool_spans[-1].status != tracing.STATUS_OPEN
+    assert ctx.trace_span_stack == []

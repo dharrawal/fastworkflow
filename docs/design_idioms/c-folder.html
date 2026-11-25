@@ -23,7 +23,7 @@
         <ul class="walk">
           <li><strong>Each <code>.py</code> file</strong> is one command of the context, execution and planning commands alike (<a href="e-file.html">one file, two classes</a>); a folder that holds only planning commands is a context too. Its name is the file name, qualified by the folder: <code>Book/show_book.py</code> is the command <code>Book/show_book</code>.</li>
           <li><strong><code>_Book.py</code></strong>, the file named after the folder with a leading underscore, holds the <em>context class</em>, always called <code>Context</code>. It is optional, and it describes the object rather than adding commands (below).</li>
-          <li><strong>Any other file whose name starts with <code>_</code></strong> is never a command. Put helpers that several commands import there.</li>
+          <li><strong>Any other file whose name starts with <code>_</code></strong> stops the workflow when it loads. Helpers that several commands import live in the workflow's helper package, <code>_commands/_shared/</code> (see <a href="r-helpers.html">helper modules</a>).</li>
         </ul>
         <p>The object the workflow starts on, built by the startup command (see <a href="e-root.html">the root object</a>), is a context too: its commands live in a folder named after its class, here <code>_commands/Library/</code>. A command that moves the workflow onto a book (see <a href="e-object.html#e-move">move onto a record</a>) is what makes the <code>Book</code> folder's commands available.</p>
       </div>
@@ -31,9 +31,10 @@
         <figcaption>fastworkflow/examples/library/_commands/ (some of its files)</figcaption>
         <pre><code>startup.py              <span class="c"># global: the startup command, sets workflow.root = Library()</span>
 library_hours.py        <span class="c"># global: the command library_hours</span>
+_shared/
+    wording.py          <span class="c"># a helper module, not a command</span>
 Library/
     _Library.py         <span class="c"># class Context for Library objects</span>
-    _wording.py         <span class="c"># a helper, not a command</span>
     open_book.py        <span class="c"># Library/open_book: moves onto a Book</span>
 Book/
     _Book.py            <span class="c"># class Context for Book objects</span>
@@ -82,19 +83,23 @@ class ResponseGenerator:
       </figure>
       <div class="prose">
         <h4>The context class</h4>
-        <p>The optional <code>_&lt;Folder&gt;.py</code> file holds one class, <code>class Context</code>, where you tell the framework facts about that kind of object. Every part of it is optional except <code>get_parent</code>, in a workflow with a root, on a context whose records are not the root:</p>
+        <p>The optional <code>_&lt;Folder&gt;.py</code> file holds one class, <code>class Context</code>, where you tell the framework facts about that kind of object. Every part of it is optional except <code>get_parent</code> and <code>parents</code>, in a workflow with a root, on a context whose records are not the root:</p>
         <ul class="walk">
           <li><strong>Its docstring.</strong> The first line describes the context in the list of other contexts the agent sees, and replaces the list of that context's commands the line shows when there is no docstring. Only the text up to the first line break is shown.</li>
+          <li><strong><code>inherits = [...]</code></strong> names the contexts whose commands this context also has: <a href="c-base.html">commands shared through a base</a>.</li>
+          <li><strong><code>parents = [...]</code></strong> names every context a record of this context can sit in, and goes with <code>get_parent</code>: one without the other stops the workflow. Both declarations are lists of context names written as string literals in the class body, read without importing the file.</li>
           <li><strong><code>get_parent</code></strong> names the enclosing object, so the outer object's commands stay reachable: <a href="c-parent.html">the enclosing record</a>. The root object's class has no enclosing object and needs no <code>get_parent</code>. In a workflow with a root, every other context needs it: with no <code>_&lt;Folder&gt;.py</code> or no <code>get_parent</code>, the first climb from such a record raises <code>MissingGetParentError</code>, naming the context, the file and the method. In a workflow with no root it is optional, and leaving it out means the same as <code>return None</code>: the climb goes straight to the global commands.</li>
           <li><strong><code>get_displayname</code> and <code>instance_label_attr</code></strong>, the record's name and identity (next).</li>
           <li><strong><code>state_version</code>, <code>get_state</code> and <code>from_state</code></strong> save and rebuild the object when a session is put away, and <code>get_locator</code> and <code>find_by_locator</code> find a record inside it: <a href="c-state.html">remember the object</a>.</li>
         </ul>
-        <p>Commands shared by two contexts are not declared here but in <code>_commands/context_inheritance_model.json</code>: <a href="c-base.html">commands shared through a base</a>.</p>
+        <p>Every fact about a context is declared here, in its own file; <code>fastworkflow command preview</code> draws them all together as the workflow's object model (see <a href="c-parent.html">the enclosing record</a>).</p>
       </div>
       <figure>
         <figcaption>fastworkflow/examples/library/_commands/Book/_Book.py (abridged, docstring and identity added: as shipped it has neither, so the agent's line and an approval cannot tell b1 from b2)</figcaption>
         <pre><code>class Context:              <span class="c"># always this name</span>
     &quot;&quot;&quot;One book of the catalogue: its loans, its shelf and its notes.&quot;&quot;&quot;
+    inherits = [&quot;Record&quot;]           <span class="c"># Record's commands too</span>
+    parents = [&quot;Library&quot;]           <span class="c"># get_parent returns a Library</span>
     instance_label_attr = &quot;uid&quot;    <span class="c"># the identity: read as book.uid, e.g. &quot;b1&quot;</span>
 
     @classmethod
@@ -128,7 +133,7 @@ class ResponseGenerator:
         <ul class="walk">
           <li><strong>A folder name that differs from the class name.</strong> The match is exact and case-sensitive, and it is on the record's own class name: a folder <code>Books/</code> for the class <code>Book</code> is never chosen, and a record of a subclass such as <code>RareBook</code> gets no context either. The load does not catch it, even when the moving command declares <code>@descends_to("Books")</code>. The move does: a command that moves the workflow onto such a record fails with "... Book is no context of the workflow: a context is the folder _commands/Book/, named exactly as the record's class", and the record is put back.</li>
           <li><strong>A context file whose class is not named <code>Context</code>.</strong> A <code>_Book.py</code> that defines <code>class BookContext</code> is reported when the workflow loads ("is the context class file of Book but defines no class Context"); rename the class.</li>
-          <li><strong>A folder with no command file.</strong> Every context is a folder. A folder holding only <code>_Paperback.py</code> is a context whose commands are all inherited: it loads when <code>context_inheritance_model.json</code> gives it a base that has commands (see <a href="c-base.html">commands shared through a base</a>), and its <code>_Paperback.py</code> is read. A folder that holds no command file and inherits none stops the workflow ("the context folder 'Paperback' holds no command file and inherits none"). Only files directly in the folder count; a subfolder is not read. A folder whose name starts with <code>_</code> is skipped whole, and a folder named <code>Core</code> is dropped from the contexts, both without a message.</li>
+          <li><strong>A folder with no command file.</strong> Every context is a folder. A folder holding only <code>_Paperback.py</code> is a context whose commands are all inherited: it loads when its <code>class Context</code> declares <code>inherits</code> naming a context that has commands (see <a href="c-base.html">commands shared through a base</a>), and its <code>_Paperback.py</code> is read. A folder that holds no command file and inherits none stops the workflow ("the context folder 'Paperback' holds no command file and inherits none"). Only files directly in the folder count; a subfolder is not read. A folder whose name starts with <code>_</code> is skipped whole, and a folder named <code>Core</code> is dropped from the contexts, both without a message.</li>
           <li><strong>A global command that needs the user's record</strong>, such as "renew this book": it gets the library as <code>workflow.record</code>. Put it in the context's folder. And give a global command a name no context command has: typed inside that context, the name runs the context's command, while plain words go to the global one when the global model is confident. The same global-first rule can take a plain-words request away from a context command on the user's record.</li>
           <li><strong><code>instance_label_attr</code> naming a plain method</strong> prints "&lt;bound method ...&gt;"; make it a <code>@property</code>. An <code>instance_label_attr</code> naming an attribute the record lacks, or one that is not a string, gives an empty identity with no message; a misspelt <code>instance_label_attr</code> itself (such as <code>instance_label_atr</code>) is a public member that is no hook, and stops the workflow. A classmethod called <code>instance_label</code> on the context class is a removed spelling: the workflow does not load, and the error says to use a property named by <code>instance_label_attr</code>.</li>
           <li><strong>A misspelt hook</strong>, such as <code>get_displayName</code>: every public member of <code>class Context</code> must be a hook, so the workflow does not load, and the message lists the hooks and says a helper's name starts with <code>_</code>.</li>

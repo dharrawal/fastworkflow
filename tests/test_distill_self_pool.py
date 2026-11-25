@@ -237,7 +237,7 @@ def test_compare_runs_compares_exactly_the_chosen_attempts_and_labels_outcomes(t
                 "experiment_id": exp, "task_id": "16", "attempt": attempt,
             })
             spans.append(tracing.Span(
-                span_id=f"{key}-x", trace_id=key, name=tracing.SPAN_COMMAND_EXECUTE,
+                span_id=f"{key}-x", trace_id=key, name=tracing.SPAN_COMMAND,
                 channel_id=channel, command_name="close_ticket", start_ns=10, end_ns=20,
                 status=tracing.STATUS_OK, experiment_id=exp, task_id="16", attempt=attempt,
                 attributes={"raw_command": "close_ticket", "parameters": {"id": "T-1"},

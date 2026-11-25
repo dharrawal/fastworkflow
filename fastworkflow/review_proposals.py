@@ -26,7 +26,7 @@ from typing import Any, Literal, Mapping, Optional, Sequence
 import dspy
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_serializer, model_validator
 
-from fastworkflow import subtask_pool, turn_cache, turn_progress
+from fastworkflow import subtask_pool, tracing, turn_cache, turn_progress
 from fastworkflow.review_step_refs import NUMBER_LIST as _NUMBER_LIST, removal_reading
 from fastworkflow.review_engine import (
     KIND_SUB_TASKS, Add, Change, Drop, EditParseError, EditRefused, Merge, NoEditsRead, Proposal,
@@ -1029,8 +1029,10 @@ def drafted_item(workflow, item: SubTask, sub_task: str, earlier: list[SubTask],
         return item.model_copy(update={"check": check, "check_missing": missing, "check_screened": screened,
                                        "check_refused": refused, "check_notes": {},
                                        "inputs": inputs, "refused_without_field": "", "drafted_means": ""})
-    # The draft's checks run the command's validators on the record it will run on, as the "/" path's do.
-    with intent_loop.on_owner_record(workflow, item.means.name):
+    # The draft's checks run the command's validators on the record it will run on, as the "/" path's do. Its spans are
+    # the part's (``fw.resolve.part``) while the turn is in its resolve stage.
+    with intent_loop.on_owner_record(workflow, item.means.name), \
+            tracing.part_span(tracing.current_host(), tracing.SPAN_RESOLVE_PART, part):
         drafted = draft_inputs(workflow, item, sub_task, earlier, planner_lm=planner_lm, part=part)
         if drafted is not None:
             inputs = list(drafted.inputs)
@@ -1164,7 +1166,7 @@ def draft_inputs(workflow, item: SubTask, sub_task: str, earlier: list[SubTask],
         return None
     try:
         from_earlier = _producers(workflow, item.means, earlier)
-        # In ONE ``fw.nlu.param_extraction`` span, by the writer the CME's parameter stage uses, with the part's number.
+        # In ONE ``fw.parameters`` span, by the writer the CME's parameter stage uses, with the part's number.
         result = traced_extraction(item.means.name, lambda bag: extract_arguments(workflow, item.means.name, sub_task, bag),
                                    valid=lambda found: found.valid, part=part)
     except Exception as exc:  # noqa: BLE001 - the draft is advisory: no inputs, as before
@@ -1267,7 +1269,7 @@ def _typed_fallback_values(workflow, item: SubTask, sub_task: str, values: dict,
     raw = {p.name: planning_commands._given_or_none(values.get(p.name)) for p in command.params}
     try:
         lm = planner_lm if planner_lm is not None else dspy_utils.get_lm("LLM_PLANNER", "LITELLM_API_KEY_PLANNER")
-        with dspy.context(lm=lm, adapter=CommandsSystemPreludeAdapter()):
+        with dspy_utils.role_context("LLM_PLANNER", lm, adapter=CommandsSystemPreludeAdapter()):
             args, notes = planning_commands.typed_fallback_arguments(
                 command, sub_task, typed_planner_commands_text(workflow), raw,
                 _stopped_at(planning_commands, command, raw, sub_task, refusal), workflow)
@@ -2717,6 +2719,23 @@ def model_edit_reader(planner_lm=None, planning_names: tuple[str, ...] = ()):
     """
 
     def read(text: str, proposal: Proposal) -> list:
+        # The review's own record of the read (bd fix-qjne.34 step 5): a child of the review, its model calls its own.
+        host = tracing.current_host()
+        span = tracing.start_span(host, tracing.SPAN_REVIEW_EDIT, parent_span_id=tracing.open_stage_id(host))
+        facts: dict = {}
+        try:
+            edits = read_edits(text, proposal, facts)
+        except BaseException as exc:
+            tracing.end_span(host, span, status=tracing.status_for_dispatch_exception(exc), attributes={
+                "edits_read": facts.get("read"), "edits_applied": 0, "repaired": facts.get("repaired", False),
+                "refused_names": str(exc) if isinstance(exc, UnknownMeansEdit) else None})
+            raise
+        tracing.end_span(host, span, attributes={
+            "edits_read": facts.get("read"), "edits_applied": len(edits), "repaired": facts.get("repaired", False),
+            "refused_names": facts.get("refused_names")})
+        return edits
+
+    def read_edits(text: str, proposal: Proposal, facts: dict) -> list:
         from fastworkflow.utils import dspy_utils
 
         # A callable that is not an LM (dspy.BaseLM is callable too) is asked for the LM now.
@@ -2727,6 +2746,7 @@ def model_edit_reader(planner_lm=None, planning_names: tuple[str, ...] = ()):
                   "planning_commands": "\n".join(f"planning:{name}" for name in planning_names) or "none",
                   "reply": text}
         proposed = _predicted_edits(lm, ReadSubTaskEdits, inputs)
+        facts["read"] = len(proposed)
         if not proposed:
             raise NoEditsRead("I could not read that as an edit.")
         notes = _reader_notes.get()
@@ -2739,6 +2759,9 @@ def model_edit_reader(planner_lm=None, planning_names: tuple[str, ...] = ()):
             # One more read with the reason the edits cannot be applied, before the user is asked (bd fix-ftdl.8.28):
             # a model call of its own, whose span's input carries ``refused``.
             logger.info("the edits read from the reply cannot be applied (%s); reading it once more", failed.error)
+            facts["repaired"] = True
+            if isinstance(failed.error, UnknownMeansEdit):
+                facts["refused_names"] = str(failed.error)
             given = json.dumps([edit.model_dump(exclude_defaults=True) for edit in proposed], ensure_ascii=False)
             repaired = _predicted_edits(lm, RepairSubTaskEdits, {
                 **inputs, "refused": f"Your edits: {given}\nThey cannot be applied: {failed.error}"})
@@ -2751,8 +2774,10 @@ def model_edit_reader(planner_lm=None, planning_names: tuple[str, ...] = ()):
 
 def _predicted_edits(lm, signature, inputs: dict) -> list:
     """The edit model's edits for *inputs* (one call); a model failure is an unreadable reply (``EditParseError``)."""
+    from fastworkflow.utils import dspy_utils
+
     try:
-        with dspy.context(lm=lm):
+        with dspy_utils.role_context("LLM_PLANNER", lm):
             prediction = dspy.Predict(signature)(**inputs)
         return list(prediction.edits or [])
     except Exception as exc:  # noqa: BLE001 - an unreadable reply asks again; it never fails the turn

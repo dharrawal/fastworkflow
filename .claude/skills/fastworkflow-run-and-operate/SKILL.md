@@ -97,7 +97,7 @@ progression — details and per-example run commands in
 | 1 | `hello_world` | Minimal: one global command wrapping `add_two_numbers` |
 | 2 | `messaging_app_1` | Smallest hand-written workflow: one global command over a plain function |
 | 3 | `messaging_app_2` | Class-based command context (`_commands/User/`) + `startup.py` binding an instance |
-| 4 | `messaging_app_3` | Context inheritance (`PremiumUser` extends `User` via `context_inheritance_model.json`) |
+| 4 | `messaging_app_3` | Context inheritance (`PremiumUser` extends `User` via `inherits = ["User"]` on its `class Context`) |
 | 5 | `messaging_app_4` | Container context + navigation (`ChatRoom`, `set_root_context.py`, `startup_action.json`) |
 | 6 | `retail_workflow` | **tau-bench retail domain**: 15 global e-commerce commands + `retail_data/` fixtures + `tools/` |
 | 7 | `simple_workflow_template` | JSON-driven WorkItem-hierarchy template |

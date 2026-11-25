@@ -99,8 +99,8 @@ def test_the_text_planner_runs_and_appends_next_steps(workflow_env):
     assert COMMANDS_TITLE in _prompt(lm, 0)
     assert "Show all todo items" in result
     assert "Execute these next steps:" in result
-    plan, = sink.named(tracing.SPAN_PLANNER_PLAN)
-    assert plan.attributes["plan_source"] == "text"
+    plan, = sink.named(tracing.SPAN_PLAN)
+    assert plan.attributes["plan_source"] == "text" and plan.attributes["trigger"] == "initial"
 
 
 def test_a_replan_uses_the_text_planner(workflow_env):
@@ -119,9 +119,9 @@ def test_a_replan_uses_the_text_planner(workflow_env):
         "What remains (execute these next steps):\n1. Show all todo items"
     )
     assert TEXT_MARK in _prompt(lm, 0) and STRUCTURED_MARK not in _prompt(lm, 0)
-    replan, = sink.named(tracing.SPAN_PLANNER_REPLAN)
+    replan, = sink.named(tracing.SPAN_PLAN)     # one plan span: what planned again is its trigger
     assert replan.attributes["plan_source"] == "text"
-    assert not sink.named(tracing.SPAN_PLANNER_PLAN)
+    assert replan.attributes["trigger"] == "ask_user_response"
 
 
 def test_the_progress_check_tool_replans(workflow_env):
@@ -141,8 +141,8 @@ def test_the_progress_check_tool_replans(workflow_env):
 
     assert result.startswith("What's done:\nListed the todo items")
     assert "What remains (execute these next steps):\n1. Show all todo items" in result
-    replan, = sink.named(tracing.SPAN_PLANNER_REPLAN)
-    assert replan.attributes["replan_trigger"] == "progress_check"
+    replan, = sink.named(tracing.SPAN_PLAN)
+    assert replan.attributes["trigger"] == "progress_check"
 
 
 def test_a_progress_check_with_nothing_remaining_says_to_finish(workflow_env):

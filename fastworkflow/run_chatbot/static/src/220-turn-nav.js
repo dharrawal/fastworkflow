@@ -364,19 +364,19 @@ function headSnippet(text, max) {
 
 function levelNoun(node) {
   if (node.kind === "turn") { return "turn"; }
-  if (node.kind === "phase") { return "stage"; }
+  if (isStageSpan(node.span)) { return "stage"; }
   if (node.kind === "step") { return "step"; }
   return "span";
 }
 
 /* The page that carries the turn-wide record (what was recorded, the
-   execution ledger): the first Execution stage, since that is where the
-   dispatches it lists ran. A turn without one -- planning only, a failed
-   turn, a direct command -- keeps them on the turn page. */
+   execution ledger): the Run stage, since that is where the dispatches it
+   lists ran. A turn without one -- a review declined, a failed turn, nothing
+   recorded -- keeps them on the turn page. */
 function turnRecordHome() {
   var root = state.path[0];
   return root.children.filter(function (child) {
-    return child.kind === "phase" && child.phase === PHASE_EXECUTION;
+    return !!child.span && child.span.name === "fw.run";
   })[0] || root;
 }
 
@@ -413,13 +413,13 @@ function renderDetail(turn, spans) {
 }
 
 function spanCategory(span) {
-  if (span.kind === "human_wait" || span.name === "fw.ask_user") { return "cat-human"; }
-  if (span.name === "fw.turn") { return "cat-turn"; }
-  if (span.name.indexOf("fw.planner.") === 0) { return "cat-planner"; }
-  if (span.name === "fw.agent.tool_call") { return "cat-tool"; }
-  if (span.name === "fw.agent.execute" || span.name === "fw.agent.step") { return "cat-tool"; }
-  if (span.name === "fw.command.execute") { return "cat-command"; }
-  if (span.name === "fw.llm.call") { return "cat-llm"; }
+  var name = span.name;
+  if (span.kind === "human_wait" || name === "fw.question") { return "cat-human"; }
+  if (name === "fw.turn" || isStageSpan(span)) { return "cat-turn"; }
+  if (name === "fw.plan") { return "cat-planner"; }
+  if (name === "fw.step" || name === "fw.phase" || name === "fw.run.part") { return "cat-tool"; }
+  if (name === "fw.command") { return "cat-command"; }
+  if (name === "fw.llm.call") { return "cat-llm"; }
   return "cat-other";
 }
 
@@ -438,11 +438,20 @@ function parsedAttr(value) {
    module chain, then the signature's output fields — which are what the call
    was actually asked to produce and are distinct across every runtime role. */
 var LLM_ROLE_BY_PARENT = {
-  "fw.planner.plan": "planning",
-  "fw.planner.replan": "replanning",
-  "fw.nlu.param_extraction": "parameter extraction",
-  "fw.nlu.intent": "intent clarification"
+  /* fw.plan is "planning" or "replanning" by its trigger (planLabel) */
+  "fw.parameters": "parameter extraction",
+  "fw.intent": "intent clarification",
+  "fw.split.gate": "one-job gate",
+  "fw.split.splitter": "split",
+  "fw.split.referent": "referent",
+  "fw.review.edit": "review edit reading"
 };
+/* What a call is for, when its caller said so (span contract 63: `purpose`). */
+var LLM_ROLE_BY_PURPOSE = { conversation_summary: "conversation summary" };
+function planLabel(span) {
+  var trigger = (span.attributes || {}).trigger;
+  return trigger && trigger !== "initial" ? "replanning" : "planning";
+}
 var LLM_ROLE_BY_OUTPUT_FIELD = [
   ["conversation_summary", "conversation summary"],
   ["clarified_command", "intent clarification"],
@@ -453,10 +462,14 @@ var LLM_ROLE_BY_OUTPUT_FIELD = [
 ];
 function llmCallLabel(span, byId) {
   var parent = byId ? byId[span.parent_span_id] : null;
+  if (parent && parent.name === "fw.plan") { return planLabel(parent); }
   if (parent && LLM_ROLE_BY_PARENT[parent.name]) {
     return LLM_ROLE_BY_PARENT[parent.name];
   }
   var attrs = span.attributes || {};
+  if (attrs.purpose && LLM_ROLE_BY_PURPOSE[attrs.purpose]) {
+    return LLM_ROLE_BY_PURPOSE[attrs.purpose];
+  }
   var chain = String(attrs.module_chain || attrs.module || "");
   if (chain.indexOf("fastWorkflowReAct") === 0) {
     /* ReAct runs two different modules over the same trajectory: a Predict
@@ -657,10 +670,10 @@ function renderArtifacts(container, turn, callIds) {
   container.appendChild(viewer.panel);
 }
 
-var STEP_DISPATCH_SPANS = { "fw.agent.tool_call": true, "fw.command.execute": true };
+var STEP_DISPATCH_SPANS = { "fw.step": true, "fw.command": true };
 function stepCallIds(node, turn) {
-  /* The dispatches this step made, by the command_call_id its tool-call and
-     execute spans carry, plus any execution_records ref of the turn record
+  /* The dispatches this step made, by the command_call_id its step and
+     command spans carry, plus any execution_records ref of the turn record
      whose span_id is one of this step's spans. Both are the id the command's
      CommandOutput carries; nothing is matched by name, order or time. */
   var ids = {}, spanIds = {};

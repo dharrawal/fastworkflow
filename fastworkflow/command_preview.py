@@ -8,6 +8,8 @@ workflow's planning commands with the planning command loader (``workflow_agent.
 ``--check`` nothing is written: the command exits non-zero when a preview in ``<out>``
 differs from a fresh render, is missing, or is an extra ``.md`` file no planning command renders, and
 when a phase output field's ``from_command_output`` names a command or field the workflow lacks.
+Beside the previews it writes (and checks the same way) the workflow's object model,
+``<out>/_object_models/<workflow>.md`` (``object_model_view``).
 
 A preview, in the order of the planning command-file layout (``docs/planning_command_file_layout.md``):
 
@@ -108,6 +110,8 @@ from typing import Any, Callable, Literal, Mapping, Optional, Union, get_args, g
 
 from pydantic import BaseModel
 
+from fastworkflow import object_model_view
+from fastworkflow.command_context_model import CommandContextModelValidationError
 from fastworkflow import planning_commands
 from fastworkflow.planning_commands import MAX_GRID, input_grid  # noqa: F401 - MAX_GRID bounds input_grid
 from fastworkflow.planning_phases import (output_members, over_path_problem, over_path_reads_property,
@@ -1876,8 +1880,9 @@ def load_problems(workflow_folder: str, *, runtime: bool = False) -> list[LoadPr
     or import, defines both generator classes, or any check of its classes, fields, phases, steps or declarations
     fails) is ``<command>: <file>: <message>``: that command does not load and the rest of the workflow does. A
     mistake in something the workflow shares (``context_inheritance_model.json``, a context class file
-    ``_<Context>.py``, ``startup_action.json``, ``_workflow.py``, a retired ``_skills`` folder) is one line that names
-    the file: the workflow does not load. Each line says which it is (``LoadProblem.workflow_wide``).
+    ``_<Context>.py``, ``startup_action.json``, ``_workflow.py``, a retired ``_skills`` folder, an underscore file of
+    ``_commands/`` that is none of these: helpers live in ``_commands/_shared/``) is one line that names the file: the
+    workflow does not load. Each line says which it is (``LoadProblem.workflow_wide``).
 
     ``runtime=True`` (a process that serves turns, called after ``fastworkflow.init`` so the env files are loaded) adds
     the no-agent-mode startup problem (``no_agent_mode.runtime_problems``: neither ``LLM_AGENT`` nor ``JEV_API_KEY``).
@@ -1889,7 +1894,7 @@ def load_problems(workflow_folder: str, *, runtime: bool = False) -> list[LoadPr
 
         return load_problems(workflow_folder) + _workflow_wide(no_agent_mode.runtime_problems())
     from fastworkflow import workflow_agent
-    from fastworkflow.command_directory import check_no_planning_commands_folder
+    from fastworkflow.command_directory import check_no_planning_commands_folder, helper_file_problems
 
     folder = os.path.abspath(workflow_folder)
     try:
@@ -1906,7 +1911,7 @@ def load_problems(workflow_folder: str, *, runtime: bool = False) -> list[LoadPr
     planning = [_load_error(name, path, folder) for name, path in workflow_agent._planning_command_files(root)
                 if name not in loaded]
     definition, definition_lines = _definition_problems(folder, planning)
-    split = _workflow_wide(workflow_agent.split_file_problems(folder))
+    split = _workflow_wide(helper_file_problems(folder) + workflow_agent.split_file_problems(folder))
     if definition is None:
         return _of_one_command(planning) + _workflow_wide(definition_lines) + split
     try:   # the planning commands' steps are checked against these; unread, nothing could be checked
@@ -1966,6 +1971,8 @@ def missing_startup_action_problem(workflow_folder: str) -> Optional[str]:
 
 
 _PY_FILE = re.compile(r"([^\s'\"]+\.py)")
+#: A line that opens with the file it is about (a context class file, the removed inheritance file).
+_LEADING_FILE = re.compile(r"([^\s'\"]+\.(?:py|json)): ")
 
 
 def _definition_problems(folder: str, planning: list[str]) -> tuple[Any, list[str]]:
@@ -1981,7 +1988,7 @@ def _definition_problems(folder: str, planning: list[str]) -> tuple[Any, list[st
         kind = type(error).__name__
         lines = []
         for text in str(error).strip().splitlines() or [""]:
-            match = _PY_FILE.search(text)
+            match = _LEADING_FILE.match(text) or _PY_FILE.search(text)
             if match is None:
                 lines.append(f"the workflow's commands do not load: {kind}: {text}")
                 continue
@@ -2108,6 +2115,12 @@ def check_previews(workflow_folder: str, out_dir: Optional[str] = None) -> list[
         formatted = err.format()
         if formatted not in problems:
             problems.append(formatted)
+    # The workflow's object model (bd fix-qjne.37.2), checked like a preview; declarations that do not read are a
+    # load problem (load_problems), not a preview's
+    try:
+        problems += object_model_view.check_object_model(workflow_folder, out_dir)
+    except CommandContextModelValidationError:
+        pass
     return problems
 
 
@@ -2123,6 +2136,11 @@ def write_previews(workflow_folder: str, out_dir: Optional[str] = None) -> dict[
     fresh = render_previews(workflow_folder)
     os.makedirs(out_dir, exist_ok=True)
     result: dict[str, list[str]] = {"written": [], "unchanged": [], "removed": [], "kept": []}
+    # The workflow's object model (bd fix-qjne.37.2), beside the previews in <out>/_object_models/
+    try:
+        object_model_view.write_object_model(workflow_folder, out_dir)
+    except CommandContextModelValidationError:
+        pass   # declarations that do not read are a load problem (load_problems)
     for name, text in fresh.items():
         path = os.path.join(out_dir, *name.split("/"))
         if os.path.exists(path):
@@ -2324,6 +2342,7 @@ def preview_main(args) -> int:
     result = write_previews(args.workflow_folder, out_dir)
     print(f"{out_dir}: {len(result['written'])} written, {len(result['unchanged'])} unchanged, "
           f"{len(result['removed'])} removed")
+    print(f"  object model: {object_model_view.object_model_path(args.workflow_folder, out_dir)}")
     for name in result["kept"]:
         print(f"  kept {name}: not a generated preview (--check reports it as extra)")
     return 0

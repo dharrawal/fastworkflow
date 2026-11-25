@@ -20,7 +20,7 @@ from types import SimpleNamespace
 import pytest
 from dspy.utils import DummyLM
 
-from fastworkflow import review_engine, review_proposals, run_listing, workflow_agent
+from fastworkflow import review_engine, review_proposals, run_listing, tracing, workflow_agent
 from fastworkflow import approval_binding as ab
 from fastworkflow.review_engine import AWAITING, EXPIRED, REVISED
 from fastworkflow.review_proposals import SubTaskProposal
@@ -331,8 +331,8 @@ def test_an_accept_after_a_process_restart_resumes_the_review_and_runs_its_goals
     accepted = review_proposals.accepted_subtask_proposal(second.wf)
     assert accepted is not None and accepted.items[1].inputs[0].value == "Ann Lee"
     assert second.ctx._turn_subtask_plan == accepted
-    spans = [span for span in second.sink.spans if span.name == "fw.turn"]
-    assert spans and spans[-1].attributes.get("subtask_review") == "reviewed"
+    spans = [span for span in second.sink.spans if span.name == tracing.SPAN_REVIEW]     # its outcome (contract 63)
+    assert spans and spans[-1].attributes.get("outcome") == "reviewed"
 
 
 # ----------------------------------------------------------------------

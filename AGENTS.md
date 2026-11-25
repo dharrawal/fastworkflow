@@ -109,7 +109,7 @@ Run `fastworkflow --help` for the full command list (`examples`, `train`, `run`,
 Build-Time → Train-Time → Run-Time
 ```
 
-**Build-time** (`fastworkflow/build/`): AST-introspects your Python application and generates `_commands/*.py` files plus `context_inheritance_model.json`.
+**Build-time** (`fastworkflow/build/`): AST-introspects your Python application and generates `_commands/*.py` files. It writes no `context_inheritance_model.json` (a removed spelling) and never edits a `_<Context>.py` that exists: it prints each context's derived `inherits = [...]` line, the file it belongs in and whether that file declares it or something else, and writes the line only into a `_<Context>.py` it creates (`build/context_model_generator.py`); it lists every context whose `get_parent` has no `parents` beside it (parents cannot be derived from code), and names a leftover `context_inheritance_model.json` without reading it.
 
 **Train-time** (`fastworkflow/train/`): Generates synthetic utterances (via LLM + HuggingFace `datasets`) and fits the workflow's local intent model. Outputs go to `___command_info/` inside the workflow directory; publication is atomic and retains only current plus one previous recovery point. The default layout (`INTENT_MODEL_LAYOUT=embedding`) embeds the utterances with a frozen sentence encoder and fits one linear head for the whole workflow (seconds, no model is trained); `workflow` fine-tunes one large classifier for the whole workflow and `per_context` a classifier pair per context, with PyTorch/Transformers (see Environment Variables). The framework's own workflows (plan, command_metadata_extraction) are always in the `embedding` layout (`FRAMEWORK_LAYOUT`), with the default encoder and targets whatever the application's env says.
 
@@ -243,7 +243,7 @@ names the links a context has, `engine_for` builds them):
    plan pick, below) and the outage is visible: `remote_outage.report` (every caller of the remote model: the command
    match, the reply-intent classifier, and so `_second_opinion`) writes one WARNING for the
    first failure and then at most one per 5 minutes with the count since the last notice, naming the error class and the
-   HTTP status code, never the message (which can carry a key), and the `fw.nlu.intent` span carries
+   HTTP status code, never the message (which can carry a key), and the `fw.intent` span carries
    `remote_failed` = `{error_class, status_code}` (since span contract v53) beside `matcher.error`. There is no per-turn
    warnings artifact to put it in, so the span and the log are the marker.
    **A confident local answer that names a planning command is never acted on unreviewed, on either path.** Resolution
@@ -290,11 +290,12 @@ request that was asked about is), a misspelling of a whole name (`misspelt`; a t
 on the CME only, those of `what_can_i_do` (list the commands: `core_aliases(listing=True)`);
 a reply that cannot be read is asked once more (`no_agent_mode.MAX_NO_PROGRESS`). A reply that names a real command owned
 off the path is answered with the routing hint. `intent_loop.record` is the one learning hook (the CME's `_settle` and
-`_record_choice`, the plan path's `resolution.record_part` call it). The `fw.nlu.intent` span (v13) is one decision, not one
+`_record_choice`, the plan path's `resolution.record_part` call it). The `fw.intent` span (v14 of span contract 63) is one decision, not one
 prediction per scope, and BOTH paths write it with one function (`intent_detection.traced_decision`: the CME's stage, and the plan
 path's `resolution.part_intent` on a memo miss, with the part's number as the attribute `part`; a pinned plan is not detected and
-writes none); the `fw.nlu.param_extraction` span (v14) likewise (`parameter_extraction.traced_extraction`: the CME's stage, and the
-plan path's draft of a part's own command, with `part`, including `argument_check_not_in_request`). The `NLUPipelineStage` enum and the context key `NLU_Pipeline_Stage` are gone (S10): what the CME waits for is read from its
+writes none); the `fw.parameters` span (v16) likewise (`parameter_extraction.traced_extraction`: the CME's stage, and the
+plan path's draft of a part's own command, with `part`, including `argument_check_not_in_request`). A part's two spans sit under
+`fw.turn > fw.resolve > fw.resolve.part` (`tracing.part_span`; the "/" path's one part through `tracing.direct_part_id`); a command's own decision or extraction that decided nothing (its exact name, a typed call read in code, no model call, nothing missing or refused) is not written on any path, and the command's `fw.command` span carries `resolved_by`, `parameters_read_by` and `parameters_valid` instead (`tracing.is_command_decision`). A store written before span contract 63 is not read by the framework's tools (no old-name map in the framework). The `NLUPipelineStage` enum and the context key `NLU_Pipeline_Stage` are gone (S10): what the CME waits for is read from its
 two pending records only (`intent_loop.waiting_for(context)`: `WAITING_INTENT` when the record is of kind `intent`,
 `WAITING_PARAMETERS` when it is of kind `parameters`, None when the next message is a request). Its readers are
 `workflow_agent` (aborts a pending question after an agent's turn), `command_executor._pending_before_cme_reply` (the
@@ -310,8 +311,8 @@ it). Startup says what the chain is in one line (`intent_detector.startup_report
 `fastworkflow run`, the MCP server, the FastAPI server and the chat page's workflow listing). `INTENT_DETECTION_ENGINE`
 (`auto|classifier|matcher|hybrid`) was removed: a value left in an env file is ignored with one warning. The older Jev
 tie-break among the classifier's candidates (`FW_JEV_INTENT_TIEBREAK`, `choose_ambiguous_command`) was removed with
-it: the chain's second link replaces it. The `fw.nlu.intent` span records `engine` (who decided: `classifier`,
-`matcher`, or `question` when no link was confident) and `engine_chain` (the links asked, in order); `engine_mode` and
+it: the chain's second link replaces it. The `fw.intent` span records `decided_by` (who decided: `local`,
+`remote`, or `question` when no link was confident; `name`, `fuzzy` for a name layer) and `engine_chain` (the links asked, in order); `engine_mode` and
 `jev_tiebreak` are no longer written. Gathering (`run_listing.head_answers`) asks trained local models only. Tests
 script the matcher's model call with the `matcher_model` fixture (`tests/test_intent_matcher_engine.py`); a test that
 asserts what happens when the local model is NOT confident and no remote model answers must use `no_planner_key`,
@@ -408,7 +409,7 @@ Optional settings for planning commands (`_commands/<name>.py` files; see
   (`workflow_agent._one_job_gate`); a "one" at or above this probability runs the request as one part and the splitter
   is not called. `off` turns the gate off (no call). A value that is not a number above 0 and at most 1 warns once and
   the default applies (`workflow_agent.split_gate_threshold`). A failed call runs the splitter. The verdict is on
-  `fw.turn` `subtask_split.gate`. Tests run with it `off` (`tests/conftest.py` `split_gate_off`). The default was
+  `fw.split.gate` span, a child of the `fw.split` stage span. Tests run with it `off` (`tests/conftest.py` `split_gate_off`). The default was
   chosen on one workflow's benchmark it was then tested on; a workflow that sees a multi-part request kept whole
   should raise it.
 - `LLM_TIMEOUT_SECONDS` (optional, default 120), `LLM_TIMEOUT_SECONDS_<ROLE>` and `LLM_NUM_RETRIES_<ROLE>`
@@ -417,11 +418,12 @@ Optional settings for planning commands (`_commands/<name>.py` files; see
   built-in limits of 20 s and 2 retries (longest wait 63 s); every other role takes `LLM_TIMEOUT_SECONDS` and
   DSPy's 3 retries unless its own setting is given (`dspy_utils.role_limits`). A value that is not a positive
   number (a non-negative integer for retries) logs a warning and the default applies. An extraction that times
-  out leaves its parameters not given; the `fw.llm.call` span records `role`, `timeout_s`, `num_retries`,
-  `outcome` and `timed_out`, not the attempts made (DSPy does not expose them).
+  out leaves its parameters not given; the `fw.llm.call` span records `role` (always: the caller names its own
+  model setting where it calls, `dspy_utils.role_context`, else the tag `get_lm` put on the LM), `timeout_s`,
+  `num_retries`, `outcome` and `timed_out`, not the attempts made (DSPy does not expose them).
 
 Planning command previews: `fastworkflow command preview <workflow_folder>` writes one markdown preview
-per planning command to `<workflow_folder>/../docs/planning_command_previews/`. With `--check` it writes
+per planning command to `<workflow_folder>/../docs/planning_command_previews/`, and the workflow's object model (contexts, `inherits`, `parents`, the commands whose `@descends_to` enters each, as a containment tree and a table; `object_model_view.render_object_model`) to `_object_models/<workflow>.md` there. With `--check` it writes
 nothing and exits 1 when a preview is stale, missing or extra, or when a command has a load problem (a `from_command_output` edge that does not resolve is one, a bare command name with no `.<field>` included: `command_preview.load_problems` lists it).
 `command preview` replaced `fastworkflow skill preview`.
 
@@ -438,25 +440,38 @@ declarations fails, a call cycle included) fails THAT command only (`CommandDire
 cannot be read, `FieldSourceResolution.errors_for` for every other check; a class fetch raises `CommandLoadError`; an
 execution command that does not load is in no scope's command set, `RoutingDefinition.not_loading`, and a trained head's
 answer naming it is "not here") and is one `<command>: <file>: <message>` line; a mistake in something the workflow
-shares (`context_inheritance_model.json`, a `_<Context>.py`, `startup_action.json`, `_workflow.py`) is one line naming the
-file that stops the workflow (`LoadProblem.workflow_wide`: `fastworkflow run` exits 1, the server refuses to start).
+shares (a `_<Context>.py`, its `inherits` and `parents` declarations included, the removed `_commands/context_inheritance_model.json`, `startup_action.json`, `_workflow.py`, and any other
+underscore `.py` file or folder of `_commands/` or a context folder: a workflow's helper modules live in ONE package,
+`_commands/_shared/`, which nothing reads as commands, contexts, settings or training inputs, imported as
+`from ._shared.x import Y` from a root command and `from .._shared.x import Y` from a context folder;
+`command_directory.helper_file_problems`, with a did-you-mean for a misspelt `_workflow.py` or `_<Context>.py`; bd
+fix-qjne.33) is one line naming the file that stops the workflow (`LoadProblem.workflow_wide`: `fastworkflow run` exits 1, the server refuses to start).
 Nothing is only logged (the load-check sweep, bd fix-ftdl.8.22, moved the last silent cases under it: a generator is a
-class defined in the command file, a non-`_` file with neither `Signature` nor generator is refused, a public member of
+class defined in the command file, a file of `_commands/` with neither `Signature` nor generator is refused, a public member of
 `class Context` must be a hook, `command_context_model.CONTEXT_HOOKS`, a public member of a command's `Signature`, own or
 inherited, must be one of `planning_commands.SIGNATURE_MEMBERS` (plus `template` on a planning command, `SlotInput` in a
-framework workflow); every context is a folder of `_commands/` (`command_context_model.context_folders`): a key of
-`context_inheritance_model.json` that is no folder, and a folder with no command file that inherits none, stop the
-workflow, while a folder with no command file that inherits one loads with its `_<Context>.py`; the list is in
+framework workflow); every context is a folder of `_commands/` (`command_context_model.context_folders`); each
+`class Context` declares, as list literals read without importing (`command_context_model.read_declarations`),
+`inherits = [...]` (contexts whose commands it also has, `"*"` the global commands) and `parents = [...]` (every
+context a record of it can sit in, itself included when records nest; none means top level), exactly when it has
+`get_parent` and never on an `occupiable = False` context (bd fix-qjne.36; a name that is no context, with a
+did-you-mean, a name given twice, self-inheritance, an inheritance cycle, and a folder with no command file that
+inherits none, stop the workflow; a context command's `@descends_to` target must list the command's context, or a
+context it inherits or that inherits it, among its parents, that command's problem; `fastworkflow migrate-contexts
+<workflow>` (`migrate_context_declarations.py`) writes `inherits` from an old file, deletes it and lists the contexts
+with a `get_parent`, whose `parents` the author writes by hand), while a folder with no command file that inherits one loads with its `_<Context>.py`; the list is in
 CHANGELOG). At run time
 `command_executor.call_response_generator` puts `workflow.record` back when a command raises or refuses (not on an
 `ask_user` suspension), and `_check_move` fails a command that moved the session (assigned `workflow.record`; setting
 `workflow.root` is no move) onto a record whose class is no context, onto a context its `@descends_to` (read from the
-generator class that ran) does not name or inherit from in `context_inheritance_model.json`, or, with a root, onto a
+generator class that ran) does not name or inherit from (its `inherits`), or, with a root, onto a
 non-root record whose context has no `get_parent`; the record is put back. The core commands (go_up, reset_context)
 are the framework's navigation and are not checked against a declaration. `Workflow.get_parent`, one rule keyed on
 the root: with no root, no `_<Context>.py`, no `get_parent` or `return None` all mean the global commands; with a root,
 a non-root record whose context has no file or no `get_parent` raises `MissingGetParentError` (naming the context, the
-file and the method) on the climb, and `return None` is the explicit "go to the global commands".
+file and the method) on the climb, and `return None` is the explicit "go to the global commands"; a record
+`get_parent` returns whose context is neither a declared parent nor inherits one raises it too, naming the context,
+its parents and the record's context.
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:970c3bf2 -->
 ## Beads Issue Tracker

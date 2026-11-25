@@ -150,19 +150,10 @@ class TestManager:
         assert os.path.isfile(test_handler)
         assert os.path.isfile(base_handler)
         
-        # Check content of TestContext handler
-        with open(test_handler, "r") as f:
-            content = f.read()
-        
-        # Should import from application and have parent reference
-        assert "from ...application.testcontext import TestContext" in content
-        assert "from ...application.basecontext import BaseContext" in content
-        assert "def get_parent(cls, record: TestContext) -> Optional[BaseContext]:" in content
-        
-        # Check content of BaseContext handler
-        with open(base_handler, "r") as f:
-            content = f.read()
-        
-        # Should import from application but have no parent
-        assert "from ...application.basecontext import BaseContext" in content
-        assert "def get_parent(cls, record: BaseContext) -> Optional[None]:" in content 
+        # Each handler is an empty Context class: no get_parent and no parent type guessed from a base class (the
+        # context is top level until its author declares parents and writes get_parent together)
+        for handler in (test_handler, base_handler):
+            with open(handler, "r") as f:
+                content = f.read()
+            assert "class Context:" in content
+            assert "def get_parent" not in content 

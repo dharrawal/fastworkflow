@@ -15,6 +15,7 @@ import pytest
 from fastworkflow._workflows.plan_metadata_extraction import resolution
 
 import fastworkflow
+from tests import span_tree
 from fastworkflow import review_proposals, tracing, workflow_agent
 from fastworkflow.approval_binding import Surface
 from fastworkflow.planning_commands import planning_command
@@ -57,9 +58,20 @@ def _split_into(monkeypatch, subtasks):
 
 
 def _marker(todo) -> str | None:
-    """The turn span's ``subtask_review`` attribute, from the last turn span the sink recorded."""
-    spans = [span for span in todo.sink.spans if span.name == tracing.SPAN_TURN]
-    return spans[-1].attributes.get("subtask_review") if spans else None
+    """What the last recorded turn's tree says about its review (span contract 63: the review's outcome is on its
+    ``fw.review`` span, no longer on the turn's): the review's ``outcome`` (open, reviewed, declined, expired); with no
+    review, ``fast_path`` when a part took the gate's fast path, else ``not_reviewed`` for a turn that went through the
+    stages; None for a turn that recorded none."""
+    turns = [span for span in todo.sink.spans if span.name == tracing.SPAN_TURN]
+    if not turns:
+        return None
+    spans = [span for span in span_tree.spans(todo.sink) if span.trace_id == turns[-1].trace_id]
+    reviews = [span for span in spans if span.name == tracing.SPAN_REVIEW]
+    if reviews:
+        return reviews[-1].attributes.get("outcome")
+    if any(span.name == tracing.SPAN_RESOLVE_PART and span.attributes.get("fast_path") for span in spans):
+        return "fast_path"
+    return "not_reviewed" if any(span.name == tracing.SPAN_RESOLVE for span in spans) else None
 
 
 def _open_review(todo):

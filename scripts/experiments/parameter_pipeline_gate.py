@@ -33,7 +33,7 @@ Subcommands
         same call, which is exactly the pre-retry state, so first pass and final answer come from ONE call (paired).
         Execution rows run as baseline. Planning rows of every variant also get the paired report ``plan second pass``.)
     spans --db <observability sqlite> --out <jsonl>
-        Read-only. One JSON line per ``fw.nlu.param_extraction`` span. ``--out`` must not be inside the repository.
+        Read-only. One JSON line per ``fw.parameters`` span. ``--out`` must not be inside the repository.
     spans-summary --in <jsonl>
         Counts by extraction method, share with a missing required field, share with a guard refusal, share retried.
 
@@ -495,6 +495,20 @@ def _outside_repo(path: str) -> Path:
     return resolved
 
 
+def _command_attributes(db, span_id) -> dict:
+    """The attributes of the nearest `fw.command` span at or above *span_id*, or {} when there is none (an extraction
+    at resolve is its part's, not a command's). A store written before span contract 63 is not read."""
+    hops = 0
+    while span_id and hops < 1000:
+        row = db.execute("SELECT name, parent_span_id, attributes FROM spans WHERE span_id=?", (span_id,)).fetchone()
+        if row is None:
+            return {}
+        if row["name"] == "fw.command":
+            return json.loads(row["attributes"] or "{}")
+        span_id, hops = row["parent_span_id"], hops + 1
+    return {}
+
+
 def cmd_spans(args) -> int:
     out = _outside_repo(args.out)
     db = sqlite3.connect(f"file:{Path(args.db).expanduser().resolve()}?mode=ro", uri=True)
@@ -502,17 +516,15 @@ def cmd_spans(args) -> int:
     n = 0
     with open(out, "w") as fh:
         for s in db.execute("SELECT span_id, trace_id, parent_span_id, command_name, attributes FROM spans "
-                            "WHERE name='fw.nlu.param_extraction' ORDER BY start_ns"):
+                            "WHERE name='fw.parameters' ORDER BY start_ns"):
             a = json.loads(s["attributes"] or "{}")
-            parent = db.execute("SELECT attributes FROM spans WHERE span_id=?", (s["parent_span_id"],)).fetchone() \
-                if s["parent_span_id"] else None
-            pa = json.loads(parent["attributes"]) if parent else {}
+            pa = _command_attributes(db, s["parent_span_id"])
             turn = db.execute("SELECT user_message FROM turns WHERE turn_key=?", (s["trace_id"],)).fetchone()
             llm = [json.loads(x["attributes"]) for x in db.execute(
                 "SELECT attributes FROM spans WHERE parent_span_id=? AND name='fw.llm.call'", (s["span_id"],))]
             fh.write(json.dumps({
                 "command_name": a.get("command_name") or s["command_name"],
-                "command_text": pa.get("raw_command"),          # parent fw.command.execute span
+                "command_text": pa.get("raw_command"),          # nearest fw.command ancestor
                 "turn_user_message": turn["user_message"] if turn else None,
                 "extraction_method": a.get("extraction_method"),
                 "recorded_values": pa.get("parameters"),         # the executed command's parameters (after validation)
@@ -529,7 +541,7 @@ def cmd_spans(args) -> int:
                 "attribute_names": sorted(a),
             }) + "\n")
             n += 1
-    print(f"{n} fw.nlu.param_extraction spans -> {out}")
+    print(f"{n} fw.parameters spans -> {out}")
     return 0
 
 

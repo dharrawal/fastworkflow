@@ -26,6 +26,7 @@ from fastworkflow.command_metadata_api import CommandMetadataAPI
 from fastworkflow.command_routing import RoutingRegistry
 from fastworkflow.planning_phases import fill_output
 from fastworkflow.utils.signatures import InputForParamExtraction, not_given_value, parameters_with_unfilled
+from tests.context_declarations import declare_inherits
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIBRARY = os.path.join(ROOT, "fastworkflow", "examples", "library")
@@ -75,23 +76,17 @@ def _build_workflow(
     shutil.copy2(os.path.join(LIBRARY, "startup_action.json"), folder / "startup_action.json")
     shutil.copytree(os.path.join(LIBRARY, "application"), folder / "application")
 
-    with open(os.path.join(LIBRARY, "_commands", "context_inheritance_model.json"),
-              encoding="utf-8") as handle:
-        inheritance = json.load(handle)
-    if extra_inheritance:
-        inheritance.update(extra_inheritance)
-
     commands_dir = folder / "_commands"
     commands_dir.mkdir(parents=True, exist_ok=True)
-    (commands_dir / "context_inheritance_model.json").write_text(
-        json.dumps(inheritance, indent=2) + "\n", encoding="utf-8"
-    )
 
+    # The copied context classes carry the library's inherits declarations
     for rel in (*_COPIED_CONTEXT_CLASSES, *_COPIED_COMMANDS):
         src = os.path.join(LIBRARY, rel)
         dst = folder / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
+    if extra_inheritance:
+        declare_inherits(folder, {name: entry["base"] for name, entry in extra_inheritance.items()})
 
     if extra_commands:
         for cmd_name, code in extra_commands.items():
@@ -1136,22 +1131,27 @@ class ResponseGenerator:
 
 
 def test_broken_context_or_workflow_inheritance_models_are_reported_as_problems(tmp_path):
+    # The removed context_inheritance_model.json is a load error naming the file (bd fix-qjne.36), whatever it holds
     folder = _build_workflow(tmp_path, "wf_broken_models")
     ctx_model_path = os.path.join(folder, "_commands", "context_inheritance_model.json")
-    inh_model_path = os.path.join(folder, "workflow_inheritance_model.json")
     with open(ctx_model_path, "w", encoding="utf-8") as fh:
         fh.write("{not valid json")
-    with open(inh_model_path, "w", encoding="utf-8") as fh:
-        fh.write('{"base": ["nonexistent_base_workflow_pkg_xyz"]}')
 
     res = planning_commands.resolve_field_sources(folder)
-    files_with_errors = {e.file for e in res.errors}
-    assert ctx_model_path in files_with_errors
-    assert inh_model_path in files_with_errors
+    assert any(f"{ctx_model_path}: context_inheritance_model.json is removed and not read" in e.message
+               for e in res.errors)
 
-    # When only workflow_inheritance_model.json is broken (context_inheritance_model.json is valid),
+    # A broken workflow_inheritance_model.json is reported on that file, beside the removed file or alone
+    inh_model_path = os.path.join(folder, "workflow_inheritance_model.json")
+    with open(inh_model_path, "w", encoding="utf-8") as fh:
+        fh.write('{"base": ["nonexistent_base_workflow_pkg_xyz"]}')
+    planning_commands.resolve_field_sources.cache_clear()
+    res = planning_commands.resolve_field_sources(folder)
+    assert inh_model_path in {e.file for e in res.errors}
+
+    # When only workflow_inheritance_model.json is broken (the declarations are valid),
     # CommandContextModel.load_base_contexts raises WorkflowInheritanceModelValidationError and
-    # resolve_field_sources reports the error on workflow_inheritance_model.json (not context_inheritance_model.json).
+    # resolve_field_sources reports the error on workflow_inheritance_model.json only.
     folder_inh_only = _build_workflow(tmp_path, "wf_broken_inh_only")
     inh_only_path = os.path.join(folder_inh_only, "workflow_inheritance_model.json")
     with open(inh_only_path, "w", encoding="utf-8") as fh:
@@ -1161,7 +1161,8 @@ def test_broken_context_or_workflow_inheritance_models_are_reported_as_problems(
     res_inh_only = planning_commands.resolve_field_sources(folder_inh_only)
     assert {e.file for e in res_inh_only.errors} == {inh_only_path}
 
-    # Inheritance cycle and unknown base in context_inheritance_model.json are also reported
+    # An inheritance cycle and an unknown base in the inherits declarations are also reported, naming the
+    # context class file that declares them
     folder_cycle = _build_workflow(
         tmp_path,
         "wf_cycle_model",
@@ -1172,7 +1173,7 @@ def test_broken_context_or_workflow_inheritance_models_are_reported_as_problems(
     )
     res_cycle = planning_commands.resolve_field_sources(folder_cycle)
     assert any(
-        e.file == os.path.join(folder_cycle, "_commands", "context_inheritance_model.json")
+        os.path.join(folder_cycle, "_commands", "Book", "_Book.py") in e.message
         and "Inheritance cycle detected" in e.message
         for e in res_cycle.errors
     )
@@ -1184,8 +1185,8 @@ def test_broken_context_or_workflow_inheritance_models_are_reported_as_problems(
     )
     res_unknown = planning_commands.resolve_field_sources(folder_unknown_base)
     assert any(
-        e.file == os.path.join(folder_unknown_base, "_commands", "context_inheritance_model.json")
-        and "context 'Book' declares the base 'NoSuchBaseContext', which is no context of the workflow" in e.message
+        os.path.join(folder_unknown_base, "_commands", "Book", "_Book.py") in e.message
+        and "inherits names 'NoSuchBaseContext', which is no context" in e.message
         for e in res_unknown.errors
     )
 

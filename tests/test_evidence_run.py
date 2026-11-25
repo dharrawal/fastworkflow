@@ -236,7 +236,7 @@ def test_a_dropped_span_reports_its_turn_but_leaves_the_run_valid(workflow_path)
     run unreportable, which is not what §12.4 asks for."""
     turn_key = fastworkflow.mint_turn_key()
     span = tracing.Span(
-        span_id="s1", trace_id=turn_key, name=tracing.SPAN_COMMAND_EXECUTE
+        span_id="s1", trace_id=turn_key, name=tracing.SPAN_COMMAND
     )
     with evidence_run(workflow_path, run_id="run-span") as run:
         obs.get_observability_sink(workflow_path)._requeue_records([("span", span)])
@@ -254,7 +254,7 @@ def test_drops_from_before_the_run_are_not_attributed_to_it(workflow_path):
     whole history of drops."""
     sink = obs.get_observability_sink(workflow_path)
     old_span = tracing.Span(
-        span_id="old", trace_id="turn-old", name=tracing.SPAN_COMMAND_EXECUTE
+        span_id="old", trace_id="turn-old", name=tracing.SPAN_COMMAND
     )
     sink._requeue_records([("span", old_span)])
 
@@ -275,7 +275,7 @@ def test_the_affected_turn_key_list_is_bounded_and_says_when_it_elided(workflow_
             span = tracing.Span(
                 span_id=f"s{index}",
                 trace_id=f"turn-{index}",
-                name=tracing.SPAN_COMMAND_EXECUTE,
+                name=tracing.SPAN_COMMAND,
             )
             sink._requeue_records([("span", span)])
 

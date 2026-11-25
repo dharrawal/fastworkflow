@@ -193,8 +193,14 @@ def _step_indices(trajectory: dict[str, Any]) -> list[int]:
 # ----------------------------------------------------------------------
 
 
+def _loop_steps(spans: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The ``fw.step`` spans of the step loop, in recorded order, without a planning command's answer step (``kind``
+    answer)."""
+    return [span for span in _by_name(spans, tracing.SPAN_STEP) if _attributes(span).get("kind") != "answer"]
+
+
 def _trajectory_from_steps(spans: list[dict[str, Any]]) -> dict[str, Any]:
-    """The ReAct trajectory from ``fw.agent.step`` spans.
+    """The ReAct trajectory from the ``fw.step`` spans.
 
     Indices are assigned by recorded order, NOT from the ``step_index``
     attribute: a turn resumed after ask_user restarts its local counter, so the
@@ -203,7 +209,7 @@ def _trajectory_from_steps(spans: list[dict[str, Any]]) -> dict[str, Any]:
     sees.
     """
     trajectory: dict[str, Any] = {}
-    for idx, span in enumerate(_by_name(spans, tracing.SPAN_AGENT_STEP)):
+    for idx, span in enumerate(_loop_steps(spans)):
         attrs = _attributes(span)
         for key in ("thought", "tool_name", "tool_args", "observation"):
             if key in attrs:
@@ -226,14 +232,14 @@ def _blocked_by_policy(span: dict[str, Any], by_id: dict[str, dict[str, Any]]) -
     for _ in range(4):
         if parent is None:
             return False
-        if parent.get("name") == tracing.SPAN_AGENT_STEP:
+        if parent.get("name") == tracing.SPAN_STEP:
             return bool(_attributes(parent).get("policy_source"))
         parent = by_id.get(parent.get("parent_span_id"))
     return False
 
 
 def _actions_from_spans(spans: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """The action log from ``fw.command.execute`` spans.
+    """The action log from ``fw.command`` spans.
 
     Only this span carries ``parameters``, and ``command_name`` + ``parameters``
     are the only fields `_action_signature` reads — so the rebuilt list compares
@@ -241,7 +247,7 @@ def _actions_from_spans(spans: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """
     actions: list[dict[str, Any]] = []
     by_id = {span.get("span_id"): span for span in spans if span.get("span_id")}
-    for span in _by_name(spans, tracing.SPAN_COMMAND_EXECUTE):
+    for span in _by_name(spans, tracing.SPAN_COMMAND):
         if _blocked_by_policy(span, by_id):
             continue
         attrs = _attributes(span)
@@ -280,7 +286,7 @@ def _planning_steps_from_spans(
     children: dict[str, list[dict[str, Any]]],
     refined_user_message: str,
 ) -> list[PlanningStep]:
-    """Planning steps from ``fw.planner.plan`` / ``.replan`` spans.
+    """Planning steps from ``fw.plan`` spans.
 
     The plan is split on LINES, not whitespace. The live path does
     ``next_steps.split()`` (`workflow_agent.py`), which shreds a numbered plan
@@ -292,11 +298,12 @@ def _planning_steps_from_spans(
     symmetric and `compare_planning_traces` itself is untouched.
     """
     steps: list[PlanningStep] = []
-    planner_spans = _by_name(spans, tracing.SPAN_PLANNER_PLAN, tracing.SPAN_PLANNER_REPLAN)
+    planner_spans = _by_name(spans, tracing.SPAN_PLAN)
     for idx, span in enumerate(planner_spans):
         plan_text = _attr(span, "plan", "") or ""
         lines = [line.strip() for line in str(plan_text).splitlines() if line.strip()]
-        trigger = _attr(span, "replan_trigger")
+        trigger = _attr(span, "trigger")
+        trigger = None if trigger == "initial" else trigger     # the first plan, as the request planned it
         # The initial plan answers the refined user message; a replan answers
         # whatever re-triggered it, which is all the span records.
         query = refined_user_message if idx == 0 and not trigger else f"[replan: {trigger}]"
@@ -359,17 +366,18 @@ def _span_ids_by_phase(spans: list[dict[str, Any]]) -> dict[str, list[str]]:
             return [span["span_id"]] if span.get("span_id") else []
         return [sid for kid in kids for sid in leaves(kid)]
 
-    def ids(*names: str) -> list[str]:
+    def ids(of: Iterable[dict[str, Any]]) -> list[str]:
         collected: set[str] = set()
-        for span in _by_name(spans, *names):
+        for span in of:
             collected.update(leaves(span))
         return sorted(collected)
 
+    # The execution of a part is its run part (``fw.run.part`` holds the agent loop's facts).
     return {
-        PHASE_PLANNING: ids(tracing.SPAN_PLANNER_PLAN, tracing.SPAN_PLANNER_REPLAN),
-        PHASE_EXECUTION: ids(tracing.SPAN_AGENT_EXECUTE),
-        PHASE_COMMANDS: ids(tracing.SPAN_COMMAND_EXECUTE),
-        PHASE_STEPS: ids(tracing.SPAN_AGENT_STEP),
+        PHASE_PLANNING: ids(_by_name(spans, tracing.SPAN_PLAN)),
+        PHASE_EXECUTION: ids(_by_name(spans, tracing.SPAN_RUN_PART)),
+        PHASE_COMMANDS: ids(_by_name(spans, tracing.SPAN_COMMAND)),
+        PHASE_STEPS: ids(_loop_steps(spans)),
     }
 
 

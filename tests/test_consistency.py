@@ -3,7 +3,7 @@
 Integration throughout, per `.cursor/rules/testing_rules.mdc`: a real workflow
 folder, a real benchmark manifest, real `ObservabilityStore` databases, attempts
 written through the real `ExperimentController`, real recorded spans -- including
-real `fw.planner.plan` spans, which is where the plan text this module compares
+real `fw.plan` spans, which is where the plan text this module compares
 actually lives -- the real selection control, the real `ChatbotServer` over a
 socket, and the real locally-installed embedding model. No Mock fixtures and
 nothing paid: the similarity numbers below come from the checkpoint already in
@@ -73,7 +73,7 @@ ANSWER_FAILED = "I could not finish; the roster is unchanged."
 
 
 def _plan_span(span_id, turn_key, *, text, start_ns, replan_trigger=None):
-    """A real `fw.planner.plan` / `fw.planner.replan` span.
+    """A real `fw.plan` span (`trigger` `initial` for the first plan).
 
     The same shape `workflow_agent.build_query_with_next_steps` ends: the plan
     text goes on the span at close, and the planner's chain-of-thought does
@@ -84,10 +84,7 @@ def _plan_span(span_id, turn_key, *, text, start_ns, replan_trigger=None):
         span_id=span_id,
         trace_id=turn_key,
         parent_span_id=None,
-        name=(
-            tracing.SPAN_PLANNER_REPLAN if replan_trigger
-            else tracing.SPAN_PLANNER_PLAN
-        ),
+        name=tracing.SPAN_PLAN,
         kind=tracing.KIND_LLM,
         channel_id="channel-1",
         start_ns=start_ns,
@@ -95,7 +92,7 @@ def _plan_span(span_id, turn_key, *, text, start_ns, replan_trigger=None):
         status=tracing.STATUS_OK,
         attributes={
             "model": "local/test",
-            "replan_trigger": replan_trigger,
+            "trigger": replan_trigger or "initial",
             "plan": text,
         },
     )
@@ -422,12 +419,11 @@ class TestArithmetic:
 
     def test_the_plan_span_names_still_match_the_emitter(self):
         """The restated constants are checked against the ones spans carry."""
-        assert consistency.SPAN_PLANNER_PLAN == tracing.SPAN_PLANNER_PLAN
-        assert consistency.SPAN_PLANNER_REPLAN == tracing.SPAN_PLANNER_REPLAN
+        assert consistency.SPAN_PLAN == tracing.SPAN_PLAN
 
     def test_the_canonical_plan_text_keeps_order_and_turn_boundaries(self):
-        first = consistency.PlanSegment(0, "t1", tracing.SPAN_PLANNER_PLAN, None, "A")
-        second = consistency.PlanSegment(1, "t2", tracing.SPAN_PLANNER_PLAN, None, "B")
+        first = consistency.PlanSegment(0, "t1", tracing.SPAN_PLAN, None, "A")
+        second = consistency.PlanSegment(1, "t2", tracing.SPAN_PLAN, None, "B")
         forwards = consistency.canonical_plan_text([first, second])
         backwards = consistency.canonical_plan_text([second, first])
 
@@ -694,11 +690,7 @@ class TestRunEvidence:
 
         # Two turns, and the second replanned: three emissions, in order.
         kinds = [segment["span_name"] for segment in failed["plan"]["segments"]]
-        assert kinds == [
-            tracing.SPAN_PLANNER_PLAN,
-            tracing.SPAN_PLANNER_PLAN,
-            tracing.SPAN_PLANNER_REPLAN,
-        ]
+        assert kinds == [tracing.SPAN_PLAN] * 3
         boundaries = [segment["boundary"] for segment in failed["plan"]["segments"]]
         assert boundaries == [
             "[turn 1 plan]", "[turn 2 plan]", "[turn 2 replan after tool_error]"

@@ -178,6 +178,8 @@ def test_get_parent_takes_the_record_by_keyword(workflow, manager):
 
 def test_a_context_with_the_old_parameter_name_fails_the_load():
     class OldContext:
+        parents = ["TodoList"]  # declared with get_parent (bd fix-qjne.36)
+
         @classmethod
         def get_parent(cls, command_context_object):
             return None
@@ -188,6 +190,8 @@ def test_a_context_with_the_old_parameter_name_fails_the_load():
 
 def test_a_context_with_the_record_parameter_loads():
     class NewContext:
+        parents = ["TodoList"]  # declared with get_parent (bd fix-qjne.36)
+
         @classmethod
         def get_parent(cls, record):
             return None

@@ -44,9 +44,10 @@ def part_intent(workflow, text: str, *, pinned: Optional[str] = None,
     plan does not run them). Memoised for the turn. Never raises for a model that
     cannot be reached: the chain then stands on the local model.
 
-    The decision is written in ONE ``fw.nlu.intent`` span, by the writer the CME's intent stage uses
+    The decision is written in ONE ``fw.intent`` span, by the writer the CME's intent stage uses
     (``intent_detection.traced_decision``), when it is made (a memo miss), never on a memo read; *part* is the part's
-    1-based number in the turn, recorded on the span when the caller knows it. A pinned plan is not detected, so it
+    1-based number in the turn, recorded on the span when the caller knows it, and the span is then a child of that
+    part's ``fw.resolve.part`` span while the turn is in its resolve stage (``tracing.part_span``). A pinned plan is not detected, so it
     writes none.
     """
     if pinned:
@@ -69,10 +70,13 @@ def part_intent(workflow, text: str, *, pinned: Optional[str] = None,
 
 
 def _decided(workflow, text: str, part: Optional[int]) -> PartIntent:
-    """The intent loop's decision for *text* (no core command), in its span: the CME's writer, called from here."""
+    """The intent loop's decision for *text* (no core command), in its span: the CME's writer, called from here, under
+    the part's span."""
+    from fastworkflow import tracing
     from fastworkflow._workflows.command_metadata_extraction import intent_detection
 
-    return intent_detection.traced_decision(workflow, text, core=False, part=part)[0]
+    with tracing.part_span(tracing.current_host(), tracing.SPAN_RESOLVE_PART, part):
+        return intent_detection.traced_decision(workflow, text, core=False, part=part)[0]
 
 
 how_settled = intent_loop.how_settled

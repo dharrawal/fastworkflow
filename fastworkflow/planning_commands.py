@@ -147,7 +147,7 @@ A planning command file::
   ``fastworkflow.planning`` for the rules. The methods build text only: they must not call a
   backend or read state. A repeated part is a ``for`` loop over ``range()``, bounded by the
   int field's ``le``; steps shared by several planning commands go in a helper module
-  (``_commands/_<name>.py``). Lookup tables are plain module-level dicts. A planning command whose one
+  (``_commands/_shared/<name>.py``). Lookup tables are plain module-level dicts. A planning command whose one
   phase reads and fills no facts runs flat (one plan); one without parameters whose one
   method takes no ``input`` gives fixed steps.
 - ``plain_utterances`` (optional, with or without params): example requests for the
@@ -226,7 +226,6 @@ import json
 import math
 import os
 import re
-import contextvars
 import sys
 from collections import deque
 from pathlib import Path
@@ -237,6 +236,7 @@ from typing import Any, Callable, Literal, Mapping, Optional, Sequence, Union, g
 
 from pydantic import BaseModel
 
+from fastworkflow import tracing
 from fastworkflow.command_context_model import CommandContextModel
 from fastworkflow.command_directory import CommandDirectory, compute_commands_source_fingerprint, raised_in_helper
 from fastworkflow.field_options import (
@@ -1935,8 +1935,8 @@ def _is_template_line(text: str) -> bool:
 
 def _plan_generator_inherits_foreign(plan_cls: type, path: str) -> None:
     """Load error when *plan_cls* subclasses another command's ``PlanGenerator`` (3.4, 2.36), directly or through
-    any class between them (a shared base in a ``_`` module, or a class of the command file itself): every class of
-    its MRO is checked."""
+    any class between them (a shared base in a module of ``_commands/_shared/``, or a class of the command file
+    itself): every class of its MRO is checked."""
     module = sys.modules.get(plan_cls.__module__)
     own = getattr(module, "PlanGenerator", None) if module is not None else None
     for base in plan_cls.__mro__[1:]:
@@ -1953,7 +1953,7 @@ def _plan_generator_inherits_foreign(plan_cls: type, path: str) -> None:
         raise PlanningCommandFormatError(
             f"{path}: PlanGenerator inherits from {other_name}'s PlanGenerator; to reuse its "
             f"whole job, call {other_name.split('/')[-1]} in a step; to share phases, move "
-            "them to a base class in a _ module")
+            "them to a base class in a module of _commands/_shared/")
 
 
 def _qualified_name_from_command_path(fpath: str) -> str | None:
@@ -2385,13 +2385,13 @@ def _read_base_contexts(
     """``({context: (base, ...)}, problems)`` in depth-first declared order for each context
     of the workflow, using :meth:`CommandContextModel.load_base_contexts`.
 
-    Reads and validates ``_commands/context_inheritance_model.json`` directly without
-    importing any command or creating ``___command_info``. If validation fails, the error is
-    recorded as a :class:`FieldSourceProblem` on the ``context_inheritance_model.json`` path.
+    Reads and validates each context's ``inherits`` (literals of its ``class Context``) without
+    importing any command or creating ``___command_info``. If validation fails, the error (which
+    names the file) is recorded as a :class:`FieldSourceProblem` on the ``_commands`` folder.
     """
     commands_dir = os.path.join(workflow_folderpath, "_commands")
-    model_path = os.path.join(commands_dir, "context_inheritance_model.json")
-    if not os.path.isdir(commands_dir) and not os.path.isfile(model_path):
+    model_path = commands_dir
+    if not os.path.isdir(commands_dir):
         return {}, []
     try:
         bases = CommandContextModel.load_base_contexts(workflow_folderpath)
@@ -2836,8 +2836,8 @@ def _typed_phase_output_problems(
 
 
 def _workflow_contexts(folder: str, files: Mapping[str, Any]) -> frozenset[str]:
-    """The workflow's context names: each context folder that holds a command, and each context
-    ``context_inheritance_model.json`` declares (a base included). What a ``@descends_to`` target must name."""
+    """The workflow's context names: each context folder that holds a command, and each context an
+    ``inherits`` declares (a base included). What a ``@descends_to`` target must name."""
     contexts = {name.split("/", 1)[0] for name in files if "/" in name}
     try:
         declared = CommandContextModel.declared_bases(folder)
@@ -2956,7 +2956,9 @@ def signature_member_problems(signature: Any, *, is_planning: bool, framework: b
 
 def _command_class_problems(module: Any, fpath: str, signature: Any, is_planning: bool,
                             contexts: frozenset[str], closed: frozenset[str] = frozenset(),
-                            framework: bool = False) -> list[str]:
+                            framework: bool = False, context: str | None = None,
+                            containment: tuple[Mapping[str, list[str]], Mapping[str, tuple[str, ...]]] | None = None
+                            ) -> list[str]:
     """The load errors of a command file's classes, beside its Signature's: a Signature with no generator class
     (``command_directory.missing_generator_problem``), a ``ResponseGenerator.__call__`` that does not take three
     arguments (``command_routing.response_call_arity_problem``) and the declarations on the generator
@@ -2995,7 +2997,36 @@ def _command_class_problems(module: Any, fpath: str, signature: Any, is_planning
         problems.append(f"@descends_to(\"{target}\") names a context declared occupiable = False: a base other "
                         "contexts inherit commands from, never a place the workflow stands on. Name the context the "
                         "command enters")
+    elif target and context and containment and target in contexts:
+        problems += descends_to_containment_problems(context, target, *containment)
     return problems
+
+
+def _containment(folder: str) -> tuple[dict[str, list[str]], dict[str, tuple[str, ...]]] | None:
+    """``(declared parents, base contexts)`` of the workflow for the ``@descends_to`` containment check, or None when
+    the declarations do not read (their own load problem is reported where the context model loads)."""
+    try:
+        return CommandContextModel.declared_parents(folder), CommandContextModel.load_base_contexts(folder)
+    except Exception:  # noqa: BLE001 - reported by the context model's load
+        return None
+
+
+def descends_to_containment_problems(context: str, target: str, parents: Mapping[str, list[str]],
+                                     bases: Mapping[str, tuple[str, ...]]) -> list[str]:
+    """The load error of a command of *context* that declares ``@descends_to(target)`` when a *target* record cannot
+    sit in a record the command runs on: one of *target*'s declared ``parents`` must be *context*, a context
+    *context* inherits (a TodoList command entering a child whose parents name TodoItem), or a context that inherits
+    *context* (a command of a base context runs on the records of the contexts that inherit it). A global command
+    runs on the root, whatever its context, and is not checked."""
+    declared = parents.get(target)
+    if declared and any(parent == context or parent in bases.get(context, ()) or context in bases.get(parent, ())
+                        for parent in declared):
+        return []
+    told = (f"declares parents = {list(declared)!r}" if declared
+            else "declares no parents (a top-level context, enclosed only by the global commands)")
+    return [f"@descends_to(\"{target}\") enters a context whose records do not sit in a {context}: {target} {told} "
+            f"in _commands/{target}/_{target}.py, which names neither {context} nor a context it inherits. Add "
+            f"\"{context}\" to the parents of {target}, or name the context the command enters"]
 
 
 def resolve_field_sources(workflow_folderpath: str) -> FieldSourceResolution:
@@ -3048,6 +3079,7 @@ def _resolve_field_sources_cached(folder: str, _source_fingerprint: str) -> Fiel
     planning_commands: dict[str, PlanningCommandCommand] = {}
     contexts = _workflow_contexts(folder, all_files)
     closed = _closed_contexts(cmd_dir)
+    containment = _containment(folder)
 
     for qname in sorted(all_files):
         fpath, owner, is_planning = all_files[qname]
@@ -3062,7 +3094,9 @@ def _resolve_field_sources_cached(folder: str, _source_fingerprint: str) -> Fiel
         sig = getattr(module, "Signature", None)
         problems.extend(FieldSourceProblem(file=fpath, message=message, command=qname)
                         for message in _command_class_problems(module, fpath, sig, is_planning, contexts, closed,
-                                                               framework=is_framework_command_folder(owner)))
+                                                               framework=is_framework_command_folder(owner),
+                                                               context=qname.split("/", 1)[0] if "/" in qname
+                                                               else None, containment=containment))
         if not inspect.isclass(sig):
             continue
         signatures[qname] = sig
@@ -4420,6 +4454,7 @@ def _distinct_labels(options: tuple[tuple[str, str], ...]) -> tuple[tuple[str, s
 
 def _check_one(lm, command: PlanningCommandCommand, p: Param, request: str) -> tuple[object, float]:
     import dspy
+    from fastworkflow.utils import dspy_utils
     from dspy.experimental import Choice
 
     if p.type == "bool":
@@ -4436,7 +4471,7 @@ def _check_one(lm, command: PlanningCommandCommand, p: Param, request: str) -> t
         "job": (str, dspy.InputField(desc="the job the request is planned as")),
         "value": (Choice[options], dspy.OutputField(desc=question)),
     }, "Decide one argument of the job from what the request says.")
-    with dspy.context(lm=lm):
+    with dspy_utils.role_context("JEV", lm):
         choice = dspy.Predict(signature)(request=request, job=command.description).value
     value = str(choice.value)
     probability = float((choice.probabilities or {}).get(value, choice.confidence))
@@ -4467,7 +4502,7 @@ def check_verdicts(lm, command: PlanningCommandCommand, request: str) -> dict[st
     # leave no fw.llm.call span under the turn. One copy per submission: a Context can be entered
     # by one thread at a time.
     with ThreadPoolExecutor(len(params)) as pool:
-        futures = [pool.submit(contextvars.copy_context().run, one, p) for p in params]
+        futures = [pool.submit(tracing.traced_call(one, p)) for p in params]
         return dict(r for r in (f.result() for f in futures) if r is not None)
 
 
@@ -4687,7 +4722,7 @@ def typed_planning_call(command: PlanningCommandCommand, request: str, available
                                                          seen["reset"] if attempt == 1 else {}))
 
     with ThreadPoolExecutor(1) as pool:
-        checks = pool.submit(contextvars.copy_context().run, check_verdicts, check_lm, command, request)
+        checks = pool.submit(tracing.traced_call(check_verdicts, check_lm, command, request))
 
         def fill_text(note: str, attempt: int) -> dict:
             raw = extracted_arguments(command, request, workflow, note=note, resets=seen["reset"] if attempt == 1 else None,

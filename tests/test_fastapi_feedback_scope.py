@@ -136,7 +136,7 @@ def _pass_span(
         span_id=span_id,
         trace_id=turn_key,
         parent_span_id=parent_span_id,
-        name=tracing.SPAN_COMMAND_EXECUTE,
+        name=tracing.SPAN_COMMAND,
         kind=tracing.KIND_INTERNAL,
         channel_id=channel_id,
         command_name="add_two_numbers",

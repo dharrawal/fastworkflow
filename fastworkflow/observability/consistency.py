@@ -10,8 +10,7 @@ taxonomy on the existing comparison, not here.
 The three:
 
 1. **Planning similarity.** Cosine between embeddings of the recorded,
-   user-visible plan text -- the `plan` attribute of the `fw.planner.plan` and
-   `fw.planner.replan` spans, in recorded order, with turn boundaries kept
+   user-visible plan text -- the `plan` attribute of the `fw.plan` spans, in recorded order, with turn boundaries kept
    explicit. It is the plan the planner PUBLISHED, never the chain-of-thought
    that produced it: `reasoning` is deliberately not on those spans, so there
    is nothing hidden to leak in and nothing to reconstruct.
@@ -89,12 +88,11 @@ TEXT_PROJECTION_VERSION = "consistency/text/1"
 STEP_COUNT_RULE = "ledger_distinct_dispatch"
 
 # Restated rather than imported from `fastworkflow.tracing`, the way
-# `comparison.py` restates `fw.command.execute`: reading stored evidence should
-# not pull in the emitter. `test_consistency.py` asserts these still equal the
-# tracing constants, so the copy cannot drift silently.
-SPAN_PLANNER_PLAN = "fw.planner.plan"
-SPAN_PLANNER_REPLAN = "fw.planner.replan"
-PLAN_SPAN_NAMES = (SPAN_PLANNER_PLAN, SPAN_PLANNER_REPLAN)
+# `comparison.py` restates `fw.command`: reading stored evidence should not pull
+# in the emitter. `test_consistency.py` asserts it still equals the tracing
+# constant, so the copy cannot drift silently. A plan is one `fw.plan` span; its
+# `trigger` says what planned (`initial` for the request's first plan).
+SPAN_PLAN = "fw.plan"
 
 # The model this repo already has on disk for sentence-level similarity. It is
 # named, not discovered: a fallback to "whatever else is cached" would change
@@ -288,7 +286,7 @@ class PlanSegment:
 
     @property
     def boundary(self) -> str:
-        kind = "replan" if self.span_name == SPAN_PLANNER_REPLAN else "plan"
+        kind = "replan" if self.replan_trigger else "plan"
         trigger = f" after {self.replan_trigger}" if self.replan_trigger else ""
         return f"[turn {self.turn_index + 1} {kind}{trigger}]"
 
@@ -368,7 +366,7 @@ def _plan_segments(
 ) -> list[PlanSegment]:
     """Plan emissions of one turn, in recorded order."""
     ordered = sorted(
-        (span for span in spans if span.get("name") in PLAN_SPAN_NAMES),
+        (span for span in spans if span.get("name") == SPAN_PLAN),
         key=lambda span: (
             span.get("start_ns") if isinstance(span.get("start_ns"), int) else 0,
             str(span.get("span_id") or ""),
@@ -382,7 +380,8 @@ def _plan_segments(
             # An emitted plan with no text is a real recorded state (the
             # planner returned nothing), and it carries no content to compare.
             continue
-        trigger = attributes.get("replan_trigger")
+        trigger = attributes.get("trigger")
+        trigger = None if trigger == "initial" else trigger
         segments.append(
             PlanSegment(
                 turn_index=turn_index,
@@ -587,7 +586,7 @@ def collect_run_evidence(
     else:
         plan = _absent(
             "plan",
-            "no fw.planner.plan or fw.planner.replan span recorded a plan for "
+            "no fw.plan span recorded a plan for "
             "this run",
         )
 
@@ -1604,10 +1603,8 @@ __all__ = [
     "METRIC_UNAVAILABLE",
     "METRIC_UNKNOWN",
     "NORMALIZED_STEP_FORMULA",
-    "PLAN_SPAN_NAMES",
     "SD_FORMULA",
-    "SPAN_PLANNER_PLAN",
-    "SPAN_PLANNER_REPLAN",
+    "SPAN_PLAN",
     "SPREAD_FORMULA",
     "STEP_COUNT_RULE",
     "TEXT_ABSENT",

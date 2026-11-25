@@ -1,6 +1,7 @@
 """Wording the library's planning commands share.
 
-A file whose name starts with "_" is never a command: planning commands import it.
+Imported by the Library commands as `from .._shared.wording import copies`: _commands/_shared/ is the
+workflow's helper package, which is never read as commands.
 """
 from fastworkflow.planning import count
 

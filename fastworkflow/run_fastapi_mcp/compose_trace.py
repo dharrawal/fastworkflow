@@ -73,6 +73,27 @@ def _compose_attributes(
     }
 
 
+def _recorded(sink: Any, trace_id: str, span_id: str) -> bool:
+    """Whether the sink's store holds span *span_id* of turn *trace_id* (False when it cannot be read)."""
+    try:
+        store = getattr(sink, "store", None)
+        return store is not None and any(row.get("span_id") == span_id for row in store.get_spans(trace_id))
+    except Exception:  # noqa: BLE001 - the parent is a convenience; the root stands
+        return False
+
+
+def _last_question(sink: Any, trace_id: str) -> Optional[str]:
+    """The id of turn *trace_id*'s last ``fw.question`` span (the question the form is composed for: the one the turn
+    waits on is its last), or None when the store holds none or cannot be read."""
+    try:
+        store = getattr(sink, "store", None)
+        rows = [row for row in (store.get_spans(trace_id) if store is not None else ())
+                if row.get("name") == tracing.SPAN_QUESTION]
+        return max(rows, key=lambda row: row.get("start_ns") or 0).get("span_id") if rows else None
+    except Exception:  # noqa: BLE001 - the parent is a convenience; the root stands
+        return None
+
+
 def emit_compose_span(
     sink: Any,
     *,
@@ -103,6 +124,11 @@ def emit_compose_span(
         span.start_ns = started_ns
         if not attached:
             span.parent_span_id = None   # there is no turn root to hang under
+        elif kind == "answer_card" and _recorded(sink, trace_id, answer := tracing.stage_span_id(trace_id,
+                                                                                                  tracing.SPAN_ANSWER)):
+            span.parent_span_id = answer   # the card composes the turn's answer (bd fix-qjne.34 step 7)
+        elif kind == "question_form" and (question := _last_question(sink, trace_id)) is not None:
+            span.parent_span_id = question   # the form composes the question the turn waits on
         tracing.end_span(
             host,
             span,

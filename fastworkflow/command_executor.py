@@ -566,6 +566,13 @@ def _annotation(exc: BaseException, name: str):
         return None
 
 
+def _resolution_attributes(resolved: dict) -> dict:
+    """The ``fw.command`` keys of how the command was resolved and its values read (noted by the CME's stages:
+    ``intent_detection.traced_decision``, ``parameter_extraction.traced_extraction``)."""
+    return {"resolved_by": resolved.get("resolved_by"), "parameters_read_by": resolved.get("parameters_read_by"),
+            "parameters_valid": resolved.get("parameters_valid")}
+
+
 class CommandExecutor(CommandExecutorInterface):
     @classmethod
     def invoke_command(
@@ -595,12 +602,12 @@ class CommandExecutor(CommandExecutorInterface):
         call_id = tracing.new_command_call_id()
         parent_call_id = tracing.current_call_id()
 
-        # fw.command.execute boundary span (observability design §3.1, D3).
+        # fw.command boundary span (observability design §3.1, D3; bd fix-qjne.34).
         # chat_session is duck-typed (WEC, or ChatSession delegating to its
         # core); with no sink or open turn the helpers no-op.
         span = tracing.start_span(
             chat_session,
-            tracing.SPAN_COMMAND_EXECUTE,
+            tracing.SPAN_COMMAND,
             kind=tracing.KIND_TOOL,
             attributes={
                 "raw_command": command,
@@ -621,15 +628,17 @@ class CommandExecutor(CommandExecutorInterface):
         # Bound before the try so the error path can still file this dispatch's
         # inner hops when call_scope itself is what raised.
         child_calls: list = []
+        resolved: dict = {}
         try:
             # Bind the trace host for the deep NLU emission sites
-            # (fw.nlu.intent / fw.nlu.param_extraction) — they run several
+            # (fw.intent / fw.parameters) — they run several
             # frames down with no reference to the session ([R28]; D3 as
             # amended). call_scope additionally makes this dispatch the parent
             # of every perform_action hop underneath it.
+            # How the command was resolved and its values read, noted by the CME's stages (``tracing.note``).
             with tracing.host_scope(chat_session), tracing.call_scope(
                 call_id
-            ) as child_calls:
+            ) as child_calls, tracing.facts_for(tracing.SPAN_COMMAND) as resolved:
                 command_output = cls._invoke_command_impl(chat_session, command)
         except BaseException as exc:
             # CommandCancelledError/AskUserSuspend are BaseException control
@@ -654,6 +663,7 @@ class CommandExecutor(CommandExecutorInterface):
                     "error_type": type(exc).__name__,
                     # A control signal is not a failure, so it records no outcome.
                     **({} if is_control_signal else {"success": False}),
+                    **_resolution_attributes(resolved),
                 },
             )
             if not is_control_signal:
@@ -704,6 +714,10 @@ class CommandExecutor(CommandExecutorInterface):
         if span is not None:
             workflow = cls._active_workflow(chat_session)
             context_after = tracing.context_type(workflow)
+            # The direct ("/") path's command opened before its run stage did: it is filed under the part it ran for
+            # (the run part once the CME bound it, else the resolve part that asked).
+            if parent_call_id is None and (part := tracing.direct_part_id(chat_session)) is not None:
+                span.parent_span_id = part
 
         tracing.end_span(
             chat_session,
@@ -726,6 +740,7 @@ class CommandExecutor(CommandExecutorInterface):
                 # calls" and "nothing captured them" are different facts, and an
                 # absent key cannot tell them apart.
                 tracing.ATTR_CHILD_CALLS: list(child_calls),
+                **_resolution_attributes(resolved),
             },
         )
         record_execution(
@@ -789,7 +804,9 @@ class CommandExecutor(CommandExecutorInterface):
         elif not command_output.success:       
             return command_output
 
+        # The direct ("/") path's command is bound: its run begins (``tracing.enter_direct_run``; nothing on any other path).
         command_name = command_output.command_response.artifacts["command_name"]
+        tracing.enter_direct_run(chat_session, command_name)
         input_obj = command_output.command_response.artifacts["cmd_parameters"]
         # Set by the CME walk when the command runs on an enclosing record (None otherwise).
         ran_on_name = command_output.command_response.artifacts.get("ran_on_context_name")

@@ -133,8 +133,8 @@ Sharp edges, all verified:
   (c) otherwise the ambiguity question (`_ask_which_command`) or, for a decline, the walk
   climbs. The older Jev tie-break among the classifier's candidates
   (`workflow_agent.choose_ambiguous_command`, `FW_JEV_INTENT_TIEBREAK`, 0.9) was removed: (b)
-  replaces it. The `fw.nlu.intent` span (v8) carries `engine` (`classifier`, `matcher`, or
-  `question` when no link was confident) and `engine_chain` (the links asked); `engine_mode` and
+  replaces it. The `fw.intent` span carries
+  `decided_by` (`local`, `remote`, or `question` when no link was confident) and `engine_chain` (the links asked); `engine_mode` and
   `jev_tiebreak` are no longer written. `FW_REQUIRE_HEADS=1` makes a context with no local model
   a failure (the matcher does not stand in). `intent_detector.startup_report` prints the chain
   in one line. A test that asserts the ambiguity prompt of an unsure local model must use the

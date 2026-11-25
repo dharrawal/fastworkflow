@@ -193,7 +193,7 @@ Open fastworkflow/skills_for_coding_fastworkflows/integrate-chat-agent/SKILL.md
 Prompt: "Integrate a fastWorkflow chat agent for OrderService in orders.py"
 ```
 
-The agent introspects your code and generates `_commands/cancel_order.py`, `_commands/get_order_status.py`, the `context_inheritance_model.json`, and env scaffolding — then trains and smoke-tests it with you. **Your `orders.py` is never modified.**
+The agent introspects your code and generates `_commands/cancel_order.py`, `_commands/get_order_status.py`, each context's `inherits` declaration, and env scaffolding — then trains and smoke-tests it with you. **Your `orders.py` is never modified.**
 
 ### Or write a command wrapper by hand (~5 minutes per command)
 
@@ -277,20 +277,26 @@ User                                ← always visible
         └── escalate_to_human()
 ```
 
-Inheritance lives in **one file**, `context_inheritance_model.json` — not code. Each entry's `base` names the contexts whose commands it inherits:
+A context is a folder of `_commands/` named after a class of your application. Its facts are declared in its own `class Context`, in `_commands/<Context>/_<Context>.py`. From the library example (`fastworkflow examples fetch library`), `_commands/Book/_Book.py` begins:
 
-```json
-{
-  "Order": {
-    "base": ["User"]
-  },
-  "Refund": {
-    "base": ["Order"]
-  }
-}
+```python
+class Context:
+    inherits = ["Record"]
+    parents = ["Library"]
+
+    state_version = 1
+
+    @classmethod
+    def get_parent(cls, record: Book) -> Library:
+        return record.library
 ```
 
-The enclosing object of each context comes from its `get_parent` method, read from the live object chain at run time; there is no separate hierarchy file.
+- **`inherits`** names the contexts whose commands this context also has (a book and a member both get `Record`'s `add_note`); `inherits = ["*"]` adds the global commands to the context's own set.
+- **`get_parent`** returns the record that encloses this one, and **`parents`** names every context that record can be, the context itself when records nest (a todo list inside a todo list). A context with no `parents` is top level, enclosed only by the global commands; the root record needs neither.
+
+Both are lists of context names written as string literals, read without importing the file, and checked when the workflow loads: every name must be a context (a misspelling gets a did-you-mean), named once, with no context inheriting itself; `parents` goes with `get_parent` and one without the other stops the workflow; and a command's `@descends_to("Book")` must enter a context whose `parents` name the command's own context. At run time, a `get_parent` that returns a record of a context its `parents` do not name fails the climb, naming both. `fastworkflow command preview` draws the declarations of every context, with the commands that enter each one, as a generated object-model page (`_object_models/<workflow>.md`); nobody writes it by hand.
+
+**Migrating an existing workflow.** `_commands/context_inheritance_model.json` is a removed spelling: a workflow that still has one does not load, and the message names the file. Run `fastworkflow migrate-contexts <workflow>`: it writes each context's `inherits` from the file (creating a `_<Context>.py` where none exists), deletes the file, and lists every context that has a `get_parent`. Write those contexts' `parents` by hand: read what each `get_parent` can return and name those contexts. A `context_hierarchy_model.json` in the workflow folder is ignored, with a warning that it can be deleted.
 
 A request is matched along one lookup path: the current context and its bases, then each enclosing record and its bases, then the global commands. The nearest scope that recognises the request wins, and the command runs on that scope's object. For a natural-language request, a confident global command runs first. Exact command names take the nearest scope.
 
@@ -355,26 +361,30 @@ Use that printed URL. It carries a one-off token, and requests without it are re
 Debug mode nests turns directly beneath their conversations (with a separate conversation-less group when needed), and opens any turn into a span tree — the nested record of the stages that ran, each with its duration, status, and attributes:
 
 ```
-fw.turn                        the whole logical turn (stable across ask_user suspensions)
-├── fw.planner.plan            the agent's plan for the turn (fw.planner.replan on a re-plan)
-│   └── fw.llm.call            the planner's LLM request/response
-└── fw.agent.execute           the ReAct loop as a whole (attempts, final answer)
-    └── fw.agent.step          one reasoning step: thought, chosen tool, observation
-        ├── fw.llm.call        the step's reasoning LLM call (+ provider-native reasoning)
-        └── fw.agent.tool_call the agent invoking a command
-            └── fw.command.execute   resolution + your business logic running
-                ├── fw.nlu.intent            which matching layer decided, classifier
-                │                            confidence vs threshold, candidates on ambiguity
-                └── fw.nlu.param_extraction  extraction method, missing/invalid fields,
-                    │                        validation-hook outcomes (changed and refused fields)
-                    └── fw.llm.call          the LLM extraction call, when one ran
-fw.ask_user                    a clarifying question, and how long the user took
+fw.turn                        the whole logical turn (stable across questions to the user)
+├── fw.split                   how the request was split into parts (gate, splitter, merge)
+├── fw.resolve
+│   └── fw.resolve.part        one part: which command, which values
+│       ├── fw.intent          which matching layer decided, classifier confidence vs
+│       │                      threshold, candidates on ambiguity
+│       ├── fw.parameters      extraction method, missing/invalid fields, validation outcomes
+│       │   └── fw.llm.call    the LLM extraction call, when one ran
+│       └── fw.question        a question asked about this part, and how long the user took
+├── fw.review                  the review of the whole turn, its replies and revisions
+├── fw.run
+│   └── fw.run.part            one part as it ran: outcome ran | not_run | refused, and why
+│       ├── fw.plan            the text plan of a part no command fits
+│       ├── fw.phase           a phase of a planning command
+│       └── fw.step            one step, run by code or by the agent (thought, tool, observation)
+│           ├── fw.llm.call    the agent's reasoning call, when the agent ran it
+│           └── fw.command     resolution + your business logic running
+└── fw.answer                  who wrote the answer, and the conversation summary call
 
-(Deterministic "/"-mode turns skip the planner/agent layers: fw.command.execute
-sits directly under fw.turn.)
+(Deterministic "/"-mode turns have one part under fw.resolve and fw.run, and no split or
+review. A store written before span contract 63 uses other names and is not read.)
 ```
 
-The diagnosis lives in the attributes of `fw.command.execute`. It records `raw_command` (the natural-language command the agent sent), `command_name` (what intent detection *resolved* it to), the extracted `parameters`, the `response_text`, and `success`. Comparing the first two is the whole trick:
+The diagnosis lives in the attributes of `fw.command`. It records `raw_command` (the natural-language command the agent sent), `command_name` (what intent detection *resolved* it to), the extracted `parameters`, the `response_text`, and `success`. Comparing the first two is the whole trick:
 
 - **`raw_command` was reasonable but `command_name` is the wrong command** → an intent-detection miss. Add seed utterances for that command and retrain.
 - **`command_name` is right but `parameters` are wrong** → a parameter-extraction miss. Strengthen the `Field(description=…)` (and `examples=[…]`, which feed the generated sample requests) in that command's Signature.
@@ -454,13 +464,13 @@ Limits. The `/` form does not collect a password parameter (`format: password` o
 ```sql
 SELECT t.trace_id AS turn_key, COUNT(a.span_id) AS ask_user_spans
 FROM spans t
-LEFT JOIN spans a ON a.trace_id = t.trace_id AND a.name = 'fw.ask_user'
+LEFT JOIN spans a ON a.trace_id = t.trace_id AND a.name = 'fw.question'
 WHERE t.name = 'fw.turn'
 GROUP BY t.trace_id
 ORDER BY t.start_ns;
 ```
 
-It counts `fw.ask_user` spans per `fw.turn`, which share a `trace_id` (the turn key) across suspensions; a turn that never asked shows 0, and a question still waiting is counted.
+It counts `fw.question` spans (every wait for a person: a question, the review, an approval) per `fw.turn`, which share a `trace_id` (the turn key) across suspensions; a turn that never asked shows 0, and a question still waiting is counted.
 
 There is deliberately no box for a startup command or a per-session context: the session is driven by what you type, so pre-seeding it from a chat form makes no sense. A workflow's own `startup_action.json` is run when a session starts, so a workflow with a root object has it here without any flag. A startup command or a context stays a launch-time decision (`run_fastapi_mcp --startup_command`), or the `/initialize` request fields if you are calling the API yourself.
 
@@ -648,7 +658,7 @@ graph LR
     subgraph A[Build-Time]
         A1(Your Python App) --> A2{Coding Agent + integrate-chat-agent skill};
         A2 --> A3(Generated _commands);
-        A3 --> A4(context_inheritance_model.json);
+        A3 --> A4(inherits on each class Context);
         A4 --> A5(Review & refine);
     end
 
@@ -676,8 +686,12 @@ order_agent/                         # <-- The workflow_folderpath
 ├── application/                     # <-- Your app code (untouched)
 │   └── orders.py
 ├── _commands/                       # <-- Command wrappers (generated + edited)
-│   ├── cancel_order.py
-│   └── context_inheritance_model.json
+│   ├── cancel_order.py              #     a global command
+│   ├── Order/                       #     a context: the commands on one order
+│   │   ├── _Order.py                #     its class Context: inherits, parents, get_parent, ...
+│   │   └── update_address.py
+│   ├── _shared/                     #     helper modules the commands import
+│   └── _workflow.py                 #     optional workflow settings (the request splitter's)
 ├── ___command_info/                 # <-- Trained models (generated by `train`)
 └── ___convo_info/                   # <-- NLU caches / conversation logs (run-time)
 
@@ -748,6 +762,9 @@ The base models of the fine-tuned layouts (`workflow`, `per_context`) are config
 # Examples
 fastworkflow examples list
 fastworkflow examples fetch hello_world
+
+# Move a workflow's removed context_inheritance_model.json into inherits declarations
+fastworkflow migrate-contexts <workflow_dir>
 
 # Train intent-detection models (once per command set)
 fastworkflow train <workflow_dir> <env_file> <passwords_file>

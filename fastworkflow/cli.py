@@ -371,6 +371,23 @@ def add_run_parser(subparsers):
     )
     parser_run.set_defaults(func=lambda args: run_with_defaults(args))
 
+def add_migrate_contexts_parser(subparsers):
+    """Add 'migrate-contexts': move a workflow's _commands/context_inheritance_model.json (a removed spelling) into
+    inherits declarations on each class Context, and list the contexts whose parents must be written by hand."""
+    parser = subparsers.add_parser(
+        "migrate-contexts",
+        help="Write inherits = [...] into each context's class Context from _commands/context_inheritance_model.json, "
+             "delete the file, and list the contexts with a get_parent that need parents = [...] written by hand.",
+    )
+    parser.add_argument("workflow_folder", help="Path to the workflow folder")
+
+    def _migrate_main(args):
+        from .migrate_context_declarations import migrate_main
+        sys.exit(migrate_main(args))
+
+    parser.set_defaults(func=_migrate_main)
+
+
 def add_command_parser(subparsers):
     """Add the 'command' group: 'command preview' renders a workflow's planning commands to markdown; 'command run-code'
     runs one call of a command with no model."""
@@ -1087,6 +1104,7 @@ def main():
     add_run_fastapi_mcp_parser(subparsers)
     add_run_chatbot_parser(subparsers)
     add_command_parser(subparsers)
+    add_migrate_contexts_parser(subparsers)
     add_distill_parser(subparsers)
     add_policy_parser(subparsers)
 

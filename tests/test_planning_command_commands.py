@@ -394,7 +394,7 @@ def _plan_request(ctx, wf, lm, **kwargs):
 
 
 def _plan_span(sink):
-    return sink.named("fw.planner.plan")[-1]
+    return sink.named("fw.plan")[-1]
 
 
 def test_a_matched_planning_command_with_params_is_planned_as_a_call_and_expanded(tmp_path, workflow_env,
@@ -416,9 +416,9 @@ def test_a_matched_planning_command_with_params_is_planned_as_a_call_and_expande
     assert "lookup(name=\"Payroll\"" in _prompt(lm, 0)   # the planner is shown the filled call
     span = _plan_span(sink)
     assert span.attributes["plan_source"] == "skill_call"
-    assert span.attributes["skill"] == "lookup"
-    assert span.attributes["skill_args"] == _args(include_risk=True, count=1)
-    assert span.attributes["skill_fallback"] is None
+    assert span.attributes["command"] == "lookup"
+    assert span.attributes["command_args"] == _args(include_risk=True, count=1)
+    assert span.attributes["command_fallback"] is None
     assert span.attributes["plan"].splitlines()[:3] == ["1. open_directory", "2. find_group query=Payroll",
                                                         "3. list_members"]
     # the extra step names no available command of this workflow: dropped
@@ -446,9 +446,9 @@ def test_a_failed_planning_command_call_falls_back_to_the_template_path(tmp_path
     span = _plan_span(sink)
     assert span.attributes["plan_source"] == "text"
     assert span.attributes["plan"] == "1. Show all todo items"
-    assert span.attributes["skill"] == "lookup"
-    assert span.attributes["skill_args"] is None
-    assert "not written in the request" in span.attributes["skill_fallback"]
+    assert span.attributes["command"] == "lookup"
+    assert span.attributes["command_args"] is None
+    assert "not written in the request" in span.attributes["command_fallback"]
 
 
 def test_an_exception_in_the_planning_command_call_falls_back_too(tmp_path, workflow_env, monkeypatch):
@@ -465,9 +465,9 @@ def test_an_exception_in_the_planning_command_call_falls_back_too(tmp_path, work
     _plan(ctx, wf, lm, plan_template="TEMPLATE TEXT", planning_command=_command(tmp_path))
     span = _plan_span(sink)
     assert span.attributes["plan_source"] == "text"
-    assert span.attributes["skill_fallback"] == "RuntimeError: provider down"
+    assert span.attributes["command_fallback"] == "RuntimeError: provider down"
     # Only a refusal of the arguments is put to the user; any other failure is never asked about.
-    assert span.attributes["skill_refusal_asked"] is None
+    assert span.attributes["command_refusal_asked"] is None
     assert ctx._planning_command_refusal is None
 
 
@@ -478,9 +478,9 @@ def test_a_replan_ignores_the_planning_command_command(tmp_path, workflow_env):
     ctx._begin_turn("show my todo items")
     lm = DummyLM([_text_answer()])
     _plan(ctx, wf, lm, trace_trigger="parameter_extraction_error", planning_command=_command(tmp_path))
-    replan = sink.named("fw.planner.replan")[-1]
+    replan = [span for span in sink.named("fw.plan") if span.attributes["trigger"] != "initial"][-1]
     assert replan.attributes["plan_source"] == "text"
-    assert replan.attributes["skill"] is None
+    assert replan.attributes["command"] is None
 
 
 def test_without_a_planning_command_command_the_planner_is_unchanged(workflow_env):
@@ -491,8 +491,8 @@ def test_without_a_planning_command_command_the_planner_is_unchanged(workflow_en
     lm = DummyLM([_text_answer()])
     result = _plan(ctx, wf, lm, plan_template="TEMPLATE TEXT")
     span = _plan_span(sink)
-    assert (span.attributes["plan_source"], span.attributes["skill"], span.attributes["skill_args"],
-            span.attributes["skill_fallback"]) == ("text", None, None, None)
+    assert (span.attributes["plan_source"], span.attributes["command"], span.attributes["command_args"],
+            span.attributes["command_fallback"]) == ("text", None, None, None)
     assert result == "show my todo items\n\nExecute these next steps:\n1. Show all todo items"
 
 
@@ -703,10 +703,10 @@ def test_the_planner_path_checks_verified_params_with_jev(tmp_path, workflow_env
     assert calls == [(jev, "lookup", REQUEST)]
     span = _plan_span(sink)
     assert span.attributes["plan_source"] == "skill_call"
-    assert span.attributes["skill_args"]["include_risk"] is True
+    assert span.attributes["command_args"]["include_risk"] is True
     assert "assess_risk" in span.attributes["plan"]
     # the verdict read is on the planner span, sure or not
-    assert "verify include_risk=True (0.92, sure)" in span.attributes["skill_notes"]
+    assert "verify include_risk=True (0.92, sure)" in span.attributes["command_notes"]
 
 
 def test_a_verify_classifier_call_leaves_a_span_under_the_turn_and_its_verdict_is_read(tmp_path, workflow_env):
@@ -1200,7 +1200,7 @@ def test_a_refused_planning_command_call_is_planned_again_with_the_refusal(tmp_p
     assert "second is the other record" in extractor.prompts[1]
     span = _plan_span(sink)
     assert span.attributes["plan_source"] == "skill_call"
-    assert span.attributes["skill_args"] == {"first": "Payroll", "second": "Billing", "kind": "group"}
+    assert span.attributes["command_args"] == {"first": "Payroll", "second": "Billing", "kind": "group"}
 
 
 def test_a_required_argument_the_extractor_leaves_missing_is_taken_from_the_typed_fill(tmp_path, workflow_env,
@@ -1220,9 +1220,9 @@ def test_a_required_argument_the_extractor_leaves_missing_is_taken_from_the_type
     assert len(extractor.prompts) == 1 and len(lm.history) == 2
     span = _plan_span(sink)
     assert span.attributes["plan_source"] == "skill_call"
-    assert span.attributes["skill_args"] == {"first": "Payroll", "second": "Billing", "kind": "group"}
+    assert span.attributes["command_args"] == {"first": "Payroll", "second": "Billing", "kind": "group"}
     assert any(note.startswith("typed fill fallback for first: missing required argument first")
-               for note in span.attributes["skill_notes"])
+               for note in span.attributes["command_notes"])
 
 
 def test_a_second_refusal_falls_back_to_the_template_path(tmp_path, workflow_env, monkeypatch):
@@ -1243,7 +1243,7 @@ def test_a_second_refusal_falls_back_to_the_template_path(tmp_path, workflow_env
     assert len(extractor.prompts) == 2 and len(lm.history) == 1
     span = _plan_span(sink)
     assert span.attributes["plan_source"] == "text"
-    assert "first and second are both" in span.attributes["skill_fallback"]
+    assert "first and second are both" in span.attributes["command_fallback"]
 
 
 def test_a_guard_refusal_is_planned_again_with_the_refusal(tmp_path, workflow_env, monkeypatch, no_planner_key):
@@ -1264,8 +1264,8 @@ def test_a_guard_refusal_is_planned_again_with_the_refusal(tmp_path, workflow_en
     assert "'Finance' is not written" in extractor.prompts[1]
     span = _plan_span(sink)
     assert span.attributes["plan_source"] == "skill_call"
-    assert span.attributes["skill_fallback"] is None
-    assert span.attributes["skill_args"] == {"first": "Payroll", "second": "Billing", "kind": "group"}
+    assert span.attributes["command_fallback"] is None
+    assert span.attributes["command_args"] == {"first": "Payroll", "second": "Billing", "kind": "group"}
 
 
 def test_a_second_guard_refusal_falls_back_to_the_template_path(tmp_path, workflow_env, monkeypatch):
@@ -1280,7 +1280,7 @@ def test_a_second_guard_refusal_falls_back_to_the_template_path(tmp_path, workfl
 
     assert len(extractor.prompts) == 2   # two extractions
     assert len(lm.history) == 2          # the typed fill fallback (refused as well), then the text planner
-    assert "not written in the request" in _plan_span(sink).attributes["skill_fallback"]
+    assert "not written in the request" in _plan_span(sink).attributes["command_fallback"]
 
 
 def test_a_one_element_list_argument_stands_for_its_element(tmp_path, workflow_env, monkeypatch):
@@ -1296,7 +1296,7 @@ def test_a_one_element_list_argument_stands_for_its_element(tmp_path, workflow_e
     assert len(lm.history) == 1
     span = _plan_span(sink)
     assert span.attributes["plan_source"] == "skill_call"
-    assert span.attributes["skill_args"] == {"first": "Payroll", "second": "Billing", "kind": "group"}
+    assert span.attributes["command_args"] == {"first": "Payroll", "second": "Billing", "kind": "group"}
 
 
 # ---------------------------------------------------------------- the template's grid (fix-6llp.16)
