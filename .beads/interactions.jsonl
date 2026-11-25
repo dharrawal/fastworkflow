@@ -1611,3 +1611,4 @@
 {"id":"int-134ef8bfe5602f89db54e521350fb74d","kind":"field_change","created_at":"2026-11-24T15:11:46.034065191Z","actor":"Dhar Rawal","issue_id":"fix-ftdl.10","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Closed"}}
 {"id":"int-1f8a027221d42a01a4c98f1de822a669","kind":"field_change","created_at":"2026-11-24T15:11:47.410727289Z","actor":"Dhar Rawal","issue_id":"fix-ftdl.11","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Closed"}}
 {"id":"int-83c7d91128273e4d99bcbae4ec67992c","kind":"field_change","created_at":"2026-11-24T16:19:50.129148623Z","actor":"Dhar Rawal","issue_id":"fix-qjne.26","extra":{"field":"status","new_value":"in_progress","old_value":"open"}}
+{"id":"int-623e008d8c81c07b6eee553dd54fc4d5","kind":"field_change","created_at":"2026-11-25T00:37:59.639857678Z","actor":"Dhar Rawal","issue_id":"fix-qjne.34","extra":{"field":"priority","new_value":"1","old_value":"2"}}
