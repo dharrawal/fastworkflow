@@ -688,10 +688,11 @@ def rechecked(workflow, item: "SubTask") -> "SubTask":
                for p in command.params}
         check, refused_without_field = "", ""
         with intent_loop.on_owner_record(workflow, command.name):
-            gaps = planning_commands.argument_gaps(command, raw, item.goal).from_earlier(earlier)
+            # on a tie the gap is the validators' refusal (``one_guard.validators_first``), its message the line
+            gaps = planning_commands.argument_gaps(command, raw, item.goal, workflow=workflow).from_earlier(earlier)
             if gaps.invalid:
                 name, why = gaps.invalid[0]
-                check = f"{name}={raw.get(name)!r} {why}"
+                check = gaps.reason or f"{name}={raw.get(name)!r} {why}"
             elif gaps.missing:
                 check = "missing required argument " + ", ".join(gaps.missing)
             elif not earlier:
@@ -1220,7 +1221,7 @@ def _partial_inputs(workflow, item: SubTask, sub_task: str, values: dict, fields
         return [], refusal, tuple(missing)
     try:
         raw = {p.name: planning_commands._given_or_none(values.get(p.name)) for p in command.params}
-        gaps = planning_commands.argument_gaps(command, raw, sub_task)
+        gaps = planning_commands.argument_gaps(command, raw, sub_task, workflow=workflow)
     except Exception as exc:  # noqa: BLE001 - the draft is advisory
         logger.warning("could not tell which arguments of %s are still missing (%s: %s)", item.means.name,
                        type(exc).__name__, exc)

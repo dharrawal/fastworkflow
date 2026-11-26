@@ -303,7 +303,8 @@ def _values_question(resolution: PlanResolution, plan, turn: Turn) -> Optional[s
     raw = {p.name: next((each.value for each in item.inputs if each.name == p.name and each.value is not None), None)
            for p in command.params}
     with intent_loop.on_owner_record(turn.workflow, command.name):   # its validators read the record it will run on
-        gaps = planning_commands.argument_gaps(command, raw, item.goal).from_earlier(_from_earlier_parts(item))
+        gaps = planning_commands.argument_gaps(command, raw, item.goal, workflow=turn.workflow).from_earlier(
+            _from_earlier_parts(item))
     if item.check_screened and not gaps.screened:
         # the draft refused an extracted value as not given (a pronoun, a word of the workflow's vocabulary): the question
         # says why, as the `/` question does

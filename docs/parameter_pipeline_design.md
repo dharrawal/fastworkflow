@@ -45,7 +45,10 @@ CME's `_extract_and_merge_missing_parameters` call the package.
   the name."), which goes on the check's notes (`argument_notes`), names the field on the extraction span
   (`argument_left_empty`), and is one plain line on the review item (`SubTask.check_notes`, drawn by the chat page's form)
   and before a parameter question; it is not a refusal (no second fill, no "Cannot run as shown"). A REQUIRED one, or a
-  value the user does not write at all, is refused. The count is of the user's own request for the turn when the turn
+  value the user does not write at all, is refused; when the `Input`'s validators, run on the same values (the value
+  still in both fields), refuse too, their refusal is the one reported, handled as that path handles a validator's
+  refusal (validators first on a tie, `check.validators_first`, bd fix-qjne.38; a validator that raises is no refusal,
+  and the duplicate rule's stands). The count is of the user's own request for the turn when the turn
   binds it (`check.user_written`, bound on the plan and agent path to the turn's message; `check.written_times`): a split
   part or an agent's text that repeats a name the user wrote once does not let two fields hold it, and a value the
   user's request does not write (an earlier step's output) is counted in the checked text. A value written only inside

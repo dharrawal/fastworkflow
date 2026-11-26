@@ -1855,8 +1855,17 @@ Today's date is {today}.
         open_now = set(missing_fields) | {field.split(" '")[0].strip() for field in invalid_fields}
         guarded = command if not open_now else dataclass_replace(
             command, params=tuple(p for p in command.params if p.name not in open_now))
+        rules = None
         if guarded.params:
             guard_refusal = self._check_option_arguments(guarded, cmd_parameters, diagnostics, verdicts)
+            from fastworkflow.parameters.check import validators_first
+
+            if guard_refusal is not None and not open_now and validators_first(getattr(guard_refusal, "gap", None)):
+                # validators first on a tie (bd fix-qjne.38): the duplicate rule refused; when the validators refuse the
+                # same values too, theirs is the refusal reported (below, as any validator refusal); else the guard's
+                tied = self._check_input_rules(command, cmd_parameters, app_workflow, command_text)
+                if tied.message is not None and not tied.raised:
+                    rules, guard_refusal = tied, None
             if diagnostics is not None:
                 # the guard's own text (the retry's note reads it); a refusal of an earlier attempt is not this one's
                 diagnostics.pop("argument_refusal", None)
@@ -1873,7 +1882,8 @@ Today's date is {today}.
                 is_valid = False
         # A declared pattern, after the guard has widened a marked id: the one rule (``rules.pattern_refusal``, which
         # the validators' driver applies too), here for every value not already open, so one question names them all.
-        open_now = set(missing_fields) | {field.split(" '")[0].strip() for field in invalid_fields}
+        open_now = (set(missing_fields) | {field.split(" '")[0].strip() for field in invalid_fields}
+                    | set(rules.fields if rules is not None else ()))
         for name, info in type(cmd_parameters).model_fields.items():
             value = getattr(cmd_parameters, name, None)
             if name not in open_now and value != NOT_FOUND and (mismatch := pattern_refusal(name, info, value)):
@@ -1882,8 +1892,9 @@ Today's date is {today}.
                 is_valid = False
         # The Input's validators (the former hook: after the option checks). A refusal with a field asks for that
         # field again with its message; one without, or a call error, answers the call.
-        if is_valid:
-            rules = self._check_input_rules(command, cmd_parameters, app_workflow, command_text)
+        if is_valid or rules is not None:
+            if rules is None:
+                rules = self._check_input_rules(command, cmd_parameters, app_workflow, command_text)
             if diagnostics is not None:
                 # `ran` says whether the Input declares a validator (False is the honest fact for a command with none).
                 # `changed_fields`: the fields the validators wrote back (the slot-binding record reads it as the

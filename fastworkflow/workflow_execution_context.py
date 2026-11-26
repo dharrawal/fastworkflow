@@ -5637,7 +5637,7 @@ class WorkflowExecutionContext:
             with intent_loop.on_owner_record(self._app_workflow, name):
                 gaps = (planning_commands.argument_gaps(
                     command, dict(reviewed.values) if reviewed is not None else dict(resolved.named),
-                    checked_text) if command is not None else None)
+                    checked_text, workflow=self._app_workflow) if command is not None else None)
             return self._not_run_part(
                 command=name, means=review_proposals.MEANS_PLANNING,
                 reason=f"it cannot run as planned ({gaps.describe() if gaps is not None and gaps.names else refusal}), "

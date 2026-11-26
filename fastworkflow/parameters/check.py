@@ -87,6 +87,19 @@ NO_VALUE_WHY = "is punctuation, not a value"
 PLACEHOLDER_WHY = "is a placeholder, not a value"
 #: The refusal of one of two marked fields that hold one value the request writes fewer times (the duplicate rule).
 ALSO_VALUE_OF_WHY = "is also the value of {other}"
+#: ``Gap.code`` of the duplicate rule's refusal.
+DUPLICATE_CODE = "role"
+
+
+def validators_first(gap: Optional["Gap"]) -> bool:
+    """THE ordering rule of a guard's refusal and the ``Input`` validators' (bd fix-qjne.38, "validators first on a
+    tie"), on both kinds of command: when the duplicate rule refuses (*gap*), the caller runs the ``Input``'s validators
+    (``parameters.validate``, the one driver) on the same values, the duplicated value still in both fields, and when
+    they refuse too, THEIR refusal is the one reported, worded and handled as that path handles a validator's refusal (one
+    that names a field is asked about, one that names none answers the call); when they pass, or a validator raises,
+    the duplicate rule's refusal stands. What is refused does not change, only whose message is reported. The rule's
+    other outcome (an optional field left not given with a note) is no refusal and runs no validator early."""
+    return gap is not None and gap.code == DUPLICATE_CODE
 
 #: ``Gap.state``.
 MISSING = "missing"
@@ -606,7 +619,7 @@ def _duplicate_rule(command, args: dict, request: str, folded: str, stop, pc, no
             loser = next((p for p in unfit if not p.required), unfit[0])
             other = next(p for p in fields if p is not loser)
             if loser.required or times == 0:
-                stop(loser, ALSO_VALUE_OF_WHY.format(other=other.name), args[loser.name], code="role")
+                stop(loser, ALSO_VALUE_OF_WHY.format(other=other.name), args[loser.name], code=DUPLICATE_CODE)
             notes.append(left_empty_line(loser.name, str(args[loser.name]), times, other.name))
             args[loser.name] = loser.default
             fields = [p for p in fields if p is not loser]

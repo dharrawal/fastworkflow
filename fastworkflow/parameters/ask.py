@@ -194,7 +194,10 @@ def _sentence(task: str, missing: Sequence[str], invalid: Sequence[tuple[str, st
 
 
 def _gaps_text(command: Any, gaps: Any) -> str:
-    return _sentence(_label(command.name), gaps.missing, gaps.invalid, screened=gaps.screened)
+    # ``reason`` beside refused values: the validators' own message on a tie (``planning_commands.argument_gaps``)
+    reason = getattr(gaps, "reason", "")
+    return _sentence(_label(command.name), gaps.missing, gaps.invalid, [reason] if reason and gaps.invalid else (),
+                     screened=gaps.screened)
 
 
 def _refusal_text(command: Any, refusal: Any) -> str:

@@ -270,6 +270,12 @@ def refusal_from_gaps(gaps, values: Optional[dict] = None):
     from fastworkflow.parameters import check
 
     values = values or {}
+    if gaps.reason and gaps.invalid and not gaps.missing:
+        # the validators' refusal on a tie (``planning_commands.argument_gaps``): worded as a ``Refused(field=...)``
+        error = planning_commands.PlanningCommandInputError(gaps.reason, fields=[name for name, _ in gaps.invalid])
+        error.refusal = gaps.reason
+        error.gaps = gaps
+        return error
     gap = None
     if gaps.missing:
         text = f"missing required argument {gaps.missing[0]}"

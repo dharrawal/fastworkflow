@@ -335,6 +335,8 @@ class PlanningCommandInputError(PlanningCommandCallError):
         #: The rule that refused (``parameters.check.Gap.code``) when a guard raised it, else empty. ``missing``
         #: says a required argument is simply not there: nothing the model produced was refused.
         self.code: str = ""
+        #: The arguments as the guards held them when they refused (``check_arguments``), else empty.
+        self.values: dict = {}
 
 
 #: The refusals of a free-text value that ``refusal_question`` asks for without quoting the value:
@@ -396,12 +398,18 @@ def refusal_question(command: PlanningCommandCommand, refusal: PlanningCommandIn
     return ask.word(form=ask.FORM_REFUSAL, command=command, refusal=refusal).text
 
 
-def argument_gaps(command: PlanningCommandCommand, raw: dict, request: str, verdicts: dict | None = None) -> Extraction:
+def argument_gaps(command: PlanningCommandCommand, raw: dict, request: str, verdicts: dict | None = None,
+                  workflow=None) -> Extraction:
     """Every required argument *raw* leaves missing or refused (``check_arguments`` stops at the first): the guards run
     again with each gap's parameter left out, until they pass or refuse something that names no argument. The values
     of the other arguments, as the guards checked them, are kept in ``values`` (the ones the request gave, not defaults).
-    No model call."""
-    return _gaps_and_checked(command, raw, request, verdicts)[0]
+    No model call.
+
+    On a tie (``one_guard.validators_first``: the duplicate rule's refusal is the ONLY gap, every other value present)
+    the ``Input``'s validators run on the same values (``check_input``, *workflow* in their context), and when they
+    refuse, their refusal is the gap (``_validators_on_tie``). With any other gap they are not run: validators on
+    incomplete values are not reliable, and the framework's wording stands."""
+    return _gaps_and_checked(command, raw, request, verdicts, workflow)[0]
 
 
 def checked_around_gaps(command: PlanningCommandCommand, raw: dict, request: str,
@@ -414,7 +422,8 @@ def checked_around_gaps(command: PlanningCommandCommand, raw: dict, request: str
     return (dict(checked.values), list(checked.notes)) if checked is not None else ({}, [])
 
 
-def _gaps_and_checked(command: PlanningCommandCommand, raw: dict, request: str, verdicts: dict | None):
+def _gaps_and_checked(command: PlanningCommandCommand, raw: dict, request: str, verdicts: dict | None,
+                      workflow=None):
     """``(Extraction, Checked)``: the gaps of ``argument_gaps``, and the guards' result once they pass with the gaps
     left out (None when they stop at a refusal that names no argument)."""
     missing: list[str] = []
@@ -423,6 +432,7 @@ def _gaps_and_checked(command: PlanningCommandCommand, raw: dict, request: str, 
     work = command
     args: dict = {}
     passed = None
+    tie = None        # the values the duplicate rule refused, when its refusal was the first gap
     while True:
         checked = one_guard.check_plan(work, raw, request, verdicts)
         stop = checked.stop
@@ -432,6 +442,8 @@ def _gaps_and_checked(command: PlanningCommandCommand, raw: dict, request: str, 
             break
         if stop.call:     # the check finds no such argument in the request at all: it names no argument to ask for
             break
+        if not missing and not invalid and one_guard.validators_first(stop):
+            tie = dict(checked.values)
         (missing.append(stop.name) if stop.state == one_guard.MISSING else invalid.append((stop.name, stop.why)))
         if stop.screened:
             screened.append((stop.name, stop.screened))
@@ -440,8 +452,39 @@ def _gaps_and_checked(command: PlanningCommandCommand, raw: dict, request: str, 
     left_empty = ask.left_empty_lines(checked.notes)
     kept = {name: value for name, value in args.items() if not _empty(raw.get(name)) and name not in missing
             and name not in {n for n, _ in invalid} and name not in left_empty}
-    return (Extraction(missing=tuple(missing), invalid=tuple(invalid), values=kept, screened=tuple(screened),
-                       left_empty=tuple(left_empty.values())), passed)
+    gaps = Extraction(missing=tuple(missing), invalid=tuple(invalid), values=kept, screened=tuple(screened),
+                      left_empty=tuple(left_empty.values()))
+    if tie is not None and passed is not None and len(gaps.names) == 1:
+        gaps = _validators_on_tie(command, gaps, tie, raw, request, workflow, left_empty)
+    return gaps, passed
+
+
+def _validators_on_tie(command: PlanningCommandCommand, gaps: Extraction, tie: dict, raw: dict, request: str,
+                       workflow, left_empty: dict) -> Extraction:
+    """*gaps* (the duplicate rule's refusal alone) on a tie: the ``Input``'s validators run on *tie* (the values the
+    rule refused, the duplicated value still in both fields), as ``checked_arguments`` runs them (bd fix-qjne.38). A
+    refusal that names arguments is the gap: those arguments are refused with the validator's message (``invalid``,
+    with the message as ``reason``, which the question and the review line show) and the other values are kept as the
+    guards held them; the validators' rewrites are never kept. A refusal that names no argument is what a call-level
+    refusal is here (``stop.call``): nothing to ask and no value kept, and the run reports it. When they pass, or a
+    validator raises, *gaps* stands."""
+    if command.input_model is None:
+        return gaps
+    try:
+        check_input(command, tie, request, workflow)
+    except PlanningCommandInputError as theirs:
+        params = {p.name for p in command.params}
+        fields = tuple(name for name in dict.fromkeys(theirs.fields) if name in params)
+        if not fields:
+            return Extraction(left_empty=gaps.left_empty)
+        message = getattr(theirs, "refusal", None) or str(theirs)
+        values = {name: value for name, value in tie.items() if not _empty(raw.get(name)) and name not in fields
+                  and name not in left_empty}
+        return Extraction(invalid=tuple((name, message) for name in fields), values=values, reason=message,
+                          left_empty=gaps.left_empty)
+    except PlanningCommandCallError:   # a validator that raised is no refusal: the duplicate rule's stands
+        pass
+    return gaps
 
 
 def refusal_gaps(command: PlanningCommandCommand, refusal: PlanningCommandInputError) -> Extraction:
@@ -4169,6 +4212,7 @@ def check_arguments(command: PlanningCommandCommand, raw: dict, request: str,
         error = (PlanningCommandCallError if stop.call else PlanningCommandInputError)(stop.message)
         error.code = stop.code
         error.gap = stop
+        error.values = dict(checked.values)   # the arguments as the guards held them when they refused
         raise error
     return checked.values, checked.notes
 
@@ -4662,9 +4706,21 @@ def checked_arguments(command: PlanningCommandCommand, raw: dict, request: str, 
     whose *request* also holds text the framework wrote (the answers of the turn's earlier parts, so that a value an
     earlier part found counts as written) passes the user's own words here, because a validator reads its
     ``command_text`` as what the user said (bd fix-ftdl.10). Not given, the validators read *request*.
-    Raises PlanningCommandInputError when a check refuses them."""
-    args, notes = check_arguments(command, raw, request, verdicts)
-    return _validate_arguments(command, args, request if user_text is None else user_text, workflow, notes), notes
+    Raises PlanningCommandInputError when a check refuses them. When the duplicate rule refuses and the validators,
+    run on the same arguments, refuse too, the validators' refusal is raised (``one_guard.validators_first``)."""
+    text = request if user_text is None else user_text
+    try:
+        args, notes = check_arguments(command, raw, request, verdicts)
+    except PlanningCommandInputError as refused:
+        if one_guard.validators_first(refused.gap) and command.input_model is not None:
+            try:
+                check_input(command, refused.values, text, workflow)
+            except PlanningCommandInputError as theirs:
+                raise theirs from None
+            except PlanningCommandCallError:   # a validator that raised is no refusal: the duplicate rule's stands
+                pass
+        raise refused
+    return _validate_arguments(command, args, text, workflow, notes), notes
 
 
 def typed_fallback_arguments(command: PlanningCommandCommand, request: str, available_commands: str, raw: dict,
@@ -4746,7 +4802,7 @@ def typed_planning_call(command: PlanningCommandCommand, request: str, available
         except PlanningCommandInputError as final:
             # ``check_arguments`` stops at the first gap: work out every one, so the question names them all
             # and the values the call already has are kept.
-            final.gaps = argument_gaps(command, raw, request, verdicts)
+            final.gaps = argument_gaps(command, raw, request, verdicts, workflow)
             raise
     if extracted.retried:
         notes.insert(0, f"first call refused, planned again: {extracted.first.detail}")
