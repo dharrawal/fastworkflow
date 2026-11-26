@@ -509,15 +509,15 @@ _turn_types_namespace = {
 TurnOutput.model_rebuild(_types_namespace=_turn_types_namespace)
 TurnResult.model_rebuild(_types_namespace=_turn_types_namespace)
 
-# Observability sinks (fastworkflow.tracing / fastworkflow.metrics, both
+# Observability sinks (fastworkflow.observability.tracing / fastworkflow.observability.metrics, both
 # stdlib-only). Embedders implement TraceSink/MetricsSink and wire them via
 # WorkflowExecutionContext (observability design §3.1).
-from fastworkflow.tracing import (
+from fastworkflow.observability.tracing import (
     Span as Span,
     TraceSink as TraceSink,
     NoOpTraceSink as NoOpTraceSink,
 )
-from fastworkflow.metrics import (
+from fastworkflow.observability.metrics import (
     MetricsSink as MetricsSink,
     NoOpMetricsSink as NoOpMetricsSink,
     LoggingMetricsSink as LoggingMetricsSink,
@@ -617,8 +617,6 @@ __all__ = (
     "get_internal_workflow_path",
     "get_workflow_id",
     "init",
-    "kvstore",
-    "metrics",
     "mint_turn_key",
     "mmh3",
     "model_validator",
@@ -626,12 +624,7 @@ __all__ = (
     "os",
     "pop_active_workflow",
     "push_active_workflow",
-    "session_state_store",
-    "state_paths",
-    "state_serialization",
-    "storage_keys",
     "time",
-    "tracing",
     "turn",
     "utils",
     "workflow",

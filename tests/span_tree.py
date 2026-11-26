@@ -14,7 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Any, Iterable, Optional
 
-from fastworkflow import tracing
+from fastworkflow.observability import tracing
 
 
 @dataclass

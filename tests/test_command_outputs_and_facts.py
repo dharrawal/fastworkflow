@@ -15,7 +15,8 @@ import pytest
 from pydantic import BaseModel, Field, model_validator
 
 import fastworkflow
-from fastworkflow import CommandOutput, CommandResponse, tracing
+from fastworkflow import CommandOutput, CommandResponse
+from fastworkflow.observability import tracing
 from fastworkflow.observability import store as observability_store
 import fastworkflow.observation_offloading.facts
 from fastworkflow.observation_offloading import (

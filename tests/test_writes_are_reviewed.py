@@ -115,7 +115,8 @@ def test_a_named_write_is_a_fast_path_and_a_write_the_model_or_a_close_spelling_
 @pytest.mark.parametrize("unattended", [False, True])
 @pytest.mark.parametrize("origin", [Origin.USER, Origin.AGENT])
 def test_would_ask_is_the_gates_own_decision(book, grant_root, monkeypatch, annotation, granted, unattended, origin):
-    from fastworkflow import approval_grants, state_paths
+    from fastworkflow import approval_grants
+    from fastworkflow.session import state_paths
 
     monkeypatch.setattr("fastworkflow.approval_binding.command_approval", lambda folder, name: annotation)
     store = ab.store_for(book.wf)
@@ -234,7 +235,8 @@ def test_a_guessed_write_that_will_be_asked_for_approval_is_asked_once(book, mon
 
 @pytest.mark.parametrize("annotated_library", ["REQUIRED_UNTIL_DELEGATED"], indirect=True)
 def test_a_standing_grant_is_not_consent_to_the_models_choice_so_the_review_asks(book, grant_root, monkeypatch):
-    from fastworkflow import approval_grants, state_paths
+    from fastworkflow import approval_grants
+    from fastworkflow.session import state_paths
 
     store = ab.store_for(book.wf)
     approval_grants.record(approval_grants.identity_key(store.surface, store.channel),
@@ -390,7 +392,8 @@ def test_on_the_plan_path_an_approval_only_command_is_reviewed_only_when_its_app
         book, grant_root, monkeypatch):
     """The plan path runs the part as the agent's call: with no standing grant its approval question asks (that is its
     yes, so the part keeps the fast path); with a grant nothing would ask, so the model's pick is reviewed."""
-    from fastworkflow import approval_grants, state_paths
+    from fastworkflow import approval_grants
+    from fastworkflow.session import state_paths
 
     close = resolution.part_intent(book.wf, CLOSE_SHOW)
     assert (close.decided_by, close.command) == (resolution.BY_FUZZY_NAME, SHOW)

@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import unquote
 
-from fastworkflow import state_paths
+from fastworkflow.session import state_paths
 from fastworkflow.observability.archive_files import (
     archives_directory,
     list_archived_conversations,
@@ -32,7 +32,7 @@ from fastworkflow.observability.store import (
     IncompatibleObservabilityDB,
     open_live_store,
 )
-from fastworkflow.storage_keys import encode_path_component
+from fastworkflow.session.storage_keys import encode_path_component
 
 CONVERSATIONS_PREFIX = "/api/archived-conversations"
 

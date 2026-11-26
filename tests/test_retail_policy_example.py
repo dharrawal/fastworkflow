@@ -16,7 +16,7 @@ import importlib.util
 import json
 from pathlib import Path
 
-from fastworkflow.policy_decision import (
+from fastworkflow.policy.policy_decision import (
     USER_MESSAGE,
     BeforeFinishInput,
     BeforeSideEffectInput,
@@ -48,7 +48,7 @@ FACTS = dataclasses.replace(example.FACTS, write_commands=WRITES)
 
 
 def test_the_example_loads_through_the_policy_loader(initialized_fastworkflow):
-    from fastworkflow.policy_loader import load_policy
+    from fastworkflow.policy.policy_loader import load_policy
 
     assert not example.FACTS.write_commands
     point, facts = load_policy(str(_PATH.parents[1]))
@@ -169,8 +169,8 @@ def test_a_workflow_whose_commands_cannot_be_read_fails_the_policy_load_and_says
     import pytest
 
     import fastworkflow
-    from fastworkflow.policy_decision import PolicyError
-    from fastworkflow.policy_loader import load_policy
+    from fastworkflow.policy.policy_decision import PolicyError
+    from fastworkflow.policy.policy_loader import load_policy
 
     monkeypatch.setattr(fastworkflow, "RoutingRegistry", None)       # as before fastworkflow.init
     with pytest.raises(PolicyError, match="could not be read .* the table's write rules would never fire"):

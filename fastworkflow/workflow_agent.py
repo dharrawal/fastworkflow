@@ -25,11 +25,11 @@ from dspy.adapters.types.tool import Tool
 from dspy.experimental import Choice, TypeSafe
 
 import fastworkflow
-from fastworkflow import tracing
+from fastworkflow.observability import tracing
 from fastworkflow import approval_binding
 from fastworkflow import intent_loop
 from fastworkflow import turn_progress
-from fastworkflow import subtask_pool
+from fastworkflow.utils import subtask_pool
 from fastworkflow import planning_commands
 from fastworkflow.planning_commands import (
     PlanningCommandCommand, PlanningCommandFormatError, PlanningCommandInputError, typed_planning_call, refusal_question,
@@ -38,7 +38,7 @@ from fastworkflow.split_merge import (
     JoinedSubtask, Reduction, definite_descriptions, merge_subtasks, reduce_to_cap, request_subjects, subjects_in,
     unnamed_subjects, with_referent, without_repeated_clauses)
 from fastworkflow.utils.logging import logger
-from fastworkflow.policy_runtime import policy_of
+from fastworkflow.policy.policy_runtime import policy_of
 from fastworkflow.workflow_execution_context import CommandCancelledError
 from fastworkflow.utils import dspy_utils
 from fastworkflow.command_directory import (
@@ -819,7 +819,7 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
     # final-answer synthesis summarizes it.
     # A command the policy blocked, or a write refused inside a read-only planning command's phase
     # (command_writes), never ran, so it is not an executed action; what ran is also what the policy
-    # remembers (fastworkflow.policy_runtime).
+    # remembers (fastworkflow.policy.policy_runtime).
     artifacts = getattr(command_output.command_response, "artifacts", None) or {}
     if not (artifacts.get("policy_blocked") or artifacts.get("write_refused")):
         _append_action_record(chat_session_obj, action_record(command, command_output, response_text))
@@ -1238,7 +1238,7 @@ def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession, max_i
     )
     agent.on_step_end = lambda: _end_repeat_step(chat_session_obj)
     # The policy verifier (the workflow's _policy/table.py); nothing without one.
-    from fastworkflow.policy_loader import attach_policy
+    from fastworkflow.policy.policy_loader import attach_policy
 
     attach_policy(agent, chat_session_obj)
     return agent
@@ -3114,7 +3114,7 @@ def build_query_with_next_steps(user_query: str,
     # on the session (set only during a DistillationSession planning pass).
     planning_capture = getattr(chat_session_obj, '_planning_steps_capture', None)
     if planning_capture is not None:
-        from fastworkflow.distillation import PlanningStep
+        from fastworkflow.evaluation.distillation import PlanningStep
         planning_capture.append(PlanningStep(
             step_number=len(planning_capture),
             user_query=user_query,

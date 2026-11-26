@@ -37,7 +37,7 @@ import litellm  # noqa: F401  (must precede dspy; see fastworkflow/utils/dspy_ut
 import dspy
 
 import fastworkflow
-from fastworkflow import tracing
+from fastworkflow.observability import tracing
 from fastworkflow.turn import TurnStatus
 from fastworkflow.utils.logging import logger
 from fastworkflow.utils import dspy_utils
@@ -693,8 +693,8 @@ class DistillationSession:
 
         # The pass's policy verifier (when enabled) starts from what the
         # session's own agent knows of the conversation, and sees this message
-        # as its turn, as a live turn would (fastworkflow.policy_runtime).
-        from fastworkflow.policy_runtime import policy_of
+        # as its turn, as a live turn would (fastworkflow.policy.policy_runtime).
+        from fastworkflow.policy.policy_runtime import policy_of
 
         if (policy := policy_of(agent)) is not None:
             if (earlier := policy_of(original_agent)) is not None:
@@ -861,7 +861,7 @@ class DistillationSession:
         self.last_execution_reasoning = ""
 
         # Load existing insights for dedup
-        from fastworkflow.utils.insights_loader import load_workflow_insights
+        from fastworkflow.evaluation.insights_loader import load_workflow_insights
 
         existing_insights = (
             load_workflow_insights(self._workflow_folderpath(), "execution_agent") or ""
@@ -988,7 +988,7 @@ class DistillationSession:
         self.last_planning_reasoning = ""
 
         # Load existing planning insights for dedup
-        from fastworkflow.utils.insights_loader import load_workflow_insights
+        from fastworkflow.evaluation.insights_loader import load_workflow_insights
 
         existing_insights = (
             load_workflow_insights(self._workflow_folderpath(), "planning_agent") or ""

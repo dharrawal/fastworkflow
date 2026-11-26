@@ -21,7 +21,7 @@ from fastworkflow import intent_loop
 from fastworkflow import parameter_clarification
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import model_of, park
 from fastworkflow.run_fastapi_mcp import checkpoint
-from fastworkflow.session_state_store import SCHEMA_VERSION
+from fastworkflow.session.session_state_store import SCHEMA_VERSION
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 
 
@@ -340,7 +340,7 @@ def test_v1_blob_is_refused_rather_than_partly_restored(
     initialized_fastworkflow, todo_workflow_path
 ):
     """Schema 1 lacked exactly the fields whose absence made restore wrong."""
-    from fastworkflow.session_state_store import IncompatibleSessionState
+    from fastworkflow.session.session_state_store import IncompatibleSessionState
 
     channel_id = f"v1_{uuid.uuid4().hex[:8]}"
     ctx = _make_ctx(todo_workflow_path, channel_id)

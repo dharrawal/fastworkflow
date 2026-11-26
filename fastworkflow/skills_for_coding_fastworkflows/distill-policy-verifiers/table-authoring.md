@@ -6,7 +6,7 @@ Put it at `<workflow>/_policy/table.py`; the workflow enforces it from then on.
 ## Facts: what the workflow declares
 
 ```python
-from fastworkflow.policy_decision import ContractFacts
+from fastworkflow.policy.policy_decision import ContractFacts
 
 FACTS = ContractFacts(
     id_patterns=(r"T-\d+",),          # identifier shapes; default: _commands/_workflow.py identifier_patterns
@@ -71,7 +71,7 @@ The history spans the whole conversation, not one turn.
 ```python
 import re
 
-from fastworkflow.policy_decision import DecisionPhase, DecisionTable, PolicyOutcome, PolicyRow
+from fastworkflow.policy.policy_decision import DecisionPhase, DecisionTable, PolicyOutcome, PolicyRow
 
 BEFORE_WRITE = frozenset({DecisionPhase.BEFORE_SIDE_EFFECT})
 
@@ -111,7 +111,7 @@ How rows behave:
 ## Testing a row
 
 ```python
-from fastworkflow.policy_decision import BeforeSideEffectInput, CommandRecord
+from fastworkflow.policy.policy_decision import BeforeSideEffectInput, CommandRecord
 
 history = (CommandRecord("list_tickets", {}, "T-1, T-2"),
            CommandRecord("get_ticket", {"ticket_id": "T-1"}, '{"id": "T-1"}'))

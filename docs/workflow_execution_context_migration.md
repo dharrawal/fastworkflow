@@ -70,7 +70,7 @@ Serialized fields include: `react` (trajectory, idx, input_args, iteration_count
 
 ### SessionStateStore backends
 
-Factory: `fastworkflow.session_state_store.get_session_state_store()`
+Factory: `fastworkflow.session.session_state_store.get_session_state_store()`
 
 | Env | Backend |
 | --- | --- |

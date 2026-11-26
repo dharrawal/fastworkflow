@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow import tracing
+from fastworkflow.observability import tracing
 from fastworkflow.turn import TurnStatus
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 from tests import span_tree

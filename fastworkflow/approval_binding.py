@@ -29,7 +29,8 @@ from enum import Enum
 from typing import Any, Optional
 
 import fastworkflow
-from fastworkflow import approval_grants, review_engine, state_paths
+from fastworkflow import approval_grants, review_engine
+from fastworkflow.session import state_paths
 from fastworkflow.approval_annotations import (APPROVAL_VALUES, REQUIRED_ALWAYS,
                                                REQUIRED_UNTIL_DELEGATED, command_approval)
 from fastworkflow.context_identity import context_identity

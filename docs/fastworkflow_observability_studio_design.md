@@ -222,7 +222,7 @@ framework's readers (the debug page, diagnosis, comparisons, replay and
 distillation) read these names only: a store written before contract 63 is not
 read by them (owner decision; the benchmark's dump tool, outside the repo, is
 the one place that maps old names). The history paragraph of
-`SPAN_CONTRACT_VERSION` 63 in `fastworkflow/tracing.py` lists every rename,
+`SPAN_CONTRACT_VERSION` 63 in `fastworkflow/observability/tracing.py` lists every rename,
 move, removal and new span.
 
 ### 3.2 The black box: `observability.sqlite3`

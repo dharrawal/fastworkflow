@@ -307,7 +307,10 @@ print(text.replace(folder, "<WF>").replace(_copies, "<COPIES>").replace(
 
 
 def g4(args) -> int:
-    env_file = args.env or args.repo / "fastworkflow" / "examples" / "fastworkflow.env"
+    # Resolved here: the check runs in the scratch folder, where a relative path names no file.
+    env_file = Path(args.env or args.repo / "fastworkflow" / "examples" / "fastworkflow.env").resolve()
+    if not env_file.is_file():
+        raise SystemExit(f"G4: env file {env_file} does not exist")
     results: dict[str, object] = {}
     copies = str(args.scratch / "workflows")
     for workflow, copy in _copy_all(args):

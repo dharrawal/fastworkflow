@@ -23,7 +23,8 @@ from pathlib import Path
 import dspy
 
 import fastworkflow
-from fastworkflow import state_paths, tracing
+from fastworkflow.session import state_paths
+from fastworkflow.observability import tracing
 from fastworkflow.observability import store as obs
 from fastworkflow.observation_offloading import archive as archive_module
 from fastworkflow.observation_offloading import state as offload_state

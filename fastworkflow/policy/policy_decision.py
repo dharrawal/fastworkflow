@@ -23,7 +23,7 @@ as a table rather than as scattered ``if`` statements:
 * **Deterministic, with no model call.** The same input yields the same
   decision. Where a fact only a model can read is needed (what the user asked
   for, whether a question repeats an earlier one), the model's reading is an
-  INPUT to the rows (see ``fastworkflow.policy_intent``); the rows still decide.
+  INPUT to the rows (see ``fastworkflow.policy.policy_intent``); the rows still decide.
 * **Attributable.** A decision names the row that fired and the reason, so a
   behaviour change can be traced to one rule and that rule can be removed.
 * **Ordered.** First match wins, so precedence is part of the table's meaning
@@ -36,7 +36,7 @@ instead and it keeps going.
 
 **Two modes.** ``OFF`` (a workflow without a table) is byte-for-byte the
 unmodified behaviour. ``ENFORCE`` (a workflow with one) acts. What a table *would* have done on recorded runs is
-answered offline by ``fastworkflow.policy_replay``.
+answered offline by ``fastworkflow.evaluation.policy_replay``.
 
 The rules themselves are workflow content: a workflow ships a table module
 (``_policy/table.py``) exposing ``TABLE`` (a ``DecisionTable``) and optionally

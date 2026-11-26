@@ -26,7 +26,8 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow import TurnResult, tracing
+from fastworkflow import TurnResult
+from fastworkflow.observability import tracing
 from fastworkflow.observability import store as obs
 from fastworkflow.command_executor import CommandExecutor
 from fastworkflow.observability.execution_recorder import record_execution

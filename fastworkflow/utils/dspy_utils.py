@@ -113,7 +113,7 @@ def role_context(role: str, lm, **settings):
     """``dspy.context(lm=lm, **settings)`` for a call of the model setting *role* (``LLM_PLANNER``, ``JEV``, ...): the
     caller names its own model's setting, and each model-call span of the block carries it as ``role``
     (``tracing.model_role``), whichever LM object it was handed."""
-    from fastworkflow import tracing
+    from fastworkflow.observability import tracing
 
     with dspy.context(lm=lm, **settings), tracing.model_role(role):
         yield

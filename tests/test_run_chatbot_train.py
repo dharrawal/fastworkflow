@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from fastworkflow import state_paths
+from fastworkflow.session import state_paths
 from fastworkflow.observability.store import ObservabilityStore
 from fastworkflow.run_chatbot import launcher
 from fastworkflow.run_chatbot import server as run_chatbot_server

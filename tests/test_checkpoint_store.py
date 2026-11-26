@@ -27,7 +27,7 @@ from datetime import datetime
 
 import pytest
 
-from fastworkflow.checkpoint_store import (
+from fastworkflow.session.checkpoint_store import (
     COMMIT_RECORD_TYPE,
     DEFAULT_RETENTION,
     PART_SECTIONS,
@@ -41,8 +41,8 @@ from fastworkflow.checkpoint_store import (
     RetentionPolicy,
     encode_path_component,
 )
-from fastworkflow.session_state_store import DiskSessionStateStore
-from fastworkflow.state_serialization import StateEncodingError
+from fastworkflow.session.session_state_store import DiskSessionStateStore
+from fastworkflow.session.state_serialization import StateEncodingError
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -911,7 +911,7 @@ def test_the_committed_generation_is_reconstructible_in_a_fresh_process(store):
     script = textwrap.dedent(
         """
         import json, sys
-        from fastworkflow.checkpoint_store import (
+        from fastworkflow.session.checkpoint_store import (
             ChannelCheckpointStore, CheckpointIdentity,
         )
 

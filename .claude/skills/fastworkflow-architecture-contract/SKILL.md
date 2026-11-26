@@ -277,7 +277,7 @@ returns nothing) — candidate stale file, do not imitate it.
 `docs/turn_result_design_final.md` is the authoritative spec ("where this conflicts with
 any of those, this document wins"). Everything below is **roadmap, not code** — verified
 absent on main (`ls fastworkflow/turn_accumulator.py fastworkflow/turn_serializer.py
-fastworkflow/stores fastworkflow/metrics.py` → all missing):
+fastworkflow/stores fastworkflow/observability/metrics.py` → all missing):
 
 - `ConversationTurnStore` + `ArtifactBlobStore` + `stores/` package + `TurnSerializer`
   (module layout: final.md §15).
@@ -321,7 +321,7 @@ Re-verification one-liners for every volatile fact:
 | iteration_counter sites | `grep -rn iteration_counter fastworkflow/ --include='*.py' \| grep -v __pycache__` |
 | is_user_command still has no in-tree reader | `grep -rn is_user_command fastworkflow/ --include='*.py' \| grep -v __pycache__` |
 | Global class cache key shape | `grep -n '_GLOBAL_COMMAND_CLASS_CACHE\|cache_key = ' fastworkflow/command_routing.py` |
-| SCHEMA_VERSION and store backends | `grep -n 'SCHEMA_VERSION\|SESSION_STATE_STORE' fastworkflow/session_state_store.py` |
+| SCHEMA_VERSION and store backends | `grep -n 'SCHEMA_VERSION\|SESSION_STATE_STORE' fastworkflow/session/session_state_store.py` |
 | Serialize-before-evict + LRU cap | `grep -n 'max_live_sessions\|_evict_oldest_if_needed' fastworkflow/run_fastapi_mcp/utils.py` |
 | TurnRegistry invariants + TTL no-op | `sed -n '13,28p;226,243p' fastworkflow/run_fastapi_mcp/turns.py` |
 | process_message deprecation | `grep -n DeprecationWarning fastworkflow/workflow_execution_context.py` |

@@ -1699,9 +1699,9 @@ Invariant 17 separately forbids holding `registry._lock` across the same I/O.
 >
 > | Concern | Module |
 > |---|---|
-> | Strict serializer | `fastworkflow/state_serialization.py` |
-> | Author serialization hooks, anchor + locators, trichotomy | `fastworkflow/serialization_hooks.py` |
-> | Checkpoint records, identity, generations, retention | `fastworkflow/checkpoint_store.py` |
+> | Strict serializer | `fastworkflow/session/state_serialization.py` |
+> | Author serialization hooks, anchor + locators, trichotomy | `fastworkflow/session/serialization_hooks.py` |
+> | Checkpoint records, identity, generations, retention | `fastworkflow/session/checkpoint_store.py` |
 > | Eligibility, retirement, restore, reconciliation, startup states | `fastworkflow/run_fastapi_mcp/checkpoint.py` |
 > | Leases, union predicate, `MAX_LIVE_SESSIONS` resolver | `fastworkflow/run_fastapi_mcp/utils.py` |
 > | Turn ownership, credential install, startup commit | `fastworkflow/run_fastapi_mcp/turns.py` |
@@ -1755,7 +1755,7 @@ Invariant 17 separately forbids holding `registry._lock` across the same I/O.
   - remove the `default=str` round-trip; single strict serializer at this boundary `[R2-7]`;
   - declared-projection API and enumerated restorable fields `[R2-9, R2-12]`;
   - complete logical-turn and CME continuation records, or pin `[R2-8]`.
-- `fastworkflow/session_state_store.py`
+- `fastworkflow/session/session_state_store.py`
   - `key_prefix` on the factory `[R11]`;
   - injective channel-key encoding and identity binding `[R2-13]`;
   - generation stamp and commit record `[R2-10]`;

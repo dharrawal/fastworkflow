@@ -87,7 +87,7 @@ TEXT_PROJECTION_VERSION = "consistency/text/1"
 # The canonical counting rule, named so a payload can be read without this file.
 STEP_COUNT_RULE = "ledger_distinct_dispatch"
 
-# Restated rather than imported from `fastworkflow.tracing`, the way
+# Restated rather than imported from `fastworkflow.observability.tracing`, the way
 # `comparison.py` restates `fw.command`: reading stored evidence should not pull
 # in the emitter. `test_consistency.py` asserts it still equals the tracing
 # constant, so the copy cannot drift silently. A plan is one `fw.plan` span; its

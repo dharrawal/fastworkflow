@@ -14,9 +14,9 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow import serialization_hooks
-from fastworkflow.serialization_hooks import ProjectionOutcome
-from fastworkflow.state_serialization import validate_state
+from fastworkflow.session import serialization_hooks
+from fastworkflow.session.serialization_hooks import ProjectionOutcome
+from fastworkflow.session.state_serialization import validate_state
 from tests.test_workflow_serialization_hooks import (  # noqa: F401  (fixtures and helpers)
     EXAMPLES, initialized_fastworkflow, make_workflow)
 

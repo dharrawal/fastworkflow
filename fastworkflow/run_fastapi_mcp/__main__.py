@@ -55,7 +55,8 @@ from jwt.exceptions import PyJWTError as JWTError
 from dotenv import dotenv_values
 
 import fastworkflow
-from fastworkflow import approval_binding, state_paths
+from fastworkflow import approval_binding
+from fastworkflow.session import state_paths
 from fastworkflow.experiment.readiness import runtime_readiness_snapshot
 from fastworkflow.utils.logging import logger
 from fastworkflow.workflow_execution_context import UsePlanError
@@ -138,11 +139,11 @@ from .jwt_manager import (
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES
 )
 
-from fastworkflow.conversation_history_io import (
+from fastworkflow.session.conversation_history_io import (
     extract_turns_from_history,
     restore_history_from_turns,
 )
-from fastworkflow.conversation_labeling import (
+from fastworkflow.session.conversation_labeling import (
     generate_topic_and_summary,
     resolve_topic_generation_timeout,
     topic_generation_timeout_seconds,

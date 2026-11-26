@@ -24,7 +24,8 @@ from unittest.mock import MagicMock
 import pytest
 
 import fastworkflow
-from fastworkflow import TurnStatus, tracing
+from fastworkflow import TurnStatus
+from fastworkflow.observability import tracing
 from fastworkflow.observability import store as obs
 from fastworkflow.command_executor import CommandExecutor
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
@@ -743,7 +744,7 @@ class TestWriterDiscipline:
         monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "root"))
         workflow_path = str(tmp_path / "wf")
         os.makedirs(workflow_path, exist_ok=True)
-        db = fastworkflow.state_paths.observability_db(workflow_path)
+        db = fastworkflow.session.state_paths.observability_db(workflow_path)
         obs.ObservabilityStore(db)  # create it
         os.chmod(db, 0o400)  # unwritable -> schema ensure fails
         try:
@@ -1301,7 +1302,7 @@ class TestFactory:
             ))
             assert sink.flush()
 
-            db = fastworkflow.state_paths.observability_db(workflow_path)
+            db = fastworkflow.session.state_paths.observability_db(workflow_path)
             assert stat.S_IMODE(os.stat(db).st_mode) == 0o600
             assert stat.S_IMODE(os.stat(os.path.dirname(db)).st_mode) == 0o700
             turns = _rows(db, "SELECT turn_key, channel_id FROM turns")

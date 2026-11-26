@@ -31,7 +31,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import fastworkflow
-from fastworkflow.conversation_history_io import extract_turns_from_history
+from fastworkflow.session.conversation_history_io import extract_turns_from_history
 from fastworkflow.run_fastapi_mcp import server_memory
 from fastworkflow.run_fastapi_mcp.turns import TurnRegistry, submit_turn
 from fastworkflow.run_fastapi_mcp.utils import (

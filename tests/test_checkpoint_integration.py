@@ -47,7 +47,7 @@ from fastworkflow.run_fastapi_mcp.utils import (
     ensure_user_runtime_exists,
     persist_pending_after_turn,
 )
-from fastworkflow.serialization_hooks import ProjectionOutcome
+from fastworkflow.session.serialization_hooks import ProjectionOutcome
 from fastworkflow.utils.logging import logger
 from fastworkflow.workflow import _WORKFLOW_REGISTRY
 
@@ -1010,7 +1010,7 @@ def test_reap_pending_state_protects_the_channels_the_process_holds():
     import time as _time
     from pathlib import Path as _Path
 
-    from fastworkflow.session_state_store import (
+    from fastworkflow.session.session_state_store import (
         SAVED_AT_KEY,
         PendingRetentionPolicy,
     )

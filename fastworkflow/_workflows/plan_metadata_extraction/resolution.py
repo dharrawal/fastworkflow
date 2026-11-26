@@ -72,7 +72,7 @@ def part_intent(workflow, text: str, *, pinned: Optional[str] = None,
 def _decided(workflow, text: str, part: Optional[int]) -> PartIntent:
     """The intent loop's decision for *text* (no core command), in its span: the CME's writer, called from here, under
     the part's span."""
-    from fastworkflow import tracing
+    from fastworkflow.observability import tracing
     from fastworkflow._workflows.command_metadata_extraction import intent_detection
 
     with tracing.part_span(tracing.current_host(), tracing.SPAN_RESOLVE_PART, part):

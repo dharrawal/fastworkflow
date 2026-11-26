@@ -25,7 +25,7 @@ over the conversation, so every decision names the rule and table version that p
 Where a rule needs to know what the user asked for, a model reads the user's words into the
 workflow's own operation names. The rule still decides.
 
-The engine is generic; a table imports only `fastworkflow.policy_decision`. The rules are
+The engine is generic; a table imports only `fastworkflow.policy.policy_decision`. The rules are
 workflow content. A complete worked example is in
 `fastworkflow/examples/retail_workflow/_policy/`; read it first.
 

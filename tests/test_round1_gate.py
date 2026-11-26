@@ -16,7 +16,8 @@ from fastworkflow._workflows.plan_metadata_extraction import resolution
 
 import fastworkflow
 from tests import span_tree
-from fastworkflow import review_proposals, tracing, workflow_agent
+from fastworkflow import review_proposals, workflow_agent
+from fastworkflow.observability import tracing
 from fastworkflow.approval_binding import Surface
 from fastworkflow.planning_commands import planning_command
 from fastworkflow.review_engine import AWAITING, CONFIRMED, DECLINED, EXPIRED, PROPOSAL_TTL_SECONDS, proposal_of

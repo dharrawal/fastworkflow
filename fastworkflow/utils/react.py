@@ -14,7 +14,7 @@ from dspy.adapters.types.tool import Tool
 from dspy.primitives.module import Module
 from dspy.signatures.signature import ensure_signature
 
-from fastworkflow import tracing
+from fastworkflow.observability import tracing
 from fastworkflow.utils.dspy_logger import DSPyForward
 
 logger = logging.getLogger(__name__)
@@ -60,7 +60,7 @@ class fastWorkflowReAct(Module):
     # step: code runs the steps it can, and the run then ends (``_finish_run``) with an empty answer, leaving
     # ``last_code.stop`` for the caller to read.
     no_model: bool = False
-    # The conversation's policy (``fastworkflow.policy_runtime.AgentPolicy``), set by
+    # The conversation's policy (``fastworkflow.policy.policy_runtime.AgentPolicy``), set by
     # ``policy_loader.attach_policy`` when the workflow has _policy/table.py; None
     # otherwise, and then nothing below changes behaviour.
     policy: Any = None
@@ -546,7 +546,7 @@ class fastWorkflowReAct(Module):
             if isinstance(run_state, dict):
                 run_state["by_code"] = planned is not None
 
-            # The policy (fastworkflow.policy_runtime), when one is enabled. A
+            # The policy (fastworkflow.policy.policy_runtime), when one is enabled. A
             # decision is delivered as the step's observation: the agent reads
             # it like any result and keeps going.
             policy = self.policy if self.policy is not None and self.policy.enabled else None

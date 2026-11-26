@@ -119,7 +119,7 @@ def _subtask(record, number: int) -> SubTask:
 
 def _bindings(gated) -> list:
     """The turn span's ``subtask_bindings`` (the trace record of shown == run), from the last turn span."""
-    from fastworkflow import tracing
+    from fastworkflow.observability import tracing
 
     spans = [span for span in gated.sink.spans if span.name == tracing.SPAN_TURN]
     return list(spans[-1].attributes.get("subtask_bindings") or []) if spans else []

@@ -32,7 +32,7 @@ import threading
 
 import pytest
 
-from fastworkflow import state_paths
+from fastworkflow.session import state_paths
 from fastworkflow.benchmark import setup as benchmark_setup
 from fastworkflow.observability import store as obs
 from fastworkflow.run_chatbot import server as run_chatbot_server

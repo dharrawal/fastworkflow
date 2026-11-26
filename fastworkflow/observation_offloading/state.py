@@ -111,7 +111,7 @@ def observability_db_path(host: Any) -> str:
     The session's bound app workflow first, then its active workflow: the same
     database ``build_tool_agent`` opens for the turn's observations.
     """
-    from fastworkflow import state_paths
+    from fastworkflow.session import state_paths
 
     app_workflow = getattr(host, "app_workflow", None)
     getter = getattr(host, "get_active_workflow", None)
@@ -134,7 +134,7 @@ def durable_archive(selected_archive: Any = None) -> Any:
     if selected_archive is not None:
         return selected_archive
     try:
-        from fastworkflow import tracing
+        from fastworkflow.observability import tracing
 
         host = tracing.current_host()
         if host is not None:
@@ -183,7 +183,7 @@ def scope_for_host(host: Any) -> RuntimeHandleScope:
     ``build_tool_agent`` resolves the same scope for the ReAct loop; a scope
     computed two ways would be two scopes the moment either changed.
     """
-    from fastworkflow import tracing
+    from fastworkflow.observability import tracing
 
     channel_id = str(tracing.get_channel_id(host) or "unbound")
     turn_key = str(tracing.get_turn_key(host) or channel_id)
@@ -201,7 +201,7 @@ def default_scope() -> RuntimeHandleScope:
 
 def _current_agent() -> Any:
     """The ReAct agent running this command, when there is one."""
-    from fastworkflow import tracing
+    from fastworkflow.observability import tracing
 
     host = tracing.current_host()
     if host is None:
@@ -219,7 +219,7 @@ def current_scope() -> RuntimeHandleScope:
     The turn scope of the session the command runs under, derived from the trace
     host; the process default outside a session.
     """
-    from fastworkflow import tracing
+    from fastworkflow.observability import tracing
 
     host = tracing.current_host()
     if host is not None:

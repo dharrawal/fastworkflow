@@ -4,7 +4,8 @@ from types import SimpleNamespace
 import fastworkflow
 import pytest
 
-from fastworkflow import ModuleType, tracing
+from fastworkflow import ModuleType
+from fastworkflow.observability import tracing
 from fastworkflow.command_executor import CommandExecutor, CommandNotFoundError
 
 

@@ -19,7 +19,7 @@ from dspy.clients.cache import Cache
 from litellm import ModelResponse
 from litellm.types.utils import Choices, Message, Usage
 
-from fastworkflow import tracing
+from fastworkflow.observability import tracing
 from fastworkflow.observability.store import ObservabilityStore, SQLiteTraceSink
 from fastworkflow.utils.dspy_logger import observe_dspy_host
 

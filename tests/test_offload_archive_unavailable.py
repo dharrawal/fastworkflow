@@ -26,7 +26,8 @@ from types import SimpleNamespace
 import dspy
 
 import fastworkflow
-from fastworkflow import state_paths, tracing
+from fastworkflow.session import state_paths
+from fastworkflow.observability import tracing
 from fastworkflow.observation_offloading.agent import (
     build_tool_agent,
     open_handle_archive,

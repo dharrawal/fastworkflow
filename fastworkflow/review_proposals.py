@@ -26,7 +26,9 @@ from typing import Any, Literal, Mapping, Optional, Sequence
 import dspy
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_serializer, model_validator
 
-from fastworkflow import subtask_pool, tracing, turn_cache, turn_progress
+from fastworkflow.utils import subtask_pool
+from fastworkflow.observability import tracing
+from fastworkflow import turn_cache, turn_progress
 from fastworkflow.review_step_refs import NUMBER_LIST as _NUMBER_LIST, removal_reading
 from fastworkflow.review_engine import (
     KIND_SUB_TASKS, Add, Change, Drop, EditParseError, EditRefused, Merge, NoEditsRead, Proposal,

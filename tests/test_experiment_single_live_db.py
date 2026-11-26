@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from fastworkflow import state_paths
+from fastworkflow.session import state_paths
 from fastworkflow.benchmark import setup
 from fastworkflow.experiment import ExperimentNotRegisteredHere
 from fastworkflow.experiment.runner import ExperimentController, ExperimentHarness

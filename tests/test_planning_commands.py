@@ -545,7 +545,7 @@ def test_phase_annotated_find_book_output_hands_on_run(library_env):
 
     assert result.status == TurnStatus.COMPLETED
     assert result.answer == "total 2"
-    spans = library_env.sink.named(fastworkflow.tracing.SPAN_PHASE)
+    spans = library_env.sink.named(fastworkflow.observability.tracing.SPAN_PHASE)
     assert spans[0].attributes["facts"] == {
         "book_uids": ["b1", "b2"],
         "titles": ["Dune", "Dune Messiah"],
@@ -565,7 +565,7 @@ def test_full_list_step_joins_loan_pages(library_proof_env):
     result = library_proof_env.ctx.process_turn("list every loan")
 
     assert result.status == TurnStatus.COMPLETED
-    spans = library_proof_env.sink.named(fastworkflow.tracing.SPAN_PHASE)
+    spans = library_proof_env.sink.named(fastworkflow.observability.tracing.SPAN_PHASE)
     facts = spans[0].attributes["facts"]
     assert facts["total"] == 2
     assert len(facts["borrowers"]) == 2
@@ -588,7 +588,7 @@ def test_fan_out_phase_open_book_output_per_item(library_env):
     result = _run_planning_command(library_env, library_env.planning_command)
 
     assert result.status == TurnStatus.COMPLETED
-    spans = library_env.sink.named(fastworkflow.tracing.SPAN_PHASE)
+    spans = library_env.sink.named(fastworkflow.observability.tracing.SPAN_PHASE)
     open_span = next(s for s in spans if s.attributes["phase"] == "opened")
     assert open_span.attributes["item_count"] == 2
     assert open_span.attributes["facts"]["title"] in ("Dune", "Dune Messiah")
@@ -708,7 +708,7 @@ def test_typed_facts_model_fills_output_input_and_optional_none(library_env):
     result = _run_planning_command(library_env, library_env.planning_command)
 
     assert result.status == TurnStatus.COMPLETED
-    spans = library_env.sink.named(fastworkflow.tracing.SPAN_PHASE)
+    spans = library_env.sink.named(fastworkflow.observability.tracing.SPAN_PHASE)
     facts = spans[0].attributes["facts"]
     assert facts["found"]["total"] == 2
     assert facts["open_args"]["book_uid"] == "b1"
@@ -772,7 +772,7 @@ def test_library_loan_report_result_uses_list_loans_output(library_proof_env):
     result = library_proof_env.ctx.process_turn("who has this book")
 
     assert result.status == TurnStatus.COMPLETED
-    spans = library_proof_env.sink.named(fastworkflow.tracing.SPAN_PHASE)
+    spans = library_proof_env.sink.named(fastworkflow.observability.tracing.SPAN_PHASE)
     assert spans[0].attributes["facts"]["borrowers"] == ["Ann Lee", "Raj Patel"]
     assert "Ann Lee" in result.answer
     out = next(o for o in library_proof_env.ctx._turn_outputs if o.command_name == sf.command.name)
@@ -789,7 +789,7 @@ def test_library_book_by_title_result_builds_output_from_two_phases(library_proo
     result = library_proof_env.ctx.process_turn(f"who wrote {title}")
 
     assert result.status == TurnStatus.COMPLETED
-    spans = library_proof_env.sink.named(fastworkflow.tracing.SPAN_PHASE)
+    spans = library_proof_env.sink.named(fastworkflow.observability.tracing.SPAN_PHASE)
     assert len(spans) >= 2
     assert [s.attributes["phase"] for s in spans[:2]] == ["find", "book"]
     out = next(o for o in library_proof_env.ctx._turn_outputs if o.command_name == sf.command.name)
@@ -846,7 +846,7 @@ def test_library_author_books_from_real_module_runs_fan_out(library_proof_env):
         "open_book book_uid=b2",
     ]
     assert library_proof_env.wf._current_command_context.uid == "b2"
-    spans = library_proof_env.sink.named(fastworkflow.tracing.SPAN_PHASE)
+    spans = library_proof_env.sink.named(fastworkflow.observability.tracing.SPAN_PHASE)
     assert [s.attributes["phase"] for s in spans[:3]] == ["find", "book", "book"]
 
 
@@ -933,7 +933,7 @@ def test_library_find_record_book_kind_from_real_module(library_proof_env):
     assert out.command_response.response == expected
     assert library_proof_env.runner.sent == [f"find_book query={name}"]
     assert not any(c.startswith("find_member") for c in library_proof_env.runner.sent)
-    spans = library_proof_env.sink.named(fastworkflow.tracing.SPAN_PHASE)
+    spans = library_proof_env.sink.named(fastworkflow.observability.tracing.SPAN_PHASE)
     assert "titles" in spans[0].attributes["facts"]
 
 

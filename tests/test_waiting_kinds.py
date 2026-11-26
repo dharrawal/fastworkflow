@@ -361,7 +361,7 @@ def test_a_question_that_rides_the_agents_suspension_is_not_a_flag_that_can_be_s
 
 def test_the_removed_review_flags_are_gone_from_the_frame_the_state_and_the_context():
     from fastworkflow.plan_frame import PlanFrame
-    from fastworkflow.session_state_store import SCHEMA_VERSION
+    from fastworkflow.session.session_state_store import SCHEMA_VERSION
 
     frame = PlanFrame.turn()
     assert not hasattr(frame, "subtask_review_open") and not hasattr(frame, "framework_entry")

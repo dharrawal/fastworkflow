@@ -20,7 +20,7 @@ import threading
 import pytest
 
 import fastworkflow
-from fastworkflow import subtask_pool
+from fastworkflow.utils import subtask_pool
 from fastworkflow.turn import TurnStatus
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 from tests.test_approval_binding import (  # noqa: F401 - the real agent on the annotated library copy, and the guards

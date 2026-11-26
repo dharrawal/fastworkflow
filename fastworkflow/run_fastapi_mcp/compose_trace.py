@@ -19,7 +19,7 @@ from __future__ import annotations
 import uuid
 from typing import Any, Optional
 
-from fastworkflow import tracing
+from fastworkflow.observability import tracing
 from fastworkflow.utils.logging import logger
 
 UNATTACHED_TRACE_PREFIX = "compose-"

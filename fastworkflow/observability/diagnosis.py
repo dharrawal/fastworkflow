@@ -72,7 +72,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Callable, Hashable, Iterable, Mapping, Optional, Protocol, Sequence
 
-from fastworkflow import tracing
+from fastworkflow.observability import tracing
 from fastworkflow.observability.comparison import (
     ExecutionProjection,
     ExecutionReader,

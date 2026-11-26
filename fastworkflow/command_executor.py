@@ -5,7 +5,7 @@ from contextlib import nullcontext
 
 import fastworkflow
 from pydantic import BaseModel
-from fastworkflow import tracing
+from fastworkflow.observability import tracing
 from fastworkflow import approval_binding, command_writes, intent_loop, waiting
 from fastworkflow.command_interfaces import CommandExecutorInterface
 from fastworkflow.command_declarations import declared_descend
@@ -536,7 +536,7 @@ def _policy_rewrite(chat_session, command_name: str, input_obj) -> Optional[str]
     each call: distillation swaps agents mid-session, so a reference taken
     earlier could ask the wrong one. None whenever no policy is enabled.
     """
-    from fastworkflow.policy_runtime import policy_of
+    from fastworkflow.policy.policy_runtime import policy_of
 
     policy = policy_of(getattr(chat_session, "workflow_tool_agent", None))
     if policy is None:
@@ -887,7 +887,7 @@ class CommandExecutor(CommandExecutorInterface):
         if "raw_user_message" in workflow.context:
             raw_user_message = workflow.context['raw_user_message']
 
-        # The policy verifier's guard (fastworkflow.policy_runtime), consulted
+        # The policy verifier's guard (fastworkflow.policy.policy_runtime), consulted
         # here because only here does the command exist in canonical form: its
         # real name and validated parameters, whatever wording the agent used.
         # A block returns the rewrite as a failed output and nothing executes.

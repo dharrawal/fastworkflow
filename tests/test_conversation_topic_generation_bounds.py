@@ -55,7 +55,7 @@ import pytest
 from dotenv import dotenv_values
 
 import fastworkflow
-from fastworkflow.conversation_labeling import (
+from fastworkflow.session.conversation_labeling import (
     DEFAULT_TOPIC_GENERATION_TIMEOUT_SECONDS,
     TOPIC_GENERATION_MAX_RETRIES,
     TOPIC_GENERATION_TIMEOUT_ENV_VAR,
@@ -165,14 +165,14 @@ def test_the_retry_count_is_pinned_because_it_multiplies_the_deadline(
     that generation builds, not off the transport.
     """
     built: list = []
-    real_get_lm = fastworkflow.conversation_labeling.get_lm
+    real_get_lm = fastworkflow.session.conversation_labeling.get_lm
 
     def record_lm(*args, **kwargs):
         lm = real_get_lm(*args, **kwargs)
         built.append(lm)
         return lm
 
-    monkeypatch.setattr(fastworkflow.conversation_labeling, "get_lm", record_lm)
+    monkeypatch.setattr(fastworkflow.session.conversation_labeling, "get_lm", record_lm)
 
     with pytest.raises(Exception):
         generate_topic_and_summary(_turns("retries"))

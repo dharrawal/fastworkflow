@@ -47,7 +47,7 @@ from typing import Any, Callable, Iterable, Optional, Sequence
 
 import fastworkflow
 from fastworkflow.observability import evidence_run as evidence_run_module
-from fastworkflow import state_paths
+from fastworkflow.session import state_paths
 from fastworkflow.observability import store as observability_store
 from fastworkflow.observability.archive_files import (
     archive_file_for,

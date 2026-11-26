@@ -148,7 +148,7 @@ def store_path(workflow_folderpath: str) -> str:
 
 def _connect(workflow_folderpath: str, *, create: bool = True) -> Optional[sqlite3.Connection]:
     """A connection to the workflow's store, or None when there is none and *create* is not asked."""
-    from fastworkflow.kvstore import _open_sqlite
+    from fastworkflow.session.kvstore import _open_sqlite
 
     path = store_path(workflow_folderpath)
     if not create and not os.path.isfile(path):

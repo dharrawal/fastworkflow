@@ -343,7 +343,7 @@ sed -n '40,65p' fastworkflow/run_fastapi_mcp/mcp_specific.py
 # '/' prefix + //exit //new
 grep -n "is_assistant_mode_command" fastworkflow/workflow_execution_context.py; grep -n '"//' fastworkflow/run/__main__.py
 # Artifact writers
-grep -n "def observability_db" -A 8 fastworkflow/state_paths.py
+grep -n "def observability_db" -A 8 fastworkflow/session/state_paths.py
 grep -rn "action.jsonl" fastworkflow/ --include=*.py   # expect only retirement comments
 grep -n "___convo_info" fastworkflow/_workflows/command_metadata_extraction/intent_detection.py
 grep -n "channel_conversations\|channel_session_state" fastworkflow/run_fastapi_mcp/utils.py

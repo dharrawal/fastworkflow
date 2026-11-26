@@ -15,7 +15,8 @@ import dspy
 import pytest
 from pydantic import BaseModel, Field, create_model, model_validator
 
-from fastworkflow import planning_phases, tracing
+from fastworkflow import planning_phases
+from fastworkflow.observability import tracing
 from fastworkflow.planning import phase, planned
 from fastworkflow.observation_offloading.archive import command_run_record
 from fastworkflow.planning_commands import (

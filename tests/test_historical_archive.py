@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from fastworkflow import state_paths
+from fastworkflow.session import state_paths
 from fastworkflow.observability import store as obs
 from fastworkflow.observability import archive as archive_module
 from fastworkflow.observability.archive import (

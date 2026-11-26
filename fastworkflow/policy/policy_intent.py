@@ -43,7 +43,7 @@ import dspy
 import pydantic
 
 import fastworkflow
-from fastworkflow.policy_decision import (
+from fastworkflow.policy.policy_decision import (
     ASK_USER,
     USER_MESSAGE,
     QuestionJudgement,

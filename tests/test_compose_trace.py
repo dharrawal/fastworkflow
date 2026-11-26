@@ -11,7 +11,7 @@ import time
 
 import pytest
 
-from fastworkflow import tracing
+from fastworkflow.observability import tracing
 from fastworkflow.observability.store import get_observability_sink
 from fastworkflow.run_chatbot import composer as gui
 from tests.test_compose_endpoints import (  # noqa: F401  (fixtures)

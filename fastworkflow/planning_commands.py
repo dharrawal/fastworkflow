@@ -236,7 +236,7 @@ from typing import Any, Callable, Literal, Mapping, Optional, Sequence, Union, g
 
 from pydantic import BaseModel
 
-from fastworkflow import tracing
+from fastworkflow.observability import tracing
 from fastworkflow.command_context_model import CommandContextModel
 from fastworkflow.command_directory import CommandDirectory, compute_commands_source_fingerprint, raised_in_helper
 from fastworkflow.field_options import (

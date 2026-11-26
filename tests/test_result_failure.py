@@ -20,7 +20,7 @@ import shutil
 import pytest
 
 import fastworkflow
-from fastworkflow import tracing
+from fastworkflow.observability import tracing
 from fastworkflow.planning import run, run_code
 from fastworkflow.planning_code_run import RunCodeError
 from tests.test_answer_hook import (  # noqa: F401 - fixtures and helpers of the answer hook's tests

@@ -60,7 +60,8 @@ from fastworkflow.observability.archive_files import (
 )
 from fastworkflow.observability import prompt_slots
 from fastworkflow.observability.feedback import human_feedback_row
-from fastworkflow import state_paths, tracing
+from fastworkflow.session import state_paths
+from fastworkflow.observability import tracing
 from fastworkflow.utils.logging import logger
 
 # v2 (fix-42b): experiments.benchmark_id / benchmark_version /

@@ -35,17 +35,17 @@ import dataclasses
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from fastworkflow import distillation_trace as dtrace
-from fastworkflow import tracing
-from fastworkflow.policy_decision import (
+from fastworkflow.evaluation import distillation_trace as dtrace
+from fastworkflow.observability import tracing
+from fastworkflow.policy.policy_decision import (
     ASK_USER,
     ContractFacts,
     DecisionTable,
     PolicyDecisionPoint,
     PolicyMode,
 )
-from fastworkflow.policy_intent import parse_described
-from fastworkflow.policy_runtime import AgentPolicy
+from fastworkflow.policy.policy_intent import parse_described
+from fastworkflow.policy.policy_runtime import AgentPolicy
 
 _COMMAND_TOOL = "execute_workflow_query"
 
@@ -239,7 +239,7 @@ def replay_experiment(
     live: bool = False,
 ) -> ReplayReport:
     """Replay every (or the listed tasks') attempt of an experiment."""
-    from fastworkflow.distillation_compare import attempt_passed
+    from fastworkflow.evaluation.distillation_compare import attempt_passed
 
     graded = {
         (str(r.get("task_id")), int(r.get("attempt") or 0)): attempt_passed(r)

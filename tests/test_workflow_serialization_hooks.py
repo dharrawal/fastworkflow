@@ -18,10 +18,10 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow import serialization_hooks
+from fastworkflow.session import serialization_hooks
 from fastworkflow.command_routing import RoutingRegistry
-from fastworkflow.serialization_hooks import ProjectionOutcome
-from fastworkflow.state_serialization import validate_state
+from fastworkflow.session.serialization_hooks import ProjectionOutcome
+from fastworkflow.session.state_serialization import validate_state
 from fastworkflow.utils.logging import logger
 
 EXAMPLES = Path(fastworkflow.__file__).parent / "examples"

@@ -7,7 +7,7 @@ pending store's disk mapping was non-injective — `_json_path` collapsed
 design makes the checkpoint authoritative. Making an authoritative record inherit
 a collision does not inherit a defect, it enlarges one. That collision is closed
 at its source now too: `encode_path_component` moved to
-`fastworkflow.storage_keys` and the pending store keys through it (fix-7hn), so
+`fastworkflow.session.storage_keys` and the pending store keys through it (fix-7hn), so
 the two derivations cannot drift.
 
 Three hazards drive nearly every decision here.
@@ -91,7 +91,7 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any, Iterable, Optional
 
-from fastworkflow.state_serialization import (
+from fastworkflow.session.state_serialization import (
     StateEncodingError,
     encode_state,
     state_digest,
@@ -100,7 +100,7 @@ from fastworkflow.state_serialization import (
 # Imported, not defined here: the pending-state store keys by channel id too, and
 # two encoders would be two chances to reintroduce a shared path (fix-7hn). This
 # import is also the re-export existing callers reach through.
-from fastworkflow.storage_keys import encode_path_component
+from fastworkflow.session.storage_keys import encode_path_component
 from fastworkflow.utils.logging import logger
 
 PROTOCOL_VERSION = 2

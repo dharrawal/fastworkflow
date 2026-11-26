@@ -30,7 +30,7 @@ from fastworkflow.benchmark.catalog import (
     write_version,
     _safe_segment,
 )
-from fastworkflow import state_paths
+from fastworkflow.session import state_paths
 from fastworkflow.observability import control, selection
 from fastworkflow.observability.store import (
     STORE_IDENTITY_DIAGNOSTIC,

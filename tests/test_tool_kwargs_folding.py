@@ -9,7 +9,8 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
-from fastworkflow import tracing, workflow_agent
+from fastworkflow.observability import tracing
+from fastworkflow import workflow_agent
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import (
     ParameterExtraction,
 )

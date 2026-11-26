@@ -1,4 +1,4 @@
-"""The policy's model readings (fastworkflow.policy_intent), with DSPy's DummyLM.
+"""The policy's model readings (fastworkflow.policy.policy_intent), with DSPy's DummyLM.
 
 The readers' contract matters more than the model: requests keep their ids and
 are never dropped by omission, operations outside the workflow's vocabulary are
@@ -12,8 +12,8 @@ import json
 
 from dspy.utils import DummyLM
 
-from fastworkflow.policy_decision import CommandRecord
-from fastworkflow.policy_intent import (
+from fastworkflow.policy.policy_decision import CommandRecord
+from fastworkflow.policy.policy_intent import (
     ASSISTANT,
     USER,
     IntentExtractor,

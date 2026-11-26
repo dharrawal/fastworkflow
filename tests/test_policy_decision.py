@@ -1,4 +1,4 @@
-"""The policy verifier's engine and loader (fastworkflow.policy_decision, policy_loader).
+"""The policy verifier's engine and loader (fastworkflow.policy.policy_decision, policy_loader).
 
 Pure Python: no model, no workflow run. The loop wiring is in
 tests/test_policy_loop.py and the executor guard in tests/test_policy_guard.py.
@@ -11,7 +11,7 @@ import textwrap
 
 import pytest
 
-from fastworkflow.policy_decision import (
+from fastworkflow.policy.policy_decision import (
     NO_OP_TABLE,
     AfterObservationInput,
     BeforeFinishInput,
@@ -28,7 +28,7 @@ from fastworkflow.policy_decision import (
     PolicyState,
     RequestedOperation,
 )
-from fastworkflow.policy_loader import load_policy
+from fastworkflow.policy.policy_loader import load_policy
 
 SIDE = frozenset({DecisionPhase.BEFORE_SIDE_EFFECT})
 FINISH = frozenset({DecisionPhase.BEFORE_FINISH})
@@ -171,7 +171,7 @@ def test_policy_state_round_trips_as_plain_json():
 # ----------------------------------------------------------------------
 
 TABLE_MODULE = """
-from fastworkflow.policy_decision import (
+from fastworkflow.policy.policy_decision import (
     ContractFacts, DecisionPhase, DecisionTable, PolicyOutcome, PolicyRow)
 
 TABLE = DecisionTable("tmp/1", [PolicyRow(

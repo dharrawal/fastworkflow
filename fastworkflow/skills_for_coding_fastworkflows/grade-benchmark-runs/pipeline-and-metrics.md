@@ -5,7 +5,7 @@ once it is pinned to the **first stage that went wrong**, because that is the st
 change. This page covers each stage of a turn (what to read, the cause tag for a loss there), how
 to judge answer quality apart from task completion, and the metrics to report.
 
-Span and attribute names come from `fastworkflow/tracing.py` (`SPAN_CONTRACTS`; span contract 56
+Span and attribute names come from `fastworkflow/observability/tracing.py` (`SPAN_CONTRACTS`; span contract 56
 at the time of writing). Contracts are versioned, so check them against the version that wrote the
 store. Every attribute, the turn record (`turns.record_json`) and its artifacts are catalogued in
 the [debug-workflow-conversations reference](../debug-workflow-conversations/reference.md#span-catalog).

@@ -21,7 +21,7 @@ from fastapi.testclient import TestClient
 
 import fastworkflow
 from fastworkflow.observability import store as obs
-from fastworkflow import tracing
+from fastworkflow.observability import tracing
 from fastworkflow.experiment.runner import ExperimentController
 from fastworkflow.turn import TurnOutput, TurnResult, TurnStatus
 

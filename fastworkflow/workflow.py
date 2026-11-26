@@ -8,7 +8,7 @@ from functools import wraps
 from typing import Optional
 
 import fastworkflow
-from fastworkflow.kvstore import KVStore
+from fastworkflow.session.kvstore import KVStore
 from fastworkflow.utils.logging import logger
 
 #: How many commands are running in this context (``command_executor.call_response_generator`` counts them). While
@@ -69,7 +69,7 @@ def running_command(workflow: Optional["Workflow"] = None, record: Optional[obje
 # context across process restarts (accepted trade-off).
 #
 # Remaining on-disk caches (enablecache below and the NLU suggested-commands state)
-# use stdlib sqlite3 via :class:`fastworkflow.kvstore.KVStore` — JSON
+# use stdlib sqlite3 via :class:`fastworkflow.session.kvstore.KVStore` — JSON
 # values, WAL mode, no process-exclusive LOCK.
 # ----------------------------------------------------------------------
 _STATE_LOCK = threading.RLock()
@@ -564,7 +564,7 @@ class Workflow:
 
     def get_cachedb_folderpath(self, function_name: str) -> str:
         """Get the cache database folder path for a specific function"""
-        from fastworkflow import state_paths
+        from fastworkflow.session import state_paths
         return state_paths.function_cache_dir(self._folderpath, function_name)
 
     @classmethod

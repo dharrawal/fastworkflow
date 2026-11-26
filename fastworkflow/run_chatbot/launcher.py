@@ -160,7 +160,7 @@ def plan_server_spawn(
 
 def _workflow_state_dir(workflow_path: str, *, create: bool) -> str:
     """State dir for one workflow. ``create=False`` must not mkdir."""
-    from fastworkflow import state_paths
+    from fastworkflow.session import state_paths
 
     if create:
         return state_paths.workflow_state_dir(workflow_path)
@@ -439,7 +439,7 @@ def is_train_running(workflow_path: str) -> bool:
 
 def find_live_train() -> Optional[tuple[str, int]]:
     """``(live_db_path, pid)`` of any live chatbot-spawned train, else None."""
-    from fastworkflow import state_paths
+    from fastworkflow.session import state_paths
 
     root = os.path.join(state_paths.state_root(), "workflows")
     try:

@@ -8,7 +8,7 @@ the task ids an experiment may declare, whether every task got its runs
 
 import pytest
 
-from fastworkflow import state_paths
+from fastworkflow.session import state_paths
 from fastworkflow.benchmark import setup
 from fastworkflow.benchmark.conformance import experiment_conformance
 from fastworkflow.benchmark.catalog import load_version, write_version

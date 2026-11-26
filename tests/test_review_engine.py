@@ -29,7 +29,7 @@ from fastworkflow.review_engine import (
 )
 from fastworkflow.approval_binding import Surface
 from fastworkflow.turn import TurnStatus
-from fastworkflow import tracing
+from fastworkflow.observability import tracing
 from tests.test_approval_binding import annotated_library, no_live_model, no_model_call_for_parameters, todo  # noqa: F401,F811
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401
 

@@ -27,7 +27,7 @@ import json
 import re
 from typing import Any, Mapping, Optional
 
-from fastworkflow import tracing
+from fastworkflow.observability import tracing
 from fastworkflow.observability import enrichment
 
 PROMPT_SLOTS_CONTRACT = "fastworkflow-prompt-slots/1"

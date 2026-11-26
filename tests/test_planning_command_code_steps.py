@@ -177,7 +177,7 @@ import types  # noqa: E402
 from types import SimpleNamespace  # noqa: E402
 
 import fastworkflow  # noqa: E402
-from fastworkflow import tracing  # noqa: E402
+from fastworkflow.observability import tracing  # noqa: E402
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import (  # noqa: E402
     ParameterExtraction)
 from fastworkflow.command_executor import CommandExecutor  # noqa: E402

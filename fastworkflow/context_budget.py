@@ -42,7 +42,7 @@ behaved before.
 
 What is NOT here. The per-attribute cap on values written to the observability
 STORE does not belong to this family: it bounds a database row, not a model
-prompt. It is a constant (``fastworkflow.tracing.MAX_ATTR_BYTES``).
+prompt. It is a constant (``fastworkflow.observability.tracing.MAX_ATTR_BYTES``).
 """
 from __future__ import annotations
 

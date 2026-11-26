@@ -17,7 +17,7 @@ import os
 import time
 from typing import Any, Optional
 
-from fastworkflow.storage_keys import encode_path_component
+from fastworkflow.session.storage_keys import encode_path_component
 from fastworkflow.utils.logging import logger
 
 NOTICE_CODE = "context_dropped"

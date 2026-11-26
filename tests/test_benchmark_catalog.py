@@ -10,7 +10,7 @@ from enum import Enum
 
 import pytest
 
-from fastworkflow import state_paths
+from fastworkflow.session import state_paths
 from fastworkflow.benchmark.catalog import (
     SCHEMA,
     BenchmarkAlreadyExistsError,

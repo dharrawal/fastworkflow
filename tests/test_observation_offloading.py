@@ -16,7 +16,7 @@ import dspy
 import pytest
 
 import fastworkflow
-from fastworkflow import tracing
+from fastworkflow.observability import tracing
 from fastworkflow.observation_offloading.agent import (
     build_compacting_step,
     build_tool_agent,

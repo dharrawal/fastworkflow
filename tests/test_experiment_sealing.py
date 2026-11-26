@@ -12,7 +12,7 @@ import pytest
 
 from fastworkflow.observability import control, selection
 from fastworkflow.observability import store as obs
-from fastworkflow import state_paths
+from fastworkflow.session import state_paths
 from fastworkflow.experiment.runner import ExperimentController, experiment_store_readiness
 
 

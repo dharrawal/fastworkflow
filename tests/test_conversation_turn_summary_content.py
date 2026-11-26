@@ -1,7 +1,7 @@
 """What the durable turn's "conversation summary" holds (bead fix-dzs.5).
 
 Every durable turn carries ``"conversation summary"`` and
-``"conversation_traces"`` (see fastworkflow/conversation_history_io.py).
+``"conversation_traces"`` (see fastworkflow/session/conversation_history_io.py).
 
 Two keys on BOTH paths, which is what the assertions below now pin. There used
 to be a third, ``feedback``, appended only by the in-session path in
@@ -53,7 +53,7 @@ import pytest
 
 import fastworkflow
 from fastworkflow.command_executor import CommandExecutor
-from fastworkflow.conversation_history_io import (
+from fastworkflow.session.conversation_history_io import (
     extract_turns_from_history,
     restore_history_from_turns,
 )

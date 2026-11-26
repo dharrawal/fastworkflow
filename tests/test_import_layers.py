@@ -61,8 +61,6 @@ KNOWN_EXCEPTIONS = {
         "the offloading wiring of the ReAct loop moves to agent/ (later)",
     ("fastworkflow.utils.dspy_utils", "fastworkflow.parameters.rules"):
         "is_union, a typing helper, moves to utils (step 7)",
-    ("fastworkflow.utils.parameterize_func_decorator", "fastworkflow.workflow"):
-        "the module is dead and is deleted (step 2)",
 }
 
 

@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow import tracing
+from fastworkflow.observability import tracing
 from fastworkflow.command_executor import CommandExecutor
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 

@@ -4,7 +4,7 @@ import os
 
 import fastworkflow
 from fastworkflow.utils.logging import logger
-from fastworkflow import tracing
+from fastworkflow.observability import tracing
 from fastworkflow.observability.decision_signals import (
     DecisionUncertainty,
     UncertaintySignal,

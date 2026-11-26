@@ -23,7 +23,7 @@ from datetime import datetime
 import pytest
 
 import fastworkflow
-from fastworkflow.state_serialization import (
+from fastworkflow.session.state_serialization import (
     StateEncodingError,
     encode_state,
     state_digest,

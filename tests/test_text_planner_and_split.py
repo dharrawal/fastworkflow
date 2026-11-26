@@ -9,7 +9,7 @@ from dotenv import dotenv_values
 from dspy.utils import DummyLM
 
 import fastworkflow
-from fastworkflow import tracing
+from fastworkflow.observability import tracing
 from fastworkflow.command_routing import RoutingRegistry
 from fastworkflow.workflow_agent import (
     build_query_with_next_steps, initialize_workflow_tool_agent, run_progress_check)

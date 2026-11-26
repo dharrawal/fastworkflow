@@ -2006,7 +2006,7 @@ def _context_load_problems(definition: Any) -> list[str]:
     classmethod, or a ``command_context_object`` parameter (``command_context_model.context_class_problems``), and a
     state hook whose partner is missing (``serialization_hooks.hook_pair_problems``)."""
     import fastworkflow
-    from fastworkflow import serialization_hooks
+    from fastworkflow.session import serialization_hooks
 
     problems = []
     for name, metadata in sorted(definition.command_directory.map_context_2_metadata.items()):

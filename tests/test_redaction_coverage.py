@@ -42,7 +42,8 @@ import sqlite3
 import pytest
 
 import fastworkflow
-from fastworkflow import TurnStatus, tracing
+from fastworkflow import TurnStatus
+from fastworkflow.observability import tracing
 from fastworkflow.observability import feedback
 from fastworkflow.observability import store as obs
 

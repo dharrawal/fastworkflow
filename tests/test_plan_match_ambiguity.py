@@ -24,7 +24,8 @@ import pytest
 
 import fastworkflow
 from fastworkflow import review_engine as re_
-from fastworkflow import intent_detector, review_proposals, run_listing, tracing
+from fastworkflow import intent_detector, review_proposals, run_listing
+from fastworkflow.observability import tracing
 from fastworkflow._workflows.plan_metadata_extraction import resolution
 from fastworkflow.review_engine import (
     Change, ProposalReplyPolicy, Verdict, prompt_for, reply_forms)

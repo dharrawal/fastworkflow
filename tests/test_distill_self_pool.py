@@ -15,7 +15,7 @@ from queue import Queue
 import pytest
 
 import fastworkflow
-from fastworkflow.distillation_compare import (
+from fastworkflow.evaluation.distillation_compare import (
     TaskComparison,
     attempt_passed,
     pool_pairs,
@@ -166,7 +166,7 @@ def test_distill_takes_exactly_one_mode(argv, ok):
 @pytest.fixture
 def session(tmp_path):
     from fastworkflow.command_routing import RoutingRegistry
-    from fastworkflow.distillation import DistillationSession
+    from fastworkflow.evaluation.distillation import DistillationSession
     from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 
     fastworkflow.init({})
@@ -206,8 +206,9 @@ def test_compare_runs_compares_exactly_the_chosen_attempts_and_labels_outcomes(t
     attempts asked for and carry each side's outcome to the result."""
     import json as _json
 
-    from fastworkflow import state_paths, tracing
-    from fastworkflow.distillation_compare import compare_runs
+    from fastworkflow.session import state_paths
+    from fastworkflow.observability import tracing
+    from fastworkflow.evaluation.distillation_compare import compare_runs
     from fastworkflow.observability import store as obs
     from tests.benchmark_pins import pin_for
 

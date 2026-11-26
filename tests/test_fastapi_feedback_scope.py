@@ -38,7 +38,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import fastworkflow
-from fastworkflow import tracing
+from fastworkflow.observability import tracing
 
 # The hermetic server fixtures. test_fastapi_service's fixtures skip when the
 # repo's private env files are absent; these write their own from the shipped

@@ -5,7 +5,7 @@ Companion to SKILL.md section 6. Source of truth: `docs/turn_result_design_final
 document wins", lines 3-8). Facts verified 2026-07-09 against v2.22.2 (commit c33b9a5).
 
 Everything in this file is ROADMAP. Verified absent on main:
-`ls fastworkflow/turn_accumulator.py fastworkflow/turn_serializer.py fastworkflow/stores fastworkflow/metrics.py`
+`ls fastworkflow/turn_accumulator.py fastworkflow/turn_serializer.py fastworkflow/stores fastworkflow/observability/metrics.py`
 → all "No such file or directory". No beads epic for v3.0 exists (fix-vof was
 review-only, 48/48 closed). Whether v3.0 is scheduled at all is an OPEN question.
 

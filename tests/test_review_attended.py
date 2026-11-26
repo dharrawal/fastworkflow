@@ -106,7 +106,7 @@ def test_an_accepted_review_takes_no_model_step_after_its_code_steps_and_is_not_
 
 
 def test_the_ask_user_span_of_a_review_carries_every_reply_in_order(gated, monkeypatch):
-    from fastworkflow import tracing
+    from fastworkflow.observability import tracing
 
     _split_into(monkeypatch, [EMMA, JOKE])
     assert gated.ctx.process_turn(f"{EMMA} and {JOKE}").status is TurnStatus.AWAITING_USER

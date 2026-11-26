@@ -13,7 +13,7 @@ import inspect
 
 import pytest
 
-from fastworkflow import tracing
+from fastworkflow.observability import tracing
 from fastworkflow.utils.signatures import InputForParamExtraction
 from tests import span_tree
 from tests.conftest import script_matcher

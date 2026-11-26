@@ -14,7 +14,8 @@ import pytest
 from pydantic import Field
 
 import fastworkflow
-from fastworkflow import command_preview, command_writes, tracing, workflow_agent
+from fastworkflow import command_preview, command_writes, workflow_agent
+from fastworkflow.observability import tracing
 from fastworkflow.command_directory import CommandLoadError
 from fastworkflow.command_routing import RoutingRegistry
 from fastworkflow.planning import phase, run, when
@@ -308,7 +309,7 @@ def test_a_write_that_fails_does_not_use_up_the_phases_count(flaky_writes_env):
 # ----------------------------------------------------------------------
 
 _TABLE_HEAD = (
-    "from fastworkflow.policy_decision import ContractFacts, DecisionTable\n"
+    "from fastworkflow.policy.policy_decision import ContractFacts, DecisionTable\n"
     "TABLE = DecisionTable(version='writes-test/1', rows=())\n"
 )
 
@@ -322,7 +323,7 @@ def _with_policy_table(tmp_path, body: str) -> str:
 
 
 def test_the_policy_reads_the_writes_marks(tmp_path):
-    from fastworkflow.policy_loader import load_policy
+    from fastworkflow.policy.policy_loader import load_policy
 
     RoutingRegistry.clear_registry()
     folder = _with_policy_table(tmp_path, "FACTS = ContractFacts(failure_pattern='Error')\n")
@@ -336,8 +337,8 @@ def test_the_policy_reads_the_writes_marks(tmp_path):
 
 
 def test_a_policy_table_that_lists_its_own_writing_commands_fails_the_load(tmp_path):
-    from fastworkflow.policy_decision import PolicyError
-    from fastworkflow.policy_loader import load_policy
+    from fastworkflow.policy.policy_decision import PolicyError
+    from fastworkflow.policy.policy_loader import load_policy
 
     RoutingRegistry.clear_registry()
     folder = _with_policy_table(tmp_path, "FACTS = ContractFacts(write_commands=frozenset({'add_note'}))\n")

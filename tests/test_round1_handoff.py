@@ -20,7 +20,8 @@ from types import SimpleNamespace
 import pytest
 from dspy.utils import DummyLM
 
-from fastworkflow import review_engine, review_proposals, run_listing, tracing, workflow_agent
+from fastworkflow import review_engine, review_proposals, run_listing, workflow_agent
+from fastworkflow.observability import tracing
 from fastworkflow import approval_binding as ab
 from fastworkflow.review_engine import AWAITING, EXPIRED, REVISED
 from fastworkflow.review_proposals import SubTaskProposal

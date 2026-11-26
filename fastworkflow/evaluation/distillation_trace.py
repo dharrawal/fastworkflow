@@ -27,8 +27,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Optional
 
-from fastworkflow import tracing
-from fastworkflow.distillation import PlanningStep
+from fastworkflow.observability import tracing
+from fastworkflow.evaluation.distillation import PlanningStep
 from fastworkflow.utils.logging import logger
 
 # Phases the comparer anchors feedback to, mapped to the span names that carry
@@ -224,7 +224,7 @@ def _trajectory_from_steps(spans: list[dict[str, Any]]) -> dict[str, Any]:
 def _blocked_by_policy(span: dict[str, Any], by_id: dict[str, dict[str, Any]]) -> bool:
     """Whether a command span belongs to a step a policy rule rewrote.
 
-    Such a command was stopped before it ran (fastworkflow.policy_runtime): its
+    Such a command was stopped before it ran (fastworkflow.policy.policy_runtime): its
     span records the dispatch, but it is not an action the agent took, so the
     comparison must not see it - the live action log leaves it out too.
     """

@@ -18,7 +18,7 @@ import pytest
 from dspy.clients.engines.dummy_engine import AsyncDummyEngine, DummyEngine
 from dspy.utils import DummyLM
 
-from fastworkflow import tracing
+from fastworkflow.observability import tracing
 from fastworkflow.observability.store import ObservabilityStore, SQLiteTraceSink
 from fastworkflow.utils.dspy_logger import DSPyForward, observe_dspy_host
 

@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow.distillation import DistillationSession, distill_message
+from fastworkflow.evaluation.distillation import DistillationSession, distill_message
 from fastworkflow.workflow_agent import _append_action_record
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 

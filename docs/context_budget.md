@@ -105,4 +105,4 @@ are the derived budgets".
 The per-attribute cap on span attributes written to the **observability store**
 is not one: it bounds a database row, not a model prompt, and nothing about it
 scales with a model's window. It is the constant
-`fastworkflow.tracing.MAX_ATTR_BYTES` (16,384), not a setting.
+`fastworkflow.observability.tracing.MAX_ATTR_BYTES` (16,384), not a setting.

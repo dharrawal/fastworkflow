@@ -655,7 +655,7 @@ def _open_workflow_store(args, usage: str):
 
 def _distill_main(args):
     """Run a distillation comparison over recorded runs."""
-    from fastworkflow import distillation_compare
+    from fastworkflow.evaluation import distillation_compare
 
     if problem := _distill_mode_error(args):
         print(f"Error: {problem}", file=sys.stderr)
@@ -804,8 +804,8 @@ def add_policy_parser(subparsers):
 
 def _policy_replay_main(args) -> int:
     """Replay a recorded experiment through a policy table."""
-    from fastworkflow.policy_loader import POLICY_FOLDER, TABLE_FILE, load_policy
-    from fastworkflow.policy_replay import format_report, replay_experiment
+    from fastworkflow.policy.policy_loader import POLICY_FOLDER, TABLE_FILE, load_policy
+    from fastworkflow.evaluation.policy_replay import format_report, replay_experiment
 
     store = _open_workflow_store(
         args,

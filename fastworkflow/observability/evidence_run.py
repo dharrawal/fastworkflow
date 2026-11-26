@@ -48,7 +48,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from fastworkflow import state_paths, tracing
+from fastworkflow.session import state_paths
+from fastworkflow.observability import tracing
 from fastworkflow.observability import store as observability_store
 from fastworkflow.observability.provenance import ObservabilityProvenance
 from fastworkflow.utils.logging import logger

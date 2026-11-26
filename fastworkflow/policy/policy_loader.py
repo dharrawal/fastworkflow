@@ -20,7 +20,7 @@ import importlib.util
 from pathlib import Path
 from typing import Optional
 
-from fastworkflow.policy_decision import (
+from fastworkflow.policy.policy_decision import (
     NO_OP_TABLE,
     ContractFacts,
     DecisionTable,
@@ -158,7 +158,7 @@ def attach_policy(agent, host) -> None:
     ``host`` is the WorkflowExecutionContext the agent serves; the table is
     resolved against its app workflow's folder.
     """
-    from fastworkflow.policy_runtime import AgentPolicy
+    from fastworkflow.policy.policy_runtime import AgentPolicy
 
     workflow = getattr(host, "_app_workflow", None)
     point, facts = load_policy(getattr(workflow, "folderpath", None))

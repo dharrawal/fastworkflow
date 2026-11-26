@@ -24,7 +24,7 @@ import sqlite3
 
 import pytest
 
-from fastworkflow import state_paths
+from fastworkflow.session import state_paths
 from fastworkflow.benchmark import setup
 from fastworkflow.benchmark.catalog import BenchmarkManifestError
 from fastworkflow.experiment.runner import ExperimentController

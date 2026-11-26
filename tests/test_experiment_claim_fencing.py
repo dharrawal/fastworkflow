@@ -16,8 +16,9 @@ from fastapi import HTTPException
 
 import fastworkflow
 from fastworkflow.observability import store as obs
-from fastworkflow import state_paths, tracing
-from fastworkflow.checkpoint_store import (
+from fastworkflow.session import state_paths
+from fastworkflow.observability import tracing
+from fastworkflow.session.checkpoint_store import (
     PROTOCOL_VERSION,
     ChannelCheckpointStore,
     CheckpointIdentity,
@@ -26,7 +27,7 @@ from fastworkflow.command_executor import CommandExecutor
 from fastworkflow.experiment.runner import ExperimentController
 from fastworkflow.run_fastapi_mcp import checkpoint
 from fastworkflow.run_fastapi_mcp.utils import refuse_registered_token_reissue
-from fastworkflow.session_state_store import SCHEMA_VERSION as PENDING_SCHEMA_VERSION
+from fastworkflow.session.session_state_store import SCHEMA_VERSION as PENDING_SCHEMA_VERSION
 from fastworkflow.turn import TurnOutput, TurnResult, TurnStatus
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 

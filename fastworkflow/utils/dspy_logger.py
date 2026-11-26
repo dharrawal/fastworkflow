@@ -21,7 +21,7 @@ from dspy.utils.callback import BaseCallback
 from dspy.utils.callback_context import ACTIVE_CALL_ID
 from pydantic import BaseModel
 
-from fastworkflow import tracing
+from fastworkflow.observability import tracing
 from fastworkflow.utils import dspy_utils
 
 

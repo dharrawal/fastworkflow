@@ -40,7 +40,7 @@ from __future__ import annotations
 import os
 
 import fastworkflow
-from fastworkflow.storage_keys import encode_path_component
+from fastworkflow.session.storage_keys import encode_path_component
 
 # Kept relative-looking on purpose; ``state_root`` expands the ``~`` and
 # absolutises it. XDG's conventional location for persistent app state.

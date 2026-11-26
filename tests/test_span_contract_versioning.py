@@ -56,7 +56,7 @@ import pytest
 
 import fastworkflow
 from fastworkflow.observability import store as obs
-from fastworkflow import tracing
+from fastworkflow.observability import tracing
 from fastworkflow.command_executor import CommandExecutor
 from fastworkflow.observability.evidence_run import capture_observability_provenance
 from fastworkflow.observability.provenance import ObservabilityProvenance
@@ -69,7 +69,7 @@ PACKAGE_ROOT = Path(fastworkflow.__file__).resolve().parent
 # `tracing` defines the emission machinery, so its own `Span(...)` construction is
 # the mechanism rather than an emitter. It is still searched for the shared
 # attribute projections (`capture_attributes`), which three emitters call.
-MECHANISM = "tracing.py"
+MECHANISM = "observability/tracing.py"
 
 
 # ----------------------------------------------------------------------

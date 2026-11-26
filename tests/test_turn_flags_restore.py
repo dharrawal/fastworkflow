@@ -10,7 +10,7 @@ import json
 
 import pytest
 
-from fastworkflow import tracing
+from fastworkflow.observability import tracing
 from fastworkflow import waiting as waiting_module
 from fastworkflow.turn import TurnStatus
 from tests.test_approval_binding import (  # noqa: F401 - fixtures

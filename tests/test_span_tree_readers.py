@@ -17,7 +17,9 @@ from pathlib import Path
 
 import pytest
 
-from fastworkflow import distillation_trace, policy_replay, state_paths, tracing
+from fastworkflow.evaluation import distillation_trace, policy_replay
+from fastworkflow.session import state_paths
+from fastworkflow.observability import tracing
 from fastworkflow.observability import comparison, consistency, diagnosis, turn_derivations
 from fastworkflow.observability import store as obs
 from fastworkflow.run_chatbot import server as run_chatbot_server

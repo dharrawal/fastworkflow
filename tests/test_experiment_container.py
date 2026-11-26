@@ -31,7 +31,8 @@ import pytest
 import fastworkflow
 from fastworkflow.observability import control
 from fastworkflow.observability import store as obs
-from fastworkflow import state_paths, tracing
+from fastworkflow.session import state_paths
+from fastworkflow.observability import tracing
 from fastworkflow.command_executor import CommandExecutor
 from fastworkflow.experiment.runner import (
     ExperimentHarness,

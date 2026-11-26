@@ -40,7 +40,8 @@ from typing import Any, Callable, ClassVar, Optional, Sequence, Union
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 import fastworkflow
-from fastworkflow import intent_loop, parameter_clarification, tracing
+from fastworkflow import intent_loop, parameter_clarification
+from fastworkflow.observability import tracing
 from fastworkflow.no_agent_mode import _bare, is_yes
 
 logger = logging.getLogger(__name__)
@@ -601,7 +602,7 @@ def approved_review_proposal(workflow: Any, spec: str) -> Optional[Proposal]:
 
 def open_for_workflow(workflow: Any, proposal: Proposal, *, items_text: str = "") -> ReviewRecord:
     """Open a proposal review on a workflow's session, suspending the agent call on the prompt."""
-    from fastworkflow import tracing
+    from fastworkflow.observability import tracing
 
     store = store_for(workflow)
     if store is None:

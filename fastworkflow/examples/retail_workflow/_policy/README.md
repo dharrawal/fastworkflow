@@ -1,7 +1,7 @@
 # Retail policy verifiers — worked example
 
 This folder shows what the policy-verifier loop produces for one workflow. The
-engine is generic (`fastworkflow/policy_decision.py`, `policy_runtime.py`). Everything
+engine is generic (`fastworkflow/policy/policy_decision.py`, `policy_runtime.py`). Everything
 here is **retail content**, kept as an example of the shape your own workflow's
 files take.
 

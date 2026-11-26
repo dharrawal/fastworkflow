@@ -13,8 +13,8 @@ import json
 
 import dspy
 
-from fastworkflow import tracing
-from fastworkflow.policy_decision import (
+from fastworkflow.observability import tracing
+from fastworkflow.policy.policy_decision import (
     ContractFacts,
     DecisionPhase,
     DecisionTable,
@@ -23,7 +23,7 @@ from fastworkflow.policy_decision import (
     PolicyOutcome,
     PolicyRow,
 )
-from fastworkflow.policy_runtime import AgentPolicy, policy_of
+from fastworkflow.policy.policy_runtime import AgentPolicy, policy_of
 from fastworkflow.utils.react import fastWorkflowReAct
 
 SIDE = frozenset({DecisionPhase.BEFORE_SIDE_EFFECT})

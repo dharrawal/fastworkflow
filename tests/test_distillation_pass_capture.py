@@ -42,10 +42,11 @@ import pytest
 from dspy.dsp.utils.utils import dotdict
 
 import fastworkflow
-from fastworkflow import state_paths, tracing
+from fastworkflow.session import state_paths
+from fastworkflow.observability import tracing
 from fastworkflow.benchmark import setup
 from fastworkflow.command_executor import CommandExecutor
-from fastworkflow.distillation import DistillationSession, PlanningStep
+from fastworkflow.evaluation.distillation import DistillationSession, PlanningStep
 from fastworkflow.experiment.runner import ExperimentController
 from fastworkflow.observability import comparison as comparison_module
 from fastworkflow.observability import store as obs

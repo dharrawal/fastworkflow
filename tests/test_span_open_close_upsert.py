@@ -25,7 +25,7 @@ import uuid
 import pytest
 
 import fastworkflow.observability.store as obs
-from fastworkflow import tracing
+from fastworkflow.observability import tracing
 
 
 class RecordingTraceSink:

@@ -1,7 +1,7 @@
 """The policy, as one agent runs it over one conversation.
 
 ``AgentPolicy`` is what a ReAct agent holds when its workflow has a policy
-table (``fastworkflow.policy_loader.attach_policy``). It owns the conversation's
+table (``fastworkflow.policy.policy_loader.attach_policy``). It owns the conversation's
 ``PolicyState`` and is consulted at four points, each where the fact it needs
 first exists:
 
@@ -31,7 +31,7 @@ from __future__ import annotations
 import dataclasses
 from typing import Any, Optional
 
-from fastworkflow.policy_decision import (
+from fastworkflow.policy.policy_decision import (
     ASK_USER,
     USER_MESSAGE,
     USER_UTTERANCES,
@@ -139,7 +139,7 @@ class AgentPolicy:
 
     def _read_intent(self, text: str, asked: Optional[str] = None) -> bool:
         """Add the message to the dialogue and update the requests; the consent."""
-        from fastworkflow import policy_intent
+        from fastworkflow.policy import policy_intent
 
         if asked:
             self.state.dialogue.append((policy_intent.ASSISTANT, asked))
@@ -230,7 +230,7 @@ class AgentPolicy:
         """The input with the question judge's reading, when the workflow asks for one."""
         if not (self.facts.judge_questions and self.reads_with_model):
             return inputs
-        from fastworkflow import policy_intent
+        from fastworkflow.policy import policy_intent
 
         if self._judge is None:
             self._judge = policy_intent.QuestionJudge()
@@ -305,12 +305,12 @@ class AgentPolicy:
     # ------------------------------------------------------------------
 
     def describe_intent(self) -> Optional[str]:
-        from fastworkflow.policy_intent import describe
+        from fastworkflow.policy.policy_intent import describe
 
         return describe(tuple(self.state.intent))
 
     def describe_requests(self) -> Optional[str]:
-        from fastworkflow.policy_intent import describe_tracked, tracked_from_dicts
+        from fastworkflow.policy.policy_intent import describe_tracked, tracked_from_dicts
 
         return describe_tracked(tracked_from_dicts(self.state.requests))
 

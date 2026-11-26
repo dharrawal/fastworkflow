@@ -20,20 +20,20 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
 import fastworkflow
-from fastworkflow import serialization_hooks
-from fastworkflow.checkpoint_store import (
+from fastworkflow.session import serialization_hooks
+from fastworkflow.session.checkpoint_store import (
     PROTOCOL_VERSION,
     CheckpointIdentity,
     CheckpointRecord,
     CheckpointStoreError,
     ChannelCheckpointStore,
 )
-from fastworkflow.serialization_hooks import ProjectionOutcome
-from fastworkflow.state_serialization import StateEncodingError
+from fastworkflow.session.serialization_hooks import ProjectionOutcome
+from fastworkflow.session.state_serialization import StateEncodingError
 from fastworkflow.utils.logging import logger
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from fastworkflow.session_state_store import SessionStateStore
+    from fastworkflow.session.session_state_store import SessionStateStore
 
     from .utils import ChannelRuntime
 
@@ -81,7 +81,7 @@ def fleet_protocol_floor() -> int:
 
 
 def get_checkpoint_dir(workflow_path: str) -> str:
-    from fastworkflow import state_paths
+    from fastworkflow.session import state_paths
     return state_paths.checkpoints_dir(workflow_path)
 
 

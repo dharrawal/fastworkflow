@@ -182,7 +182,7 @@ def test_retention_never_reclaims_a_channel_the_process_still_holds(app_module):
         assert manager.checkpoint_for_shutdown([]) >= 1
 
         # Retain nothing by age or count, so only the protection can spare it.
-        from fastworkflow.checkpoint_store import RetentionPolicy
+        from fastworkflow.session.checkpoint_store import RetentionPolicy
 
         report = manager.reap_checkpoints(
             RetentionPolicy(max_age_seconds=1e-6, max_channels=0)

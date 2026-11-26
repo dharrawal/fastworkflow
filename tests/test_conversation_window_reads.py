@@ -29,7 +29,7 @@ import pytest
 
 import fastworkflow
 from fastworkflow import TurnStatus
-from fastworkflow.conversation_history_io import restore_history_from_turns
+from fastworkflow.session.conversation_history_io import restore_history_from_turns
 from fastworkflow.observability import store as obs
 
 # Big enough that reading an excluded turn would be obvious in memory terms, small

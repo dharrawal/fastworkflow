@@ -20,7 +20,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from pydantic_core import PydanticUndefined
 
 import fastworkflow
-from fastworkflow import ModuleType, tracing
+from fastworkflow import ModuleType
+from fastworkflow.observability import tracing
 from fastworkflow.utils.logging import logger
 from fastworkflow.model_pipeline_training import get_route_layer_filepath_model
 from fastworkflow.utils.fuzzy_match import (

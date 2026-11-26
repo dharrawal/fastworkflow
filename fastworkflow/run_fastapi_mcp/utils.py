@@ -18,14 +18,14 @@ from pydantic import BaseModel, Field, field_validator
 
 import fastworkflow
 from fastworkflow import approval_binding, approval_grants
-from fastworkflow.session_state_store import (
+from fastworkflow.session.session_state_store import (
     IncompatibleSessionState,
     PendingReapOutcome,
     PendingRetentionPolicy,
     SessionStateStore,
     get_session_state_store,
 )
-from fastworkflow.state_serialization import StateEncodingError
+from fastworkflow.session.state_serialization import StateEncodingError
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 from fastworkflow.experiment.readiness import runtime_readiness_snapshot
 from fastworkflow.utils.logging import logger
@@ -35,14 +35,14 @@ from fastworkflow.experiment.runner import (
     experiment_store_readiness,
 )
 
-from fastworkflow.checkpoint_store import (
+from fastworkflow.session.checkpoint_store import (
     ChannelCheckpointStore,
     CheckpointIdentity,
     CheckpointStoreError,
     QuarantineReason,
     RetentionPolicy,
 )
-from fastworkflow.conversation_history_io import restore_history_from_turns
+from fastworkflow.session.conversation_history_io import restore_history_from_turns
 from fastworkflow.observability import feedback as observability_feedback
 from fastworkflow.observability.comparison import (
     PassSelector,
@@ -63,7 +63,7 @@ from fastworkflow.observability.store import (
     StoreIdentityMismatch,
     get_observability_sink,
 )
-from fastworkflow.tracing import ATTR_PASS
+from fastworkflow.observability.tracing import ATTR_PASS
 from . import checkpoint
 from . import session_notices
 from .session_notices import SessionNoticeStore
@@ -1298,7 +1298,7 @@ async def _create_user_runtime(
 
 def get_channel_session_state_dir(workflow_path: str) -> str:
     """Workflow-namespaced folder for suspended Topology-B blobs (created)."""
-    from fastworkflow import state_paths
+    from fastworkflow.session import state_paths
     return state_paths.session_state_dir(workflow_path)
 
 
@@ -2081,7 +2081,7 @@ class ChannelSessionManager:
     @property
     def notice_store(self) -> SessionNoticeStore:
         if self._notice_store is None:
-            from fastworkflow import state_paths
+            from fastworkflow.session import state_paths
             self._notice_store = SessionNoticeStore(
                 os.path.join(state_paths.workflow_state_dir(self.workflow_path), "session_notices")
             )

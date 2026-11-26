@@ -30,7 +30,8 @@ import time
 import uuid
 from typing import Any, Optional
 
-from fastworkflow import state_paths, tracing
+from fastworkflow.session import state_paths
+from fastworkflow.observability import tracing
 
 logger = logging.getLogger(__name__)
 

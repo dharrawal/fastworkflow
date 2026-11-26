@@ -38,7 +38,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from fastworkflow.observability import store as obs
-from fastworkflow import state_paths
+from fastworkflow.session import state_paths
 from fastworkflow.cli import add_run_chatbot_parser
 from fastworkflow.run_chatbot import launcher
 from fastworkflow.run_chatbot import server as run_chatbot_server
@@ -314,7 +314,7 @@ class TestChatbotTestModeAssets:
         assert b"https://" not in page
 
     def test_page_csp_connects_to_loopback_only(self, tmp_path, monkeypatch):
-        from fastworkflow import state_paths
+        from fastworkflow.session import state_paths
         from fastworkflow.run_chatbot import server as run_chatbot_server
 
         monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "state"))

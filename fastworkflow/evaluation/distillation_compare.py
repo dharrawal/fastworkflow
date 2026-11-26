@@ -33,8 +33,8 @@ from typing import Any, Optional
 
 import dspy
 
-from fastworkflow import distillation_trace as dtrace
-from fastworkflow.distillation import DistillationSession
+from fastworkflow.evaluation import distillation_trace as dtrace
+from fastworkflow.evaluation.distillation import DistillationSession
 from fastworkflow.observability import feedback as obs_feedback
 from fastworkflow.observability.store import FEEDBACK_COMMENT_MAX_CHARS
 from fastworkflow.utils import dspy_utils

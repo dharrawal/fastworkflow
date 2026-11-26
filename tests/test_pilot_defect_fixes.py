@@ -2,7 +2,7 @@ import json
 
 import dspy
 import pytest
-from fastworkflow.conversation_summary import bounded_summary_inputs
+from fastworkflow.session.conversation_summary import bounded_summary_inputs
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 
 

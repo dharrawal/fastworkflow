@@ -22,7 +22,8 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow import state_paths, tracing
+from fastworkflow.session import state_paths
+from fastworkflow.observability import tracing
 from fastworkflow.observability import store as obs
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 

@@ -2,7 +2,7 @@
 
 The rules here are RETAIL CONTENT - an example of what a table compiled from
 distillation looks like, not part of the framework. The engine
-(``fastworkflow.policy_decision``) knows no workflow; this file is what a
+(``fastworkflow.policy.policy_decision``) knows no workflow; this file is what a
 workflow supplies. It is on because it is here, at ``_policy/table.py`` in the
 workflow folder; there is no setting.
 
@@ -38,7 +38,7 @@ from __future__ import annotations
 import json
 import re
 
-from fastworkflow.policy_decision import (
+from fastworkflow.policy.policy_decision import (
     USER_MESSAGE,
     USER_UTTERANCES,
     ContractFacts,

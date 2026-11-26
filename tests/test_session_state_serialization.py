@@ -12,7 +12,7 @@ from unittest.mock import MagicMock
 import pytest
 
 import fastworkflow
-from fastworkflow.session_state_store import (
+from fastworkflow.session.session_state_store import (
     SAVED_AT_KEY,
     SCHEMA_VERSION,
     DiskSessionStateStore,

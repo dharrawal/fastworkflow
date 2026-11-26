@@ -1,4 +1,4 @@
-"""Replaying recorded runs through a policy table (fastworkflow.policy_replay).
+"""Replaying recorded runs through a policy table (fastworkflow.evaluation.policy_replay).
 
 A real ObservabilityStore in tmp_path, seeded with one recorded attempt the way
 a live turn writes it: the turn row (labelled with its experiment, task and
@@ -10,16 +10,16 @@ from __future__ import annotations
 
 import json
 
-from fastworkflow import tracing
+from fastworkflow.observability import tracing
 from fastworkflow.observability import store as obs
-from fastworkflow.policy_decision import (
+from fastworkflow.policy.policy_decision import (
     ContractFacts,
     DecisionPhase,
     DecisionTable,
     PolicyOutcome,
     PolicyRow,
 )
-from fastworkflow.policy_replay import format_report, replay_attempt
+from fastworkflow.evaluation.policy_replay import format_report, replay_attempt
 
 EXPERIMENT, TASK = "exp-1", "t1"
 FACTS = ContractFacts(write_commands=frozenset({"close_ticket"}))
@@ -153,7 +153,7 @@ def test_an_attempt_with_no_turns_is_reported_not_guessed(tmp_path):
 
 
 def test_the_report_names_each_intervention_and_the_totals(tmp_path):
-    from fastworkflow.policy_replay import ReplayReport
+    from fastworkflow.evaluation.policy_replay import ReplayReport
 
     store = _store_with(tmp_path, [_recorded_attempt(2, list_first=False)])
     report = ReplayReport(EXPERIMENT, TABLE.version, live=False, attempts=[
@@ -167,7 +167,7 @@ def test_the_report_names_each_intervention_and_the_totals(tmp_path):
 def test_distillation_does_not_count_a_blocked_command_as_an_action(tmp_path):
     """A blocked command still has its dispatch span (fw.command, failed),
     but it never ran: the trace distillation compares leaves it out."""
-    from fastworkflow import distillation_trace as dtrace
+    from fastworkflow.evaluation import distillation_trace as dtrace
 
     key = "turn-7"
     spans = _Spans(key, 7)

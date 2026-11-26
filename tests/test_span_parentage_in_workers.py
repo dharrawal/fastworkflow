@@ -17,7 +17,9 @@ from types import SimpleNamespace
 import pytest
 from pydantic import BaseModel
 
-from fastworkflow import planning_commands, subtask_pool, tracing
+from fastworkflow import planning_commands
+from fastworkflow.utils import subtask_pool
+from fastworkflow.observability import tracing
 from fastworkflow.utils import signatures
 
 WAIT = 20

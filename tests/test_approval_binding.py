@@ -681,7 +681,7 @@ def test_a_second_gated_call_while_one_awaits_is_not_run_and_not_kept(todo, anno
 
 @pytest.fixture
 def grant_root(tmp_path, monkeypatch):
-    import fastworkflow.state_paths as state_paths
+    import fastworkflow.session.state_paths as state_paths
     monkeypatch.setattr(state_paths, "state_root", lambda: str(tmp_path / "state"))
     return tmp_path / "state"
 
@@ -977,7 +977,7 @@ def test_a_legacy_channel_grant_still_approves_on_the_cli_and_not_on_the_chat_or
 
 
 def state_paths_workflow_id(todo) -> str:
-    import fastworkflow.state_paths as state_paths
+    import fastworkflow.session.state_paths as state_paths
     return state_paths.workflow_id(todo.wf.folderpath)
 
 

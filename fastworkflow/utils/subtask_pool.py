@@ -23,7 +23,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Optional, Sequence, TypeVar
 
-from fastworkflow import tracing
+from fastworkflow.observability import tracing
 from fastworkflow.utils.logging import logger
 
 T = TypeVar("T")

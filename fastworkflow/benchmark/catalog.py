@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePath, PureWindowsPath
 from typing import Any
 
-from fastworkflow import state_paths
+from fastworkflow.session import state_paths
 from fastworkflow.observability import control
 from fastworkflow.observability.store import open_live_store, open_live_store_for_write
 

@@ -247,8 +247,8 @@ def test_the_slash_path_refuses_a_value_its_pattern_does_not_match_in_full(accou
 
 
 def test_the_policy_fallback_keeps_the_flags_of_the_workflows_id_patterns(tmp_path):
-    from fastworkflow.policy_decision import ContractFacts
-    from fastworkflow.policy_loader import with_workflow_identifiers
+    from fastworkflow.policy.policy_decision import ContractFacts
+    from fastworkflow.policy.policy_loader import with_workflow_identifiers
 
     (tmp_path / "_commands").mkdir()
     (tmp_path / "_commands" / "_workflow.py").write_text(

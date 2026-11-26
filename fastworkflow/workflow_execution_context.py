@@ -37,13 +37,14 @@ import dspy
 
 import fastworkflow
 import fastworkflow.turn
-from fastworkflow import active_workflow, metrics, planning_commands, tracing
+from fastworkflow import active_workflow, planning_commands
+from fastworkflow.observability import metrics, tracing
 from fastworkflow import approval_binding, intent_loop, no_agent_mode, turn_cache
 from fastworkflow import waiting as waiting_module
 from fastworkflow.parameters import check as one_guard, reply as replies
 from fastworkflow.observation_offloading.state import current_execute_alias
-from fastworkflow.session_state_store import SCHEMA_VERSION, IncompatibleSessionState
-from fastworkflow.state_serialization import validate_state
+from fastworkflow.session.session_state_store import SCHEMA_VERSION, IncompatibleSessionState
+from fastworkflow.session.state_serialization import validate_state
 from fastworkflow.plan_frame import PlanFrame, runs_outside_ranges, turn_max_steps
 from fastworkflow.observability import store as observability_store
 from fastworkflow.observability.execution_recorder import ExecutionRecorder, record_execution
@@ -1693,7 +1694,7 @@ class WorkflowExecutionContext:
         if self._app_workflow and self._app_workflow._current_command_context is not None:
             current_context_name = self._app_workflow._current_command_context_name
 
-        from fastworkflow.conversation_history_io import extract_turns_from_history
+        from fastworkflow.session.conversation_history_io import extract_turns_from_history
 
         nested = self._frame_stack()[1:]
         payload = {
@@ -1760,7 +1761,7 @@ class WorkflowExecutionContext:
         # The policy verifier's memory of the conversation, only when a policy is
         # enabled: a session resumed in another process keeps what was read and
         # asked. Absent otherwise, so a state written without a policy is unchanged.
-        from fastworkflow.policy_runtime import policy_of
+        from fastworkflow.policy.policy_runtime import policy_of
 
         if policy := policy_of(self._workflow_tool_agent):
             payload["policy_state"] = policy.export_state()
@@ -1852,7 +1853,7 @@ class WorkflowExecutionContext:
                 self._server_incarnation = state["server_incarnation"]
 
         if turns := state.get("conversation_history_turns") or []:
-            from fastworkflow.conversation_history_io import restore_history_from_turns
+            from fastworkflow.session.conversation_history_io import restore_history_from_turns
 
             self._conversation_history = restore_history_from_turns(turns)
 
@@ -1878,7 +1879,7 @@ class WorkflowExecutionContext:
         # Restore the turn agent with the turn frame on top: _workflow_tool_agent reads the top frame.
         del self._frame_stack()[1:]
         if state.get("policy_state") is not None:
-            from fastworkflow.policy_runtime import policy_of
+            from fastworkflow.policy.policy_runtime import policy_of
 
             self._ensure_agent_initialized()
             if policy := policy_of(self._workflow_tool_agent):
@@ -3170,7 +3171,7 @@ class WorkflowExecutionContext:
 
         if self._app_workflow:
             self._app_workflow.context["raw_user_message"] = message
-        from fastworkflow.policy_runtime import policy_of
+        from fastworkflow.policy.policy_runtime import policy_of
 
         if policy := policy_of(self._workflow_tool_agent):
             policy.observe_turn(message)
@@ -3720,7 +3721,7 @@ class WorkflowExecutionContext:
         agent.finish_reviewer = None
         # *final*: this run ends the turn (the last sub-task, the last phase). The
         # policy's finish check reads the answer against the whole request, so it
-        # only runs there (fastworkflow.policy_runtime).
+        # only runs there (fastworkflow.policy.policy_runtime).
         agent.policy_final_run = final
         from fastworkflow.observation_offloading import finish_check
 
@@ -4918,7 +4919,7 @@ class WorkflowExecutionContext:
         budget, and ask_user is off for an unattended turn. Also set on a restored frame, which
         is built the same way before its suspended state is imported."""
         frame.agent = self._build_react_agent()
-        # One policy verifier per conversation (fastworkflow.policy_runtime): a nested planning-command
+        # One policy verifier per conversation (fastworkflow.policy.policy_runtime): a nested planning-command
         # frame shares the turn agent's, so what was read and asked is remembered across frames.
         turn_policy = getattr(self._turn_frame().agent, "policy", None)
         if turn_policy is not None:
@@ -6041,7 +6042,7 @@ class WorkflowExecutionContext:
         # CommandOutput. Guarded on user_message_queue so it can never run over a
         # Topology-B suspended trajectory.
         if self._generate_insights and self.user_message_queue is not None:
-            from fastworkflow.distillation import distill_message
+            from fastworkflow.evaluation.distillation import distill_message
             result = distill_message(self, message)
             self._distillation_insights_count += result.insights_extracted
             self._maybe_enqueue_output(result.command_output)
@@ -6595,7 +6596,7 @@ class WorkflowExecutionContext:
                 desc="A multiline paragraph summary"
             )
 
-        from fastworkflow.conversation_summary import bounded_summary_inputs
+        from fastworkflow.session.conversation_summary import bounded_summary_inputs
 
         inputs = bounded_summary_inputs(user_query, workflow_actions, final_agent_response)
         try:

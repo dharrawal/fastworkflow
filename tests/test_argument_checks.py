@@ -13,7 +13,8 @@ import pytest
 from dspy.utils import DummyLM
 from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 
-from fastworkflow import command_preview, tracing, workflow_agent
+from fastworkflow import command_preview, workflow_agent
+from fastworkflow.observability import tracing
 from fastworkflow import planning_commands as pc
 from fastworkflow.plan_frame import TURN_MAX_STEPS_ENV
 from fastworkflow.planning_commands import PlanningCommandInputError

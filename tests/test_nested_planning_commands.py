@@ -21,7 +21,7 @@ import fastworkflow
 import fastworkflow.workflow_agent as workflow_agent
 from fastworkflow import planning_commands, planning_phases
 from fastworkflow import plan_frame as plan_frame_module
-from fastworkflow import tracing
+from fastworkflow.observability import tracing
 from fastworkflow.command_executor import CommandExecutor, CommandNotFoundError
 from fastworkflow.context_identity import context_class_for
 from fastworkflow.planning import run
@@ -38,7 +38,7 @@ from fastworkflow.typed_phase_facts import fill_typed_phase_output
 from fastworkflow.examples.library._commands.Library.book_by_title import Signature as BookByTitle
 from fastworkflow.examples.library._commands.Library.find_book import Signature as FindBook
 from fastworkflow.planning_commands import PlanningCommandInputError
-from fastworkflow.state_serialization import validate_state
+from fastworkflow.session.state_serialization import validate_state
 from fastworkflow.turn import TurnStatus
 from fastworkflow.workflow_execution_context import (
     AWAITING_ANSWER_REFUSAL_MESSAGE,

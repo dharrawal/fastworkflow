@@ -13,8 +13,8 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow import state_paths
-from fastworkflow.storage_keys import encode_path_component
+from fastworkflow.session import state_paths
+from fastworkflow.session.storage_keys import encode_path_component
 
 
 @pytest.fixture(autouse=True)

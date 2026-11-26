@@ -18,7 +18,8 @@ from unittest.mock import MagicMock
 import pytest
 
 import fastworkflow
-from fastworkflow import TurnStatus, metrics, tracing, workflow_agent
+from fastworkflow import TurnStatus, workflow_agent
+from fastworkflow.observability import metrics, tracing
 from fastworkflow.command_executor import CommandExecutor
 from fastworkflow.observability import store as obs
 from fastworkflow.utils.react import AskUserSuspend, fastWorkflowReAct
@@ -301,7 +302,7 @@ class TestAssistantPathEmission:
         turn_output = ctx.process_turn("list_todos")
         assert turn_output.success
         assert isinstance(ctx.trace_sink, obs.SQLiteTraceSink)
-        assert ctx.trace_sink.store.db_path == fastworkflow.state_paths.observability_db(
+        assert ctx.trace_sink.store.db_path == fastworkflow.session.state_paths.observability_db(
             todo_workflow_path
         )
 

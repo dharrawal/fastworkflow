@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from fastworkflow import tracing
+from fastworkflow.observability import tracing
 from fastworkflow.observability import store as obs
 from fastworkflow.observability.comparison import (
     ATTRIBUTION_PASS,

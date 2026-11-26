@@ -19,7 +19,7 @@ import pytest
 
 import fastworkflow
 from fastworkflow.command_executor import CommandExecutor
-from fastworkflow.policy_decision import (
+from fastworkflow.policy.policy_decision import (
     ContractFacts,
     DecisionPhase,
     DecisionTable,
@@ -28,7 +28,7 @@ from fastworkflow.policy_decision import (
     PolicyOutcome,
     PolicyRow,
 )
-from fastworkflow.policy_runtime import AgentPolicy
+from fastworkflow.policy.policy_runtime import AgentPolicy
 from fastworkflow.utils.react import fastWorkflowReAct
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 

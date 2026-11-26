@@ -98,7 +98,7 @@ def admin_enabled(app_module):
 def test_fastapi_imports(app_module):
     """Test that the main module and its conversation components import."""
     try:
-        from fastworkflow.conversation_labeling import generate_topic_and_summary
+        from fastworkflow.session.conversation_labeling import generate_topic_and_summary
         from fastworkflow.observability.store import ObservabilityStore
         from fastworkflow.run_fastapi_mcp.utils import ConversationSummary
 

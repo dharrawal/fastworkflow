@@ -13,7 +13,7 @@ import pytest
 
 from fastworkflow.benchmark import setup as benchmark_setup
 from fastworkflow.observability import store as obs
-from fastworkflow import state_paths
+from fastworkflow.session import state_paths
 from fastworkflow.benchmark.catalog import (
     SCHEMA,
     list_benchmarks,

@@ -15,7 +15,7 @@ import pytest
 from dotenv import dotenv_values
 
 import fastworkflow
-from fastworkflow import tracing
+from fastworkflow.observability import tracing
 from fastworkflow._workflows.command_metadata_extraction.intent_detection import (
     ESCALATION_OUTCOMES,
 )

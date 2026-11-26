@@ -32,8 +32,8 @@ from fastworkflow.plan_frame import (
     PlanFrame,
     turn_max_steps,
 )
-from fastworkflow.session_state_store import SCHEMA_VERSION
-from fastworkflow.state_serialization import validate_state
+from fastworkflow.session.session_state_store import SCHEMA_VERSION
+from fastworkflow.session.state_serialization import validate_state
 from fastworkflow.turn import TurnStatus
 from fastworkflow.utils.logging import logger as fastworkflow_logger
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext

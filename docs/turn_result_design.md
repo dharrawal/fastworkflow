@@ -455,7 +455,7 @@ in lifetime/transport:
 
 ### 7.1 Current persistence mechanism (baseline)
 
-`fastworkflow/session_state_store.py` defines `SessionStateStore` (ABC) with six abstract members —
+`fastworkflow/session/session_state_store.py` defines `SessionStateStore` (ABC) with six abstract members —
 `load`/`save`/`clear`/`exists`/`iter_entries`/`remove_at` — keyed by `channel_id`, plus one concrete
 `reap` that applies a `PendingRetentionPolicy` over what `iter_entries` yields. `iter_entries` yields
 a `PendingEntry` NamedTuple (`channel_id`, `saved_at`, `storage_key`) rather than a bare tuple, and
@@ -464,7 +464,7 @@ blob, so carrying the backend's own key is what lets `reap` remove the blob it e
 one re-derived from that blob's self-reported channel id. Two backends:
 
 - `DiskSessionStateStore` — one JSON file per channel (`{encoded_id}.pending.json`, percent-encoded
-  through `fastworkflow/storage_keys.py` so two channel ids can never share a file), written with
+  through `fastworkflow/session/storage_keys.py` so two channel ids can never share a file), written with
   the strict encoder rather than `default=str`.
 - `RedisSessionStateStore` — one JSON string per channel under `fw:session:pending:{channel_id}`.
 

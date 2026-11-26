@@ -26,7 +26,8 @@ from pathlib import Path
 import dspy
 
 import fastworkflow
-from fastworkflow import state_paths, tracing
+from fastworkflow.session import state_paths
+from fastworkflow.observability import tracing
 from fastworkflow.observability.store import SQLiteTraceSink
 from fastworkflow.observation_offloading.agent import (
     build_tool_agent,

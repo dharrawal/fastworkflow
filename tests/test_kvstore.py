@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from fastworkflow.kvstore import KVStore
+from fastworkflow.session.kvstore import KVStore
 
 
 def test_kvstore_round_trip_and_keyerror(tmp_path: Path):

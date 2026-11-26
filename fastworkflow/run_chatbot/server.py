@@ -48,7 +48,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, NamedTuple, Optional
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from fastworkflow import state_paths
+from fastworkflow.session import state_paths
 from fastworkflow.observability import feedback, selection
 from fastworkflow.observability.diagnosis import InvalidTurnQuery, search_turns
 from fastworkflow.observability.derived_cache import DerivedTurnCache

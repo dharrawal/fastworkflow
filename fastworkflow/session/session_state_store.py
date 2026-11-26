@@ -16,8 +16,8 @@ from dataclasses import dataclass
 from typing import Any, Iterable, NamedTuple, Optional
 
 import fastworkflow
-from fastworkflow.state_serialization import encode_state
-from fastworkflow.storage_keys import encode_path_component
+from fastworkflow.session.state_serialization import encode_state
+from fastworkflow.session.storage_keys import encode_path_component
 from fastworkflow.utils.logging import logger
 
 PENDING_STATE_KEY = "pending"
@@ -551,7 +551,7 @@ def get_session_state_store(
     Factory: SESSION_STATE_STORE=disk|redis (default disk).
 
     For disk, uses base_folder when given; callers with a workflow in scope pass
-    a workflow-namespaced folder (see fastworkflow.state_paths). When omitted it
+    a workflow-namespaced folder (see fastworkflow.session.state_paths). When omitted it
     falls back to a non-namespaced folder under the state root.
     For redis, uses SESSION_STATE_REDIS_URL or REDIS_URL.
     """
@@ -571,7 +571,7 @@ def get_session_state_store(
         return RedisSessionStateStore(url)
 
     if base_folder is None:
-        from fastworkflow import state_paths
+        from fastworkflow.session import state_paths
         base_folder = os.path.join(state_paths.state_root(), "channel_session_state")
     os.makedirs(base_folder, exist_ok=True)
     logger.debug(f"Using DiskSessionStateStore at {base_folder}")

@@ -15,7 +15,7 @@ from typing import Any, Optional
 
 def archives_directory(workflow_path: str) -> str:
     """The archives folder for a workflow. Does not create it."""
-    from fastworkflow import state_paths
+    from fastworkflow.session import state_paths
 
     return os.path.join(
         os.path.dirname(state_paths.observability_db(workflow_path)),

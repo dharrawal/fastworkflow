@@ -29,7 +29,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # already pins that it exports nothing to branch on.
 SCANNED_FILES = (
     "fastworkflow/command_executor.py",
-    "fastworkflow/tracing.py",
+    "fastworkflow/observability/tracing.py",
     "fastworkflow/workflow_execution_context.py",
 )
 

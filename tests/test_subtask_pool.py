@@ -23,7 +23,8 @@ from tests.conftest import script_matcher
 from dspy.utils import DummyLM
 
 import fastworkflow
-from fastworkflow import review_proposals, subtask_pool, turn_cache, turn_progress
+from fastworkflow import review_proposals, turn_cache, turn_progress
+from fastworkflow.utils import subtask_pool
 from fastworkflow.turn_progress import ProgressEvent
 from fastworkflow.utils import dspy_logger, signatures
 from tests.test_drafted_subtask_inputs import (  # noqa: F401 - the library copy with its trained heads, and the guards

@@ -25,7 +25,8 @@ from dspy.utils import DummyLM
 
 import fastworkflow
 from fastworkflow import model_pipeline_training
-from fastworkflow import intent_detector, run_listing, tracing, turn_cache, workflow_agent
+from fastworkflow import intent_detector, run_listing, turn_cache, workflow_agent
+from fastworkflow.observability import tracing
 from fastworkflow._workflows.command_metadata_extraction import intent_detection
 from fastworkflow._workflows.command_metadata_extraction.intent_detection import (
     CommandNamePrediction, command_identity_uncertainty)

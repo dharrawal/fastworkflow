@@ -36,7 +36,8 @@ from pathlib import Path
 
 import pytest
 
-from fastworkflow import state_paths, tracing
+from fastworkflow.session import state_paths
+from fastworkflow.observability import tracing
 from fastworkflow.observability import store as obs
 from fastworkflow.experiment.runner import ExperimentController
 from fastworkflow.run_chatbot import server as run_chatbot_server

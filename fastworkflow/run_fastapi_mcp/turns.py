@@ -44,7 +44,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 
 import fastworkflow
 from fastworkflow import approval_binding
-from fastworkflow.state_serialization import StateEncodingError
+from fastworkflow.session.state_serialization import StateEncodingError
 from fastworkflow.turn import TurnStatus
 from fastworkflow.utils.logging import logger
 from fastworkflow.utils.react import NoSuspendedAgentStateError
@@ -54,7 +54,7 @@ from .checkpoint import (
     STARTUP_SUCCEEDED,
     STARTUP_SUSPENDED,
 )
-from fastworkflow.conversation_labeling import generate_topic_and_summary
+from fastworkflow.session.conversation_labeling import generate_topic_and_summary
 from .utils import (
     collect_trace_events,
     trim_conversation_window,

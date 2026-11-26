@@ -385,7 +385,7 @@ def call_scope(call_id: str, *, command_name: Optional[str] = None) -> Iterator[
 # recorded before this carries no such key.
 #
 # v38: fw.agent.step v8 (main's policy verifiers, merged into the unified command architecture) -- the
-# policy verifier's decision on a step it rewrote (fastworkflow.policy_runtime): `policy_mode`, `policy_outcome`,
+# policy verifier's decision on a step it rewrote (fastworkflow.policy.policy_runtime): `policy_mode`, `policy_outcome`,
 # `policy_source`, `policy_table_version`, `policy_intent`, `policy_requests`, `policy_judgement`, and `answer`
 # (the answer a finish policy sent back). Main numbered this v24; on this line it follows v37.
 #

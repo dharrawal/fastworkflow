@@ -34,7 +34,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 from urllib.parse import unquote
 
-from fastworkflow import state_paths
+from fastworkflow.session import state_paths
 from fastworkflow.observability import control
 from fastworkflow.observability.archive_files import (
     archive_file_for,
@@ -51,7 +51,7 @@ from fastworkflow.observability.store import (
     WriterStillOpen,
     open_live_store,
 )
-from fastworkflow.storage_keys import encode_path_component
+from fastworkflow.session.storage_keys import encode_path_component
 
 SEALED_PREFIX = "/api/archived-experiments"
 RELEASES_PATH = "/api/evidence-releases"
