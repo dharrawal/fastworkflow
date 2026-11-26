@@ -1397,20 +1397,22 @@ Today's date is {today}.
             # of one argument does not drop a sure verdict or a respelling of another
             args, notes = planning_commands.checked_around_gaps(
                 command, raw, request, None if hasattr(verdicts, "result") else verdicts)
-            self._write_guarded(cmd_parameters, args, notes, diagnostics)
+            self._write_guarded(command, cmd_parameters, args, notes, diagnostics)
             return refusal
-        self._write_guarded(cmd_parameters, args, notes, diagnostics)
+        self._write_guarded(command, cmd_parameters, args, notes, diagnostics)
         return None
 
-    def _write_guarded(self, cmd_parameters: BaseModel, args: dict, notes: list,
+    def _write_guarded(self, command, cmd_parameters: BaseModel, args: dict, notes: list,
                        diagnostics: Optional[Dict[str, Any]]) -> None:
         """Write the guarded *args* onto *cmd_parameters*, and their *notes* into *diagnostics*. The duplicate rule's
         notes of the optional fields it left not given are kept as ``left_empty`` (the lines a question and the review
-        item show; ``validate_parameters`` names them on the span)."""
+        item show; ``validate_parameters`` names them on the span). An absent argument is written as the field's own
+        default, as the planning path reads it (``planning_commands._absent_as_none``: ``""`` of an ``Optional[str] =
+        None`` field is None)."""
         self.left_empty = ask.left_empty_lines(notes)
         if diagnostics is not None and notes:
             diagnostics["argument_notes"] = list(notes)
-        for name, value in args.items():
+        for name, value in planning_commands._absent_as_none(command, args).items():
             set_field_unvalidated(cmd_parameters, name, value)
 
     @staticmethod
