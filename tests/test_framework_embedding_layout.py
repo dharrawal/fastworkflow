@@ -83,8 +83,10 @@ def isolate_registry():
 
 def test_the_framework_layout_is_embedding():
     assert layout.FRAMEWORK_LAYOUT == layout.EMBEDDING
-    for path in (PLAN_WORKFLOW, CME, fastworkflow.get_fastworkflow_package_path()):
+    for path in (PLAN_WORKFLOW, CME):
         assert layout.is_framework_workflow(path)
+    # the package that holds them is no workflow (fix-bl97.2)
+    assert not layout.is_framework_workflow(fastworkflow.get_fastworkflow_package_path())
 
 
 @pytest.mark.usefixtures("isolate_registry")

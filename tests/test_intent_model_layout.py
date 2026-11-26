@@ -117,7 +117,8 @@ def test_the_frameworks_own_workflows_are_trained_in_the_framework_layout(monkey
         _with_setting(monkeypatch, setting)
         assert layout.layout_for_workflow(internal) == layout.FRAMEWORK_LAYOUT
         assert layout.layout_for_workflow(plan) == layout.FRAMEWORK_LAYOUT
-        assert layout.layout_for_workflow(package) == layout.FRAMEWORK_LAYOUT
+        # the package that holds them is no workflow (fix-bl97.2): it is read as any other folder
+        assert layout.layout_for_workflow(package) == application
         assert layout.layout_for_workflow(str(tmp_path)) == application
 
 

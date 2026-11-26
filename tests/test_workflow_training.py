@@ -89,7 +89,9 @@ class TestWorkflowTraining:
         )
 
         fastworkflow.init(env_vars=env_vars)
-        train_workflow(workflow_paths["fastworkflow_package_path"])
+        # The package is no workflow (fix-bl97.2): its own workflows are trained directly.
+        for name in ("command_metadata_extraction", "plan_metadata_extraction"):
+            train_workflow(fastworkflow.get_internal_workflow_path(name))
 
         # Verify that the expected artifacts were created
         command_info_path = _get_command_info_folderpath(

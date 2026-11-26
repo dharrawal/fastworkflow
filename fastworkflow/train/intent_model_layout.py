@@ -294,8 +294,7 @@ def embedding_settings(workflow_folderpath: Optional[str] = None) -> dict:
 
 def is_framework_workflow(workflow_folderpath: str) -> bool:
     """Whether *workflow_folderpath* is one of the framework's own workflows: the command
-    metadata extraction workflow, the plan metadata extraction workflow or the package root that holds them."""
-    import fastworkflow
+    metadata extraction workflow or the plan metadata extraction workflow."""
     from fastworkflow.model_pipeline_training import (
         is_internal_cme_folder,
         is_plan_metadata_extraction_folder,
@@ -304,8 +303,6 @@ def is_framework_workflow(workflow_folderpath: str) -> bool:
     return bool(
         is_internal_cme_folder(workflow_folderpath)
         or is_plan_metadata_extraction_folder(workflow_folderpath)
-        or os.path.realpath(workflow_folderpath)
-        == os.path.realpath(fastworkflow.get_fastworkflow_package_path())
     )
 
 
@@ -313,7 +310,7 @@ def layout_for_workflow(workflow_folderpath: str) -> str:
     """The layout `fastworkflow train` writes for *workflow_folderpath*.
 
     The setting, except for the framework's own workflows (the command metadata extraction
-    workflow, the plan metadata extraction workflow and the package root that holds them). Those are
+    workflow and the plan metadata extraction workflow). Those are
     trained with a construction of their own and are shared by every application, so an
     application's setting must not change them: they get `FRAMEWORK_LAYOUT`.
     """

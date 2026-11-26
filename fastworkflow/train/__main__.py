@@ -810,26 +810,8 @@ def _get_commands_with_parameters(json_path):
     
     return commands_with_parameters
 
-def _trains_the_fastworkflow_package(workflow_path: str) -> bool:
-    """True when *workflow_path* is the fastworkflow package root or its CME workflow.
-
-    Those train the CME themselves (the root recurses into ``_workflows``), so the automatic
-    CME check is skipped for them. This used to be a substring test on the path, which skipped
-    the CME check for every workflow inside a checkout named ``fastworkflow``; that made the
-    CME unretrainable through ``fastworkflow train <app>`` there.
-    """
-    from fastworkflow.model_pipeline_training import (
-        is_internal_cme_folder,
-        is_plan_metadata_extraction_folder,
-    )
-
-    package = os.path.realpath(fastworkflow.get_fastworkflow_package_path())
-    real = os.path.realpath(workflow_path)
-    return (
-        real == package
-        or is_internal_cme_folder(workflow_path)
-        or is_plan_metadata_extraction_folder(workflow_path)
-    )
+#: The framework's own workflows (``fastworkflow/_workflows/<name>``), trained before any application's.
+FRAMEWORK_WORKFLOWS = ("command_metadata_extraction", "plan_metadata_extraction")
 
 
 def _internal_workflow_trained(
@@ -891,12 +873,7 @@ def _internal_workflow_trained(
 
 def is_fast_workflow_trained(fastworkflow_folderpath: str):
     """True when shipped internal workflows have fresh, complete training artifacts."""
-    return (
-        _internal_workflow_trained(
-            fastworkflow_folderpath, "command_metadata_extraction"
-        )
-        and _internal_workflow_trained(fastworkflow_folderpath, "plan_metadata_extraction")
-    )
+    return all(_internal_workflow_trained(fastworkflow_folderpath, name) for name in FRAMEWORK_WORKFLOWS)
 
 
 def train_main(args):
@@ -908,6 +885,13 @@ def train_main(args):
         print(
             f"{Fore.RED}Error: The specified workflow path '{workflow_path}' is not a valid directory.{Style.RESET_ALL}"
         )
+        exit(1)
+    fastworkflow_folderpath = fastworkflow.get_fastworkflow_package_path()
+    if os.path.realpath(workflow_path) == os.path.realpath(fastworkflow_folderpath):
+        # The package holds workflows but is not one: training it wrote artefacts into the package itself.
+        print(f"{Fore.RED}Error: the fastworkflow package is not a workflow. Its own workflows are trained by "
+              f"`fastworkflow train <your workflow>` when they need it, or one at a time: `fastworkflow train "
+              f"{os.path.join(fastworkflow_folderpath, '_workflows', '<name>')}`.{Style.RESET_ALL}", file=sys.stderr)
         exit(1)
 
     # A command file that does not load would be missing from the model: stop before any training work.
@@ -935,18 +919,18 @@ def train_main(args):
     fastworkflow.init(env_vars=env_vars)
 
     regenerate_utterances = getattr(args, "regenerate_utterances", False)
-    # Check if fastworkflow has been trained, and train it if not. The regeneration
-    # flag is forwarded when CME training is already required; it does not force
-    # otherwise-unneeded CME retraining.
-    fastworkflow_folderpath = fastworkflow.get_fastworkflow_package_path()
+    # Check if the framework's own workflows have been trained, and train them if not. The
+    # regeneration flag is forwarded when their training is already required; it does not force
+    # otherwise-unneeded retraining. Training one of them names it directly, so the check is skipped.
     if (
-        not _trains_the_fastworkflow_package(workflow_path) and
+        not intent_model_layout.is_framework_workflow(workflow_path) and
         not is_fast_workflow_trained(fastworkflow_folderpath)
     ):
-        train_workflow(
-            fastworkflow_folderpath,
-            regenerate_utterances=regenerate_utterances,
-        )
+        for name in FRAMEWORK_WORKFLOWS:
+            train_workflow(
+                fastworkflow.get_internal_workflow_path(name),
+                regenerate_utterances=regenerate_utterances,
+            )
 
     train_workflow(
         workflow_path,

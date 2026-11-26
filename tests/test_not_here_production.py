@@ -282,16 +282,17 @@ def test_a_matching_recorded_baseline_carries_nothing_forward_under_the_record_e
 
 # ---------------------------------------------------------------- the CME-path predicate
 
-def test_the_automatic_cme_check_skips_only_the_package_and_its_cme_workflow(tmp_path):
-    from fastworkflow.train.__main__ import _trains_the_fastworkflow_package
+def test_the_automatic_cme_check_skips_only_the_framework_workflows(tmp_path):
+    from fastworkflow.train.intent_model_layout import is_framework_workflow
 
     package = fastworkflow.get_fastworkflow_package_path()
     cme = os.path.join(package, "_workflows", "command_metadata_extraction")
-    assert _trains_the_fastworkflow_package(package)
-    assert _trains_the_fastworkflow_package(cme)
+    # the package root is no workflow (fix-bl97.2); only the framework's own workflows skip the check
+    assert not is_framework_workflow(package)
+    assert is_framework_workflow(cme)
     # an app that lives inside a checkout named "fastworkflow" is not the package: the CME is checked
-    assert not _trains_the_fastworkflow_package(os.path.join(package, "examples", "library"))
-    assert not _trains_the_fastworkflow_package(str(tmp_path / "fastworkflow" / "my_app"))
+    assert not is_framework_workflow(os.path.join(package, "examples", "library"))
+    assert not is_framework_workflow(str(tmp_path / "fastworkflow" / "my_app"))
 
 
 def test_every_execution_context_refuses_an_old_cme_before_it_builds_anything(tmp_path, monkeypatch):

@@ -18,7 +18,6 @@ keywords = ["fastworkflow", "ai", "workflow", "llm", "openai"]
 include = [
     "fastworkflow/examples/fastworkflow.env",
     "fastworkflow/examples/fastworkflow.passwords.env",
-    "fastworkflow/_commands/.gitkeep",
     # fastWorkflow chatbot SPA — must ship in the wheel [R23]; a wheel-content
     # assertion test (tests/test_run_chatbot_server.py) fails the build if the
     # ordered source parts are missing.
