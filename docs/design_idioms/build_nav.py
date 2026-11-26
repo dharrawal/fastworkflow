@@ -34,7 +34,7 @@ GROUPS = [
     ("context", "Contexts", True, [
         "c-folder", "c-base", "c-parent", "c-state", "c-identifiers",
     ]),
-    ("reference", "Reference", False, ["r-turn", "r-shapes", "r-helpers", "r-steps", "removed"]),
+    ("reference", "Reference", False, ["r-turn", "r-operate", "r-shapes", "r-helpers", "r-steps", "removed"]),
 ]
 
 START = "<!-- IDIOM BODY START -->"

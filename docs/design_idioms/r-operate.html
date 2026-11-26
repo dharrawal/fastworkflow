@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Train and run · Design idioms · fastWorkflow</title>
+<link rel="stylesheet" href="idioms.css">
+</head>
+<body data-page="r-operate">
+<aside class="rail"></aside>
+
+<main id="top">
+  <section class="reference-block reference">
+<!-- IDIOM BODY START -->
+    <h3 id="r-operate">Train and run</h3>
+    <p>Two commands turn your workflow folder into something people talk to: <code>fastworkflow train</code> builds its local intent model, and one of three run commands serves it. This page says what your choices change in each, and which run command to pick. The full options are in <code>fastworkflow &lt;command&gt; --help</code> and the README.</p>
+
+    <h4 id="r-operate-train">Train: one command, it decides what to redo</h4>
+    <pre><code>fastworkflow train ./my_workflow ./fastworkflow.env ./fastworkflow.passwords.env</code></pre>
+    <p>Run it after any change to the workflow; it works out what changed and does only that. In order, it:</p>
+    <ul>
+      <li>stops on a command file that does not load, naming the file and the problem, before any training work (the same check <code>run_cli</code> and the server make at start);</li>
+      <li>checks that every command has seed utterances and that no two commands offer the same capability;</li>
+      <li>generates more phrasings of each command's seeds with <code>LLM_SYNDATA_GEN</code>, reusing the cached ones for every command whose seeds did not change, so an unchanged command costs no model call;</li>
+      <li>fits the local intent model: by default an embedding head, which takes seconds, is the same on every run with the same rows, and needs no GPU;</li>
+      <li>trains the framework's own built-in workflows first when they need it. You never train those yourself, and <code>fastworkflow train</code> on the fastworkflow package itself is refused.</li>
+    </ul>
+    <p>What decides your intent model is what you write: each command's <a href="e-purpose.html">purpose sentence</a>, its name and its <a href="e-purpose.html#e-seeds">seed utterances</a>, which count three times. Edit those, then train. <code>--regenerate-utterances</code> is the only override: it ignores the caches and calls the model again, which costs money and changes the generated rows, so use it only when you suspect a cache is wrong. The training report lists the pairs of commands the model confuses most; fix a pair with seeds that tell the two apart, or by merging the commands.</p>
+    <p>A server already running picks up a retrained embedding head within a few seconds, with no restart. The <code>workflow</code> and <code>per_context</code> layouts (<code>INTENT_MODEL_LAYOUT</code>) need a restart.</p>
+
+    <h4 id="r-operate-pick">Run: pick the command by who is talking to it</h4>
+    <p>All three run the same engine, so a turn does the same thing in each (<a href="r-turn.html">how a turn runs</a>). What differs is who answers the turn's questions and how they reach it.</p>
+    <table class="ref">
+      <thead>
+        <tr><th>Command</th><th>For</th><th>Who answers questions</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>fastworkflow run_cli &lt;workflow&gt; [env] [passwords]</code></td><td>Trying your workflow in a terminal, one user.</td><td>You: the next line you type is the reply. <code>//cancel</code> cancels what is waiting; Ctrl-C or <code>--timeout_seconds N</code> stops waiting on a turn (it finishes in the background, its output discarded).</td></tr>
+        <tr><td><code>fastworkflow run_chatbot</code></td><td>Developing and debugging in a browser: a workflow picker, a chat, and a trace viewer of what each turn did (which command, which values, which model calls).</td><td>You, in the page, which shows each question, review and approval with its choices. It starts a local <code>run_fastapi_mcp</code> server for you, on loopback only.</td></tr>
+        <tr><td><code>fastworkflow run_fastapi_mcp &lt;workflow&gt; [env] [passwords]</code></td><td>Production: an HTTP service with MCP tools, JWT sessions and streaming, for your own front end or for another agent.</td><td>The client: a turn that asks comes back waiting, and the client's next message is the reply (<code>cancel_pending</code> drops it). With nobody to answer (REST and MCP), the turn's review is skipped, except in no-agent mode with a verified end user.</td></tr>
+      </tbody>
+    </table>
+    <p><strong>Agent or assistant.</strong> Each run command uses the agent when <code>LLM_AGENT</code> is set. <code>run_cli --assistant</code> (and <code>/invoke_assistant</code> on the server) runs deterministic mode instead, and a single message that starts with <code>/</code> runs deterministically in any of the three. With no <code>LLM_AGENT</code> the workflow runs in no-agent mode, which needs <code>JEV_API_KEY</code>: with neither set, the run commands refuse to start and say why. So does a workflow with no trained local model and no <code>JEV_API_KEY</code>. At start, each prints one line naming how intent is decided (the local model, the remote model, or both).</p>
+
+    <h4 id="r-operate-author">What this means for your code</h4>
+    <ul>
+      <li>Nothing in a command depends on the run command. Return your answer from the command; never print it or read from the terminal, or it will not reach the chat page or a server's client.</li>
+      <li>A question your command needs answered is the framework's (a missing value, an <a href="e-writes.html">approval</a>), never your own prompt, so every run command can ask it.</li>
+      <li>Train before you run, and train again after you edit a command, its seeds or its purpose sentence.</li>
+    </ul>
+<!-- IDIOM BODY END -->
+  </section>
+
+  <nav class="pager" aria-label="Previous and next">
+    <a class="prev" href="r-turn.html"><span>Previous</span>How a turn runs</a>
+    <a class="next" href="r-shapes.html"><span>Next</span>Plain Python, read by the framework</a>
+  </nav>
+</main>
+<script src="nav.js"></script>
+<script src="idioms.js"></script>
+</body>
+</html>
