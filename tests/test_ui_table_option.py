@@ -1,6 +1,6 @@
 """The ``ui.table`` option of a ``Signature.Output`` field (fix-weih.23): which list fields are the columns of one table.
 
-The load check is the one the other ui options use (``resolve_signature_field_sources``), so ``fastworkflow run``,
+The load check is the one the other ui options use (``resolve_signature_field_sources``), so ``fastworkflow run_cli``,
 ``train``, the server and ``command preview --check`` report a refusal the same way.
 """
 from __future__ import annotations

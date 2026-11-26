@@ -256,7 +256,7 @@ class Output(BaseModel):
     raw_payload: str = Field(default="", json_schema_extra={"ui": {"hidden": True}})
 ```
 
-`ui` is checked when the workflow loads. A mistake on an `Input` or an `Output` field makes that command fail to load (the rest of the workflow loads), and `fastworkflow run`, `train`, the server and `command preview --check` list it (`docs/design_idioms/removed.html#load-rule`). A `ui` value that is not a dict, is empty, or is `False`; an unknown option (the
+`ui` is checked when the workflow loads. A mistake on an `Input` or an `Output` field makes that command fail to load (the rest of the workflow loads), and `fastworkflow run_cli`, `train`, the server and `command preview --check` list it (`docs/design_idioms/removed.html#load-rule`). A `ui` value that is not a dict, is empty, or is `False`; an unknown option (the
 error suggests the closest: `did you mean 'widget'?`); `hidden` or `hero` that is not `True`; a `format` or `widget`
 outside the lists above; an `Output` option on an `Input` (`hero`, `hidden`, `format`) or `widget` on an `Output`;
 `"textarea"` on a field that is not a `str` (`Optional[str]` is fine); and `"radio"` on a field that is not a `Literal` all fail

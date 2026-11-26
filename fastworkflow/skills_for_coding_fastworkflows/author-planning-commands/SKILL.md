@@ -94,7 +94,7 @@ planner's call has no arguments (`planning_commands.py` `planning_command_from_p
   models, `PlanGenerator` (`__phases__` first, then the phases in run order, then `_helpers`),
   module-level tables and shared functions.
 - A file that fails to import or is malformed fails the load of that command only: it is not matched and
-  the rest of the workflow loads. `fastworkflow run`, `fastworkflow train` (which stops), the server and
+  the rest of the workflow loads. `fastworkflow run_cli`, `fastworkflow train` (which stops), the server and
   `fastworkflow command preview --check` list it as one line naming the file
   (`command_preview.load_problems`; the one rule is `docs/design_idioms/removed.html#load-rule`).
 
@@ -456,7 +456,7 @@ strings work too; the helpers only make the wording exact.
 - A planning command cannot call itself, even through others. A call cycle is reported as an error
   that names the cycle ("a planning command cannot call itself, even through others: A -> B -> A",
   `planning_commands.py` `_cycle_problems`): every planning command on the cycle fails to load, and
-  `fastworkflow run`, `train`, the server and `command preview --check` list it (`command_directory.py`
+  `fastworkflow run_cli`, `train`, the server and `command preview --check` list it (`command_directory.py`
   `command_load_errors`). A fixed step whose first word is the command's own name is a call of itself. At run time, a call
   of a planning command already running in the chain is refused with "is already running; call its
   steps directly."
@@ -668,7 +668,7 @@ step in open words ("add a note saying ...") names none, and the write is refuse
 ## Modes
 
 In agent mode a planning command runs as above. In assistant mode with an agent model set (`/` messages,
-`fastworkflow run --assistant`), a planning command runs only when it is mechanical: code runs every step
+`fastworkflow run_cli --assistant`), a planning command runs only when it is mechanical: code runs every step
 and `__result__` writes the answer. One that needs the agent (a prose or conditional step, a phase decided
 by facts, a `classifier_confirms` input, no `__result__`) is refused with reasons that name each step
 (`planning_needs_agent.planning_command_needs_agent`). With no agent model it runs to its first open step,

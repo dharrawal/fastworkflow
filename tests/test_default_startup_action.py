@@ -1,6 +1,6 @@
 """A workflow folder's ``startup_action.json`` is the default startup of every entry point (bd fix-qjne.10).
 
-One reader (``fastworkflow.workflow_startup_action``); ``fastworkflow run`` and the FastAPI server (which the chat
+One reader (``fastworkflow.workflow_startup_action``); ``fastworkflow run_cli`` and the FastAPI server (which the chat
 page's launcher starts) use it when no process flag is given; a flag always wins; a per-session field of
 ``/initialize`` keeps its precedence over the process-level value.
 """

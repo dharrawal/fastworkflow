@@ -296,7 +296,7 @@ spans in the turn's trace, so they are there to read.
 
 ## Assistant mode
 
-`fastworkflow run --assistant` runs one execution command per message, with no agent. A planning
+`fastworkflow run_cli --assistant` runs one execution command per message, with no agent. A planning
 command named exactly, as `count_books` or `/count_books`, runs there when it is mechanical: code runs
 every step and nothing needs the agent. A planning command that needs the agent, such as
 `member_report`, is refused, with the reasons and what to change, and the message points to agent

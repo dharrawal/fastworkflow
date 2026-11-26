@@ -66,7 +66,7 @@ run, judge or recover part of (page 1 of the tutorial).
 ```sh
 fastworkflow examples fetch library
 fastworkflow train ./examples/library
-fastworkflow run ./examples/library
+fastworkflow run_cli ./examples/library
 ```
 
 Then try "who wrote Dune?", "which branch holds it?", "who has this book?", "go back", "what

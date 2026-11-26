@@ -192,7 +192,7 @@ by activity, with the model var each key pairs with:
 | Activity | Required key(s) | Notes |
 |---|---|---|
 | `fastworkflow train` | `LITELLM_API_KEY_SYNDATA_GEN` | Missing key = warning then failed/empty synthetic generation; train also hard-fails without `SPEEDDICT_FOLDERNAME` in the env file |
-| `fastworkflow run` (agent mode) | `LITELLM_API_KEY_AGENT`, `LITELLM_API_KEY_PARAM_EXTRACTION`, `LITELLM_API_KEY_PLANNER` | run also probes `LITELLM_API_KEY_SYNDATA_GEN` presence at startup (run/__main__.py:129-132) — keep it set |
+| `fastworkflow run_cli` (agent mode) | `LITELLM_API_KEY_AGENT`, `LITELLM_API_KEY_PARAM_EXTRACTION`, `LITELLM_API_KEY_PLANNER` | run also probes `LITELLM_API_KEY_SYNDATA_GEN` presence at startup (run_cli/__main__.py:129-132) — keep it set |
 | `fastworkflow refine` | `LLM_COMMAND_METADATA_GEN` + `LITELLM_API_KEY_COMMANDMETADATA_GEN` **exported in the OS shell** | refine/build load NO env files (`fastworkflow.init(env_vars={})`); note the spelling: no underscore in `COMMANDMETADATA`; this var pair is absent from the bundled template |
 | FastAPI conversation summaries | `LITELLM_API_KEY_CONVERSATION_STORE` | |
 

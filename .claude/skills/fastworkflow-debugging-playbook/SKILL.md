@@ -106,7 +106,7 @@ exact first-token match → Levenshtein fuzzy match (threshold 0.3) → local mo
 ### T2 — Missing threshold.json / untrained-workflow late failures
 
 `threshold.json` per context folder is the marker of a trained intent model. Guards exist at two entry points
-(`fastworkflow/run/__main__.py:156-172` and `fastworkflow/mcp_server.py:249-250` — both call
+(`fastworkflow/run_cli/__main__.py:156-172` and `fastworkflow/mcp_server.py:249-250` — both call
 `is_workflow_trained`, `fastworkflow/model_pipeline_training.py:624`), added in v2.19.0 (commit d7853a1) after
 untrained workflows crashed on the *first message* instead of at startup. If you still see a *late* failure, you
 came in through a path without the guard (e.g. embedding WEC directly, or a test).
@@ -170,7 +170,7 @@ Two topologies, two behaviors:
 
 **fix-5fv (P2, OPEN, code-reading evidence only — NEEDS RUNTIME VERIFICATION, never runtime-reproduced):**
 the blocking path emits **no trace sentinel**; the only sentinel emitter is `_maybe_enqueue_trace_sentinel`
-(`workflow_execution_context.py:656`), called only at turn-END sites. The CLI (`fastworkflow/run/__main__.py:231-260`)
+(`workflow_execution_context.py:656`), called only at turn-END sites. The CLI (`fastworkflow/run_cli/__main__.py:231-260`)
 drains the trace queue until a `None` sentinel BEFORE reading the output queue → predicted deadlock: spinner spins,
 question never prints. Filed 2026-06-11 during the R43 design review. If you hit T5, you are the runtime
 verification — record the result in bd fix-5fv. (The bead cites pre-refactor line numbers; current ones are above.)
@@ -249,7 +249,7 @@ was supplied, returns the default without consulting `os.environ`**. Consequence
   exports, unlike train/run.
 - Never read env vars at import time in new code: the v2.21.3 regression (commit 79e6986) crashed the server when
   `SPEEDDICT_FOLDERNAME` lived only in the env file, and was *masked in dev* by litellm's `load_dotenv` of the cwd `.env`.
-- `run` hard-fails if `LITELLM_API_KEY_SYNDATA_GEN` is missing (`run/__main__.py:131-132`) — it is used as a
+- `run_cli` hard-fails if `LITELLM_API_KEY_SYNDATA_GEN` is missing (`run_cli/__main__.py:131-132`) — it is used as a
   file-presence probe, so Bedrock/proxy users hit it even though run does no synthetic generation.
 
 ### T13 — test-suite gotchas (debugging context only; authoring → `fastworkflow-validation-and-qa`)
@@ -304,7 +304,7 @@ owner ruling (T3). Re-verify volatile facts before relying on them:
 grep -n "def compute_commands_source_fingerprint\|@lru_cache" fastworkflow/command_directory.py   # expect 627, 657
 grep -n "_persisted_definition_is_fresh\|def clear_registry" fastworkflow/command_routing.py       # expect 368/385, 410
 # T2: fail-fast guard
-grep -n "is_workflow_trained" fastworkflow/run/__main__.py fastworkflow/model_pipeline_training.py
+grep -n "is_workflow_trained" fastworkflow/run_cli/__main__.py fastworkflow/model_pipeline_training.py
 # T3: ErrorCorrection mismatch still present?
 grep -n "ErrorCorrection" fastworkflow/train/__main__.py fastworkflow/model_pipeline_training.py
 ls fastworkflow/_workflows/command_metadata_extraction/___command_info/                            # ErrorCorrection absent?

@@ -160,7 +160,7 @@ run also downloads the sentence encoder from Hugging Face. Retrain after changin
 ### Step 6: Smoke-test from the CLI
 
 ```bash
-fastworkflow run <app>/chat_workflow <app>/chat_workflow/fastworkflow.env <app>/chat_workflow/fastworkflow.passwords.env
+fastworkflow run_cli <app>/chat_workflow <app>/chat_workflow/fastworkflow.env <app>/chat_workflow/fastworkflow.passwords.env
 ```
 
 Ask "what can you do?" and exercise a few real commands. Prefix a command with `/` to force

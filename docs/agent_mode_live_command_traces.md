@@ -64,7 +64,7 @@ We will introduce a lightweight event stream for trace messages, emitted synchro
   - No required functional change for streaming. Continue writing `action.jsonl` records (already implemented in two code paths: early/handled and resolved execution).
   - Optional: expose utility helpers to normalize/serialize parameters for consistent rendering, but this can also live inside `workflow_agent.py` to keep scope tight.
 
-- `fastworkflow/run/__main__.py` ([__main__.py](mdc:fastworkflow/run/__main__.py))
+- `fastworkflow/run_cli/__main__.py` ([__main__.py](mdc:fastworkflow/run_cli/__main__.py))
   - During the “Processing command...” spinner loop, poll `fastworkflow.chat_session.command_trace_queue` non‑blocking and render any events using `rich`.
   - Maintain the current panel printing for the final `CommandOutput`. The trace lines should appear above while the spinner runs; when the spinner completes, the final answer panel prints as it does today.
 
@@ -135,7 +135,7 @@ Behavioral notes:
 
 ### 8. Consumption and Rendering (CLI)
 
-Target hook: the spinner loop inside [run/__main__.py](mdc:fastworkflow/run/__main__.py) where we currently sleep and update a status message.
+Target hook: the spinner loop inside [run_cli/__main__.py](mdc:fastworkflow/run_cli/__main__.py) where we currently sleep and update a status message.
 
 Enhancement:
 - While the wait thread is alive, poll `fastworkflow.chat_session.command_trace_queue` in a non‑blocking loop, rendering any available events immediately.
@@ -182,7 +182,7 @@ Rendering rules:
 - Optional flag (non‑breaking): `--no_agent_traces` to disable streaming traces for quieter output.
 - Optional environment override: `FASTWORKFLOW_SHOW_AGENT_TRACES=0/1` (CLI flag wins).
 
-CLI wiring suggestion in [__main__.py](mdc:fastworkflow/run/__main__.py):
+CLI wiring suggestion in [__main__.py](mdc:fastworkflow/run_cli/__main__.py):
 - Add an optional `--no_agent_traces` (default False). Effective only if `--run_as_agent` is True.
 - Compute `show_agent_traces = args.run_as_agent and not args.no_agent_traces` and guard the render loop drain accordingly.
 
@@ -217,7 +217,7 @@ CLI wiring suggestion in [__main__.py](mdc:fastworkflow/run/__main__.py):
      - Before execution: AGENT_TO_WORKFLOW (raw command).
      - After execution: WORKFLOW_TO_AGENT (name, parameters, response, success).
 
-3) `fastworkflow/run/__main__.py`
+3) `fastworkflow/run_cli/__main__.py`
    - In the spinner loop, while waiting for the agent’s result, non‑blocking drain of `fastworkflow.chat_session.command_trace_queue` and render each event.
    - Optional flag: add `--no_agent_traces` and compute `show_agent_traces` to guard rendering.
 

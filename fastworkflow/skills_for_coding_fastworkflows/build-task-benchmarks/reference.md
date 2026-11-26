@@ -79,7 +79,7 @@ from fastworkflow.command_executor import CommandExecutor, call_response_generat
 
 
 def open_session(workflow_folder):
-    """A real Workflow, started as `fastworkflow run` starts it (its startup action, if any)."""
+    """A real Workflow, started as `fastworkflow run_cli` starts it (its startup action, if any)."""
     if fastworkflow.RoutingRegistry is None:
         fastworkflow.init({})
     workflow = fastworkflow.Workflow.create(workflow_folder,

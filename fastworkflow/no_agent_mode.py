@@ -89,7 +89,7 @@ def startup_problem() -> Optional[str]:
 
 
 def runtime_problems() -> list[str]:
-    """The problems only a process that serves turns reports (``fastworkflow run``, the server), not training."""
+    """The problems only a process that serves turns reports (``fastworkflow run_cli``, the server), not training."""
     problem = startup_problem()
     return [problem] if problem else []
 
@@ -100,7 +100,7 @@ def startup_line() -> Optional[str]:
 
 
 def run_mode(assistant_requested: bool) -> tuple[bool, Optional[str]]:
-    """``(run_as_agent, banner)`` for ``fastworkflow run``: the agent unless ``--assistant`` was asked for or no agent
+    """``(run_as_agent, banner)`` for ``fastworkflow run_cli``: the agent unless ``--assistant`` was asked for or no agent
     model is specified, in which case the run falls back to deterministic (assistant) mode and the banner says so
     plainly (None when nothing fell back)."""
     if assistant_requested:

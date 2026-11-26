@@ -2,14 +2,14 @@
 
 #### 1. Overview
 - **Goal**: Expose FastWorkflow workflows as a FastAPI web service, enabling clients to initialize for a given workflow (per channel), then interact in agent mode (forced). If a query starts with `/`, all leading slashes are stripped before processing. The service supports explicit actions, resetting conversations, listing conversations, dumping all conversations to JSONL, and recording review comments about recorded evidence. `invoke_agent` returns the turn's `TurnOutput` projection (see §6a) and, when enabled, includes collected trace events in the final response. Streaming is supported via NDJSON or SSE at `/invoke_agent_stream`, and MCP tools map to the same NDJSON-based streaming implementation.
-- **Source parity**: Behavior mirrors the CLI runner in `fastworkflow/run/__main__.py` while replacing its interactive loop with synchronous and streaming HTTP endpoints.
+- **Source parity**: Behavior mirrors the CLI runner in `fastworkflow/run_cli/__main__.py` while replacing its interactive loop with synchronous and streaming HTTP endpoints.
 
 #### 2. Non‑Goals
 - No UI; only REST with OpenAPI/Swagger at `/docs`.
 - No WebSocket support. For streaming, use NDJSON or SSE at `/invoke_agent_stream`. MCP Streamable HTTP is mounted on the same FastAPI app and maps to the same server-side streaming (NDJSON).
 
 #### 3. References
-- CLI runner (`fastworkflow/run/__main__.py`) uses **Topology A**: a `ChatSession` chassis around a `WorkflowExecutionContext`, with queues and (for `keep_alive`) a worker thread that **blocks** on `ask_user`.
+- CLI runner (`fastworkflow/run_cli/__main__.py`) uses **Topology A**: a `ChatSession` chassis around a `WorkflowExecutionContext`, with queues and (for `keep_alive`) a worker thread that **blocks** on `ask_user`.
 - This FastAPI service uses **Topology B**: no ChatSession worker, no request-path queues. The server embeds a transport-free `WorkflowExecutionContext` per channel and drives it with `process_turn` / `process_action_turn`. `ask_user` **suspends** the agent trajectory and returns; the next message resumes it.
 - Parity with the CLI that still matters: environment loading, startup command/action handling, agent vs assistant (`/`-prefix) routing, and the public `TurnOutput` shape (§6a).
 

@@ -36,7 +36,7 @@
         <tr><td><code>workflow_inheritance_model.json</code></td><td>The base workflows whose commands this workflow takes.</td></tr>
         <tr><td><code>_policy/table.py</code></td><td>The policy table: rules checked when commands run.</td></tr>
         <tr><td><code>personas.json</code></td><td>Who your users are, for the training requests <code>fastworkflow train</code> generates.</td></tr>
-        <tr><td><code>fastworkflow.env</code>, <code>fastworkflow.passwords.env</code></td><td>The default settings and keys files of <code>fastworkflow run</code> (a flag names others; with none here, the folder above is tried).</td></tr>
+        <tr><td><code>fastworkflow.env</code>, <code>fastworkflow.passwords.env</code></td><td>The default settings and keys files of <code>fastworkflow run_cli</code> (a flag names others; with none here, the folder above is tried).</td></tr>
         <tr><td><code>accepted_duplicates.json</code></td><td>Pairs of commands whose seeds look alike on purpose, read by <code>fastworkflow train</code> (see <a href="e-purpose.html">how a request finds your command</a>).</td></tr>
         <tr><td><code>intent_benchmark.json</code></td><td>Requests that score routing; <code>fastworkflow train</code> stops when a seed is one of them.</td></tr>
         <tr><td><code>workflow_description.txt</code></td><td>Written by <code>fastworkflow build</code> (a generated description of the workflow; nothing reads it), which overwrites the file.</td></tr>

@@ -26,7 +26,7 @@ import pytest
 
 import fastworkflow
 from fastworkflow.chat_session import ChatSession
-from fastworkflow.run.turn_wait import (
+from fastworkflow.run_cli.turn_wait import (
     WaitOutcome, interrupted_message, timed_out_message, wait_for_turn,
 )
 
@@ -105,7 +105,7 @@ def approval_workflow(tmp_path_factory) -> str:
 
 @pytest.fixture(autouse=True)
 def _package_chat_session_restored():
-    """``_start`` binds the session to ``fastworkflow.chat_session`` (as ``fastworkflow run`` does); put back what the
+    """``_start`` binds the session to ``fastworkflow.chat_session`` (as ``fastworkflow run_cli`` does); put back what the
     name held, so a later test file still finds the submodule there."""
     missing = object()
     previous = vars(fastworkflow).get("chat_session", missing)
@@ -330,8 +330,8 @@ def test_run_accepts_the_deadline_flag_and_it_defaults_to_off():
 
     parser = argparse.ArgumentParser()
     add_run_parser(parser.add_subparsers(dest="command"))
-    assert parser.parse_args(["run", "wf"]).timeout_seconds is None
-    assert parser.parse_args(["run", "wf", "--timeout_seconds", "90"]).timeout_seconds == 90.0
+    assert parser.parse_args(["run_cli", "wf"]).timeout_seconds is None
+    assert parser.parse_args(["run_cli", "wf", "--timeout_seconds", "90"]).timeout_seconds == 90.0
 
 
 # ----------------------------------------------------------------------
@@ -524,12 +524,12 @@ def test_a_turn_that_delivered_its_own_output_gets_nothing_extra(session):
 
 
 # ----------------------------------------------------------------------
-# The real entry point, `python -m fastworkflow.run`, over piped stdin
+# The real entry point, `python -m fastworkflow.run_cli`, over piped stdin
 # ----------------------------------------------------------------------
 
 
 class _Terminal:
-    """A real ``fastworkflow.run`` process on piped stdin/stdout (prompt_toolkit accepts a non-tty input and reads
+    """A real ``fastworkflow.run_cli`` process on piped stdin/stdout (prompt_toolkit accepts a non-tty input and reads
     lines from it), with the output collected by a reader thread."""
 
     def __init__(self, workflow: str, tmp: Path):
@@ -542,7 +542,7 @@ class _Terminal:
         passwords.write_text("LITELLM_API_KEY_AGENT=unused\n")
         self.chunks: list[str] = []
         self.process = subprocess.Popen(
-            [sys.executable, "-m", "fastworkflow.run", workflow, str(env_file), str(passwords), "--assistant"],
+            [sys.executable, "-m", "fastworkflow.run_cli", workflow, str(env_file), str(passwords), "--assistant"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             cwd=str(Path(__file__).parent.parent), env={**os.environ, "CUDA_VISIBLE_DEVICES": ""},
         )

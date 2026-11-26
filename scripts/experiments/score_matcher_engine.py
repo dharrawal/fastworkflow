@@ -209,7 +209,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--workflow", required=True, help="Workflow folder path.")
     parser.add_argument("--benchmark", required=True, help="Benchmark JSON file.")
-    parser.add_argument("--env", required=True, help="The workflow env file (as `fastworkflow run` takes it).")
+    parser.add_argument("--env", required=True, help="The workflow env file (as `fastworkflow run_cli` takes it).")
     parser.add_argument("--passwords", required=True, help="The passwords env file (holds JEV_API_KEY).")
     parser.add_argument("--out", required=True, help="Where to write the per-case verdicts.")
     parser.add_argument("--mode", choices=("matcher", "chain"), default="matcher",

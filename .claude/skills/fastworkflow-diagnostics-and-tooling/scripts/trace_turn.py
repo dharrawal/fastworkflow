@@ -73,7 +73,7 @@ Any topology, post-mortem (preferred since Phase 7):
   no longer a copy-it-before-the-next-turn race.
 
 CLI (Topology A):
-  * Run `fastworkflow run <wf> <env> <passwords>`; live traces render
+  * Run `fastworkflow run_cli <wf> <env> <passwords>`; live traces render
     automatically while the spinner runs. CLI turns are recorded under a
     synthetic per-session channel id ("cli:<timestamp>"), so `turns --channel`
     can isolate one session.

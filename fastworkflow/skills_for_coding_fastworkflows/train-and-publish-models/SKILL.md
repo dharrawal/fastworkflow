@@ -249,10 +249,10 @@ after a partial failure safe.
 
 ## After training
 
-`fastworkflow run` and the servers print one line saying what the intent detection chain is: the
+`fastworkflow run_cli` and the servers print one line saying what the intent detection chain is: the
 local model when it is confident, then the remote decision model when `JEV_API_KEY` is set, then
 the user or the agent. With `LLM_AGENT` unset (no-agent mode), `JEV_API_KEY` is mandatory: without
-it `fastworkflow run` exits 1 and the server refuses to start. `fastworkflow train` does not check
+it `fastworkflow run_cli` exits 1 and the server refuses to start. `fastworkflow train` does not check
 this.
 
 ## Pre-flight checklist

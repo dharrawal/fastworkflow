@@ -1850,7 +1850,7 @@ class LoadProblem(str):
 
     ``workflow_wide`` True: a mistake in something the whole workflow shares (``context_inheritance_model.json``, a
     context class file, ``startup_action.json``, ``_workflow.py``, a retired ``_skills`` folder, the runtime problem of
-    no agent model and no Jev key): the workflow does not run (``fastworkflow run`` exits 1, the server refuses to
+    no agent model and no Jev key): the workflow does not run (``fastworkflow run_cli`` exits 1, the server refuses to
     start, ``train`` stops). False: one command's own mistake: that command does not load and the rest of the
     workflow runs (``run`` prints it, the server logs it, ``train`` still stops). A ``str``, so a caller that only
     prints or compares the lines reads them as before."""
@@ -1873,7 +1873,7 @@ def _of_one_command(lines: list[str]) -> list[LoadProblem]:
 
 def load_problems(workflow_folder: str, *, runtime: bool = False) -> list[LoadProblem]:
     """The workflow's load problems, one line each. Empty when everything loads. One function for the places a
-    developer looks: ``fastworkflow run`` prints them before its first prompt, ``fastworkflow train`` stops on them
+    developer looks: ``fastworkflow run_cli`` prints them before its first prompt, ``fastworkflow train`` stops on them
     before training, the FastAPI server logs them at startup, and ``command preview --check`` fails on them.
 
     Two classes of mistake, one effect each (bd fix-ftdl.2). A mistake inside ONE command file (it does not parse
@@ -2315,7 +2315,7 @@ def preview_main(args) -> int:
         # routing load problems (a retired declaration, a command file that does not import).
         command_problems = load_problems(args.workflow_folder)
         if command_problems:
-            print("command files that do not load (fastworkflow run, train and the server stop on them):")
+            print("command files that do not load (fastworkflow run_cli, train and the server stop on them):")
             for problem in command_problems:
                 print(f"  {problem}")
         for warning in check_hand_typed_warnings(args.workflow_folder):

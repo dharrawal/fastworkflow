@@ -57,7 +57,7 @@ def _plain(name: str) -> str:
 
 
 def _open_session(folder: str):
-    """A real ``Workflow`` on *folder*, started as ``fastworkflow run`` starts one with its startup
+    """A real ``Workflow`` on *folder*, started as ``fastworkflow run_cli`` starts one with its startup
     action: the workflow's ``startup_action.json`` when it has one. No env file, no model."""
     import fastworkflow
     from fastworkflow.command_executor import CommandExecutor

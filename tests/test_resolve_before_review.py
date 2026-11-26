@@ -370,7 +370,7 @@ def test_with_an_agent_model_cancelling_the_question_drops_the_part_and_the_revi
 
 
 def _on_the_command_line(ctx):
-    """The context as ``fastworkflow run`` holds it: the core of a real ``ChatSession``, with that session's message,
+    """The context as ``fastworkflow run_cli`` holds it: the core of a real ``ChatSession``, with that session's message,
     output and trace queues (the CLI transport, where the agent's own ``ask_user`` blocks on the message queue)."""
     from fastworkflow.chat_session import ChatSession
 

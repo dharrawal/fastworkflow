@@ -95,7 +95,7 @@ missing head a startup problem (today's behaviour, and what a production deploym
 
 The fallback is never silent:
 
-* at startup (`fastworkflow run`, the server, through `command_preview.load_problems`) one line names
+* at startup (`fastworkflow run_cli`, the server, through `command_preview.load_problems`) one line names
   every scope that runs on the matcher and why;
 * each `fw.nlu.intent` span carries `engine` and `engine_fallback`, and the turn record carries the
   set of engines its detections used.

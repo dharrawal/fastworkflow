@@ -55,7 +55,7 @@ Only an `Input` field may declare it; on an `Output` field or a facts model fiel
 A declaration that does not resolve (a bare command name, a command that does not exist or is not on the
 lookup path, a field the producer's `Output` lacks, a type that does not fit) fails the load of the command
 that wrote it, as any command file that does not load does: `command_preview.load_problems` lists it with the
-file, the field and the reason (`fastworkflow run` prints it before its first prompt, `fastworkflow train`
+file, the field and the reason (`fastworkflow run_cli` prints it before its first prompt, `fastworkflow train`
 stops on it and the server logs it at startup), the command is not available and the rest of the workflow
 loads. A call cycle between planning commands, a hand-written `available_from` and a producer on an `Output`
 or facts field are other errors: they are logged and `command preview --check` fails on them, and the command

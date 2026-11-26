@@ -54,7 +54,7 @@ workflow folder:
 | `fastworkflow.env` | Model strings, framework settings, tuning knobs | `fastworkflow/examples/fastworkflow.env` |
 | `fastworkflow.passwords.env` | `LITELLM_API_KEY_*` secrets only | `fastworkflow/examples/fastworkflow.passwords.env` |
 
-Loading (verified in `run/__main__.py:125-128`, `train/__main__.py:269-271`,
+Loading (verified in `run_cli/__main__.py:125-128`, `train/__main__.py:269-271`,
 `run_fastapi_mcp/__main__.py:259-264`):
 
 ```python
@@ -117,7 +117,7 @@ when developing in-repo. This masked the v2.21.0-2.21.3 regression fixed in 79e6
 | `build` | **NO** — `fastworkflow.init(env_vars={})` | `build/__main__.py:326,349` | LLM vars must be OS-environment exports (step 3 fallback works because call sites pass no default) |
 | `refine` | **NO** — `init(env_vars={})` | `refine/__main__.py:32` | Same; no env-file CLI args exist at all |
 | `train` | YES (both files) | `train/__main__.py:269-271` | — |
-| `run` | YES (both files) | `run/__main__.py:125-128` | — |
+| `run_cli` | YES (both files) | `run_cli/__main__.py:125-128` | — |
 | `run_fastapi_mcp` | YES (both files, in lifespan) | `run_fastapi_mcp/__main__.py:259-264` | Plus a pre-lifespan read of `LOG_LEVEL` for uvicorn (`:1612-1617`) |
 
 So before `fastworkflow build` / `fastworkflow refine` you must:
@@ -132,13 +132,13 @@ Nothing in `--help` tells you this; the failure mode is
 (raised from `utils/dspy_utils.py:44-45` via `build/genai_postprocessor.py:239`).
 
 **File-presence probes at startup:**
-- `run` HARD-FAILS if `LITELLM_API_KEY_SYNDATA_GEN` is absent (`run/__main__.py:131-132`) even
+- `run_cli` HARD-FAILS if `LITELLM_API_KEY_SYNDATA_GEN` is absent (`run_cli/__main__.py:131-132`) even
   though run never generates synthetic data — it is used purely as a "did the passwords file
   load?" probe. This breaks Bedrock/proxy users who legitimately have no such key; workaround:
   put a dummy value in the passwords file.
 - `train` only WARNS for the same missing key ("OK if this is Bedrock",
   `train/__main__.py:276-277`) but hard-fails on missing `SPEEDDICT_FOLDERNAME` (`:273-275`),
-  as does `run` (`run/__main__.py:129-130`).
+  as does `run_cli` (`run_cli/__main__.py:129-130`).
 
 ## 4. Env var catalog
 
@@ -167,7 +167,7 @@ proxy routing. Full recipe: [references/litellm-proxy-and-local-dev.md](referenc
 
 | Var | Code default | Template value | Consumer file:line | Role | Sharp edge |
 |---|---|---|---|---|---|
-| `SPEEDDICT_FOLDERNAME` | none | `___workflow_contexts` (`fastworkflow.env:36`) | `workflow.py:360` (function cache); `session_state_store.py:138`; `run_fastapi_mcp/utils.py:388,399` | prod | Roots ALL disk state; hard-required by `run` and `train` (Section 3) |
+| `SPEEDDICT_FOLDERNAME` | none | `___workflow_contexts` (`fastworkflow.env:36`) | `workflow.py:360` (function cache); `session_state_store.py:138`; `run_fastapi_mcp/utils.py:388,399` | prod | Roots ALL disk state; hard-required by `run_cli` and `train` (Section 3) |
 | `SESSION_STATE_STORE` | `"disk"` | not templated | `session_state_store.py:123` | prod (server) | `redis` value can ONLY be set via env file (default shadows shell, Section 2) |
 | `SESSION_STATE_REDIS_URL` / `REDIS_URL` | `None` | not templated | `session_state_store.py:127-129` | prod (server, redis only) | `ValueError` if `SESSION_STATE_STORE=redis` and neither is set |
 | `INTENT_DETECTION_TINY_MODEL` | `google/bert_uncased_L-4_H-128_A-2` | commented (`fastworkflow.env:30`) | `model_pipeline_training.py:892-893` | prod (train-time) | Env-file-only override (Section 2). Defaults chosen for transformers 4.48+/5.x compat |
@@ -338,7 +338,7 @@ Facts verified 2026-07-09 against v2.22.2 (commit c33b9a5). Re-verification one-
 - LLM role call sites: `grep -rn "get_lm(" fastworkflow/ --include="*.py" | grep -v "def get_lm"`
 - Precedence logic: `sed -n '211,227p' fastworkflow/__init__.py`
 - build/refine empty init: `grep -n "init(env_vars={})" fastworkflow/build/__main__.py fastworkflow/refine/__main__.py`
-- run/train startup probes: `grep -n "SPEEDDICT_FOLDERNAME\|LITELLM_API_KEY_SYNDATA_GEN" fastworkflow/run/__main__.py fastworkflow/train/__main__.py`
+- run/train startup probes: `grep -n "SPEEDDICT_FOLDERNAME\|LITELLM_API_KEY_SYNDATA_GEN" fastworkflow/run_cli/__main__.py fastworkflow/train/__main__.py`
 - LLM_RESPONSE_GEN still dead: `grep -rn "LLM_RESPONSE_GEN" fastworkflow/ tests/ --include="*.py"` (expect zero hits)
 - COMMANDMETADATA spelling: `grep -rn "COMMANDMETADATA" fastworkflow/ --include="*.py"`
 - Import-time reads: `sed -n '14,16p' fastworkflow/train/generate_synthetic.py; sed -n '19,23p' fastworkflow/_workflows/command_metadata_extraction/parameter_extraction.py`

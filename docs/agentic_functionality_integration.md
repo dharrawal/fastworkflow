@@ -3,7 +3,7 @@
 ## 1. Overview
 
 ### 1.1 Purpose
-This specification outlines the integration of agentic (AI-driven, autonomous decision-making) capabilities directly into the core fastWorkflow runtime, eliminating the need for separate `run` and `run_agent` programs. The goal is to unify the execution model under a single entry point (`run/__main__.py`) while allowing users to switch between assistant mode (direct command processing) and agent mode (autonomous planning and execution using DSPy-based agents).
+This specification outlines the integration of agentic (AI-driven, autonomous decision-making) capabilities directly into the core fastWorkflow runtime, eliminating the need for separate `run` and `run_agent` programs. The goal is to unify the execution model under a single entry point (`run_cli/__main__.py`) while allowing users to switch between assistant mode (direct command processing) and agent mode (autonomous planning and execution using DSPy-based agents).
 
 The integration introduces a new `run_as` parameter to `fastworkflow.ChatSession`, with values `"RUN_AS_ASSISTANT"` (default, for traditional imperative command execution) and `"RUN_AS_AGENT"` (for agentic, goal-oriented processing). In agent mode, the system treats the entire workflow as a "single complex tool" with a dynamic description that evolves based on context changes, leveraging GenAI-generated metadata, command details, and runtime introspection.
 
@@ -67,7 +67,7 @@ This enhances usability by enabling natural language interactions that autonomou
 
 - **Startup** (`ChatSession.start()`):
   - Common: Load workflow, execute startup command/action.
-  - Assistant Mode: Enter imperative command loop (as in current `run/__main__.py`).
+  - Assistant Mode: Enter imperative command loop (as in current `run_cli/__main__.py`).
   - Agent Mode: Enter agentic loop (natural language input → agent processing → output).
 
 - **Agent Mode Loop**:

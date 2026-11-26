@@ -1,4 +1,4 @@
-"""Startup stops when neither the agent model nor Jev is set (fix-rn9p): ``fastworkflow run`` exits non-zero and the
+"""Startup stops when neither the agent model nor Jev is set (fix-rn9p): ``fastworkflow run_cli`` exits non-zero and the
 server refuses to start. The entry points only; contexts that tests build never ask for the check."""
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ def test_the_server_refuses_to_start_with_no_agent_model_and_no_jev_key(app_modu
 
 
 def test_run_exits_non_zero_after_printing_the_problem(hello_world_workflow_path, bare_env, capsys):
-    from fastworkflow.run.__main__ import run_main
+    from fastworkflow.run_cli.__main__ import run_main
 
     env, passwords = bare_env
     args = argparse.Namespace(

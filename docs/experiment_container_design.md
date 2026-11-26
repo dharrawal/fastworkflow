@@ -348,7 +348,7 @@ bead's sketch is **removed** — §6.4 says why.
 conversation_id=None, embedder_owns_conversations=None)`
 (`workflow_execution_context.py:251-277`) is the sole public identity setter; it
 is called before the first turn by every embedder (`chat_session.py:126`,
-`run/__main__.py:230`, `run_fastapi_mcp/utils.py:586,670,1495`,
+`run_cli/__main__.py:230`, `run_fastapi_mcp/utils.py:586,670,1495`,
 `run_fastapi_mcp/__main__.py:2232`), and it already carries the "a `None`
 argument leaves the binding unchanged" contract.
 
@@ -410,7 +410,7 @@ inserting for.
 **Verified 2026-08-29: `DistillationResult.run_id` already exists**
 (`distillation.py:627`, comment citing `fix-sb8.2`), is set on both return paths,
 is accumulated in `WEC._distillation_run_ids`, and is printed by the `//exit`
-summary at `run/__main__.py:288-296`. The bead's third bullet is **already
+summary at `run_cli/__main__.py:288-296`. The bead's third bullet is **already
 shipped**; re-implementing it would create a second, colliding path — the exact
 "work shipped under a neighbouring issue" pattern `CLAUDE.md` warns about.
 

@@ -51,7 +51,7 @@ Jargon used below, defined once:
 ## 1. CLI anatomy
 
 Entry point: `fastworkflow = "fastworkflow.cli:main"` (pyproject.toml:31). Six subcommands
-(verified via `fastworkflow --help`): `examples`, `build`, `refine`, `train`, `run`,
+(verified via `fastworkflow --help`): `examples`, `build`, `refine`, `train`, `run_cli`,
 `run_fastapi_mcp`. Heavy imports are lazy, so `--help` is fast.
 
 | Subcommand | Arguments / flags (all verified in `fastworkflow/cli.py`) |
@@ -115,7 +115,7 @@ pip install fastworkflow                     # Python 3.11+; Windows -> WSL
 fastworkflow examples fetch hello_world      # creates ./examples/hello_world + env templates
 nano ./examples/fastworkflow.passwords.env   # paste LITELLM_API_KEY_* (one free Mistral key works for all roles)
 fastworkflow train ./examples/hello_world ./examples/fastworkflow.env ./examples/fastworkflow.passwords.env
-fastworkflow run   ./examples/hello_world ./examples/fastworkflow.env ./examples/fastworkflow.passwords.env
+fastworkflow run_cli   ./examples/hello_world ./examples/fastworkflow.env ./examples/fastworkflow.passwords.env
 ```
 
 What happens and what lands where:
@@ -128,7 +128,7 @@ What happens and what lands where:
   containing `tinymodel.pth`, `largemodel.pth`, `label_encoder.pkl`, `threshold.json`,
   `tiny_ambiguous_threshold.json`, `large_ambiguous_threshold.json`.
 - `run` fails fast if untrained ("Workflow 'X' is not trained (missing model artifacts for
-  context(s): ...)") and prints the exact train command (run/__main__.py:156-172).
+  context(s): ...)") and prints the exact train command (run_cli/__main__.py:156-172).
 - At the `User >` prompt try "what can you do?" or "add 49 + 51".
 
 Server variant: `pip install "fastworkflow[server]"` then
@@ -138,11 +138,11 @@ Server variant: `pip install "fastworkflow[server]"` then
 
 | Mechanism | Effect | Where verified |
 |---|---|---|
-| `fastworkflow run ...` (default) | Agent mode: `run_as_agent = not args.assistant` | run/__main__.py:185 |
-| `fastworkflow run ... --assistant` | Deterministic assistant mode for the whole session | cli.py run parser |
+| `fastworkflow run_cli ...` (default) | Agent mode: `run_as_agent = not args.assistant` | run_cli/__main__.py:185 |
+| `fastworkflow run_cli ... --assistant` | Deterministic assistant mode for the whole session | cli.py run parser |
 | Message starting with `/` at the prompt | Forces deterministic execution of that ONE command even in agent mode: sets `is_assistant_mode_command` during INTENT_DETECTION, which makes `_should_run_agent_for_message()` bypass the agent | workflow_execution_context.py:617-632 |
-| `//exit` | Quits the CLI loop | run/__main__.py:222-223 |
-| `//new` | Clears conversation history, starts a new conversation | run/__main__.py:224-227 |
+| `//exit` | Quits the CLI loop | run_cli/__main__.py:222-223 |
+| `//new` | Clears conversation history, starts a new conversation | run_cli/__main__.py:224-227 |
 
 The CLI loop prints `Agent >` / `Workflow >` trace lines while processing, then a pretty
 `CommandOutput` panel (context, command, parameters, responses, artifacts, next_actions,
@@ -317,7 +317,7 @@ volatile fact:
 
 ```sh
 # CLI subcommands + flags
-fastworkflow --help && fastworkflow run --help && fastworkflow run_fastapi_mcp --help
+fastworkflow --help && fastworkflow run_cli --help && fastworkflow run_fastapi_mcp --help
 # Bundled examples list
 fastworkflow examples list
 # Default env-file resolution (workflow dir, not CWD)
@@ -341,7 +341,7 @@ grep -n -A2 "allow_origins" fastworkflow/run_fastapi_mcp/__main__.py
 # MCP tool exclusions + no-prompts note
 sed -n '40,65p' fastworkflow/run_fastapi_mcp/mcp_specific.py
 # '/' prefix + //exit //new
-grep -n "is_assistant_mode_command" fastworkflow/workflow_execution_context.py; grep -n '"//' fastworkflow/run/__main__.py
+grep -n "is_assistant_mode_command" fastworkflow/workflow_execution_context.py; grep -n '"//' fastworkflow/run_cli/__main__.py
 # Artifact writers
 grep -n "def observability_db" -A 8 fastworkflow/session/state_paths.py
 grep -rn "action.jsonl" fastworkflow/ --include=*.py   # expect only retirement comments

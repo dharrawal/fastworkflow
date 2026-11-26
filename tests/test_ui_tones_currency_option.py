@@ -1,5 +1,5 @@
 """The ``ui.tones`` (badge tone map) and ``ui.currency`` (ISO code) options of a ``Signature.Output`` field
-(fix-weih.29, fix-weih.30). Same load check as the other ui options, so ``fastworkflow run``, ``train``, the server and
+(fix-weih.29, fix-weih.30). Same load check as the other ui options, so ``fastworkflow run_cli``, ``train``, the server and
 ``command preview --check`` report a refusal the same way."""
 from __future__ import annotations
 

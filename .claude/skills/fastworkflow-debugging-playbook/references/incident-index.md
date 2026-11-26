@@ -34,7 +34,7 @@ for incidents the archaeology chronicle does not cover. Verify commits with `git
 
 - **Symptom:** starting a chat on a never-trained workflow crashed mid-conversation inside `CommandRouter`
   opening the missing `___command_info/global/threshold.json`.
-- **Fix:** `is_workflow_trained()` filesystem pre-check fails fast at session start in `run` and `mcp_server`,
+- **Fix:** `is_workflow_trained()` filesystem pre-check fails fast at session start in `run_cli` and `mcp_server`,
   printing the exact train command. Paths that embed WEC directly still lack the guard.
 
 ### PyJWT empty-key landmine — commit 5a63790 (v2.21.2) — trap T12

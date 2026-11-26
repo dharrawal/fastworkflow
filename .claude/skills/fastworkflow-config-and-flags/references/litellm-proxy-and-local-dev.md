@@ -44,7 +44,7 @@ LITELLM_PROXY_API_KEY=<proxy key>
   directly, not `get_lm`. Whether `litellm.completion` honors a `litellm_proxy/` prefix without
   an explicit `api_base` has not been tested here — treat as open.
 - **`run` still demands `LITELLM_API_KEY_SYNDATA_GEN`** even in all-proxy setups
-  (file-presence probe, `run/__main__.py:131-132`). Put a dummy value in the passwords file.
+  (file-presence probe, `run_cli/__main__.py:131-132`). Put a dummy value in the passwords file.
 - **Bedrock note:** `train` only warns on the missing SYNDATA key ("OK if this is Bedrock",
   `train/__main__.py:276-277`); AWS credentials flow through boto3 (optional `aws` poetry
   group, `pyproject.toml`), outside the env-file system entirely.

@@ -181,7 +181,7 @@ def test_fastworkflow_run_exits_on_a_workflow_wide_problem_naming_the_file(tmp_p
     from tests.test_run_code import _cli, _no_llm_env
 
     folder = _bad_startup_action(tmp_path, "wf_run")
-    cli = _cli("run", folder, *_env_files(), env=_no_llm_env(), timeout=300)
+    cli = _cli("run_cli", folder, *_env_files(), env=_no_llm_env(), timeout=300)
     assert cli.returncode == 1, cli.stdout + cli.stderr
     out = " ".join((cli.stdout + cli.stderr).split())
     assert "startup_action.json: command_name 'strtup' is no command of this workflow" in out
@@ -209,7 +209,7 @@ def test_the_server_refuses_to_start_on_a_workflow_wide_problem_naming_the_file(
 
 def test_the_server_process_exits_non_zero_on_a_runtime_startup_problem(tmp_path):
     """The runtime problems (``load_problems(runtime=True)``: here no agent model and no Jev key) stop the server the
-    same way, and its process exits non-zero, as ``fastworkflow run`` exits 1."""
+    same way, and its process exits non-zero, as ``fastworkflow run_cli`` exits 1."""
     import subprocess
     import sys
 
@@ -314,7 +314,7 @@ def test_fastworkflow_run_stops_when_nothing_runs_the_startup_command(tmp_path):
     folder = _build_workflow(tmp_path, "wf_no_action")
     (Path(folder) / "startup_action.json").unlink()
     assert command_preview.load_problems(folder) == []     # a client may still pass its own startup action
-    cli = _cli("run", folder, *_env_files(), env=_no_llm_env(), timeout=300)
+    cli = _cli("run_cli", folder, *_env_files(), env=_no_llm_env(), timeout=300)
     out = " ".join((cli.stdout + cli.stderr).split())
     assert cli.returncode == 1, out
     assert ("startup has no Signature, so it runs only as the workflow's startup action, and nothing names it: "

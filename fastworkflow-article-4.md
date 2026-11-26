@@ -421,7 +421,7 @@ To run our context hierarchy workflow, we follow the same steps as before, but n
 fastworkflow train ./messaging_app_4 ./messaging_app_4/fastworkflow.env ./messaging_app_4/fastworkflow.passwords.env
 
 # Run the workflow with the startup action
-fastworkflow run ./messaging_app_4 ./messaging_app_4/fastworkflow.env ./messaging_app_4/fastworkflow.passwords.env --startup_action ./messaging_app_4/startup_action.json
+fastworkflow run_cli ./messaging_app_4 ./messaging_app_4/fastworkflow.env ./messaging_app_4/fastworkflow.passwords.env --startup_action ./messaging_app_4/startup_action.json
 ```
 
 Let's walk through a typical interaction with our new workflow:

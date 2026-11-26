@@ -48,7 +48,7 @@ Recommended environment variables (aligning with CLI runner behavior):
   - `SPEEDDICT_FOLDERNAME`
   - `LLM_CONVERSATION_STORE`, `LITELLM_API_KEY_CONVERSATION_STORE`
 
-Startup sequence (parity with CLI `run/__main__.py`):
+Startup sequence (parity with CLI `run_cli/__main__.py`):
 1) Load and merge env files using `dotenv_values(ENV_FILE_PATH)` and `dotenv_values(PASSWORDS_FILE_PATH)`; validate required keys.
 2) `fastworkflow.init(env_vars=env_vars)`
 3) Store workflow configuration in `UserSessionManager` or module-level variables: `WORKFLOW_PATH`, `CONTEXT`, `STARTUP_COMMAND`, `STARTUP_ACTION`, `PROJECT_FOLDERPATH`.
@@ -56,7 +56,7 @@ Startup sequence (parity with CLI `run/__main__.py`):
 
 **Important:** `ChatSession` instances are created per-user when `initialize` is called, NOT at server startup. Each user gets their own `ChatSession` with isolated queues and state.
 
-Reference (CLI parity): see `fastworkflow/run/__main__.py` for env loading and startup orchestration.
+Reference (CLI parity): see `fastworkflow/run_cli/__main__.py` for env loading and startup orchestration.
 
 
 ## 4) Session Model and Persistence
@@ -522,7 +522,7 @@ Integration tests:
 
 ## 14) Alignment Notes
 
-- Startup parity: Mirrors CLI runner (`fastworkflow/run/__main__.py`) for env loading, `fastworkflow.init(...)`, `ChatSession(run_as_agent=True)`, and `start_workflow(...)` sequencing.
+- Startup parity: Mirrors CLI runner (`fastworkflow/run_cli/__main__.py`) for env loading, `fastworkflow.init(...)`, `ChatSession(run_as_agent=True)`, and `start_workflow(...)` sequencing.
 - Context handling: Current context is accessible via the command `what_is_current_context` (listed by `get_commands`) and on every `CommandOutput.context`. It is intentionally not duplicated in `get_workflow_info`.
 - No dynamic workflow loading and no admin/export tools over MCP.
 

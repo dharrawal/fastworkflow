@@ -151,7 +151,7 @@ fastworkflow train ./examples/hello_world ./examples/fastworkflow.env ./examples
 Once training is complete, run the interactive assistant!
 
 ```sh
-fastworkflow run ./examples/hello_world ./examples/fastworkflow.env ./examples/fastworkflow.passwords.env
+fastworkflow run_cli ./examples/hello_world ./examples/fastworkflow.env ./examples/fastworkflow.passwords.env
 ```
 
 You’ll be greeted with a `User >` prompt. Try asking it "what can you do?" or "add 49 + 51"!
@@ -272,7 +272,7 @@ fastworkflow train ./messaging_app_1 ./messaging_app_1/fastworkflow.env ./messag
 Finally, run it!
 
 ```sh
-fastworkflow run ./messaging_app_1 ./messaging_app_1/fastworkflow.env ./messaging_app_1/fastworkflow.passwords.env
+fastworkflow run_cli ./messaging_app_1 ./messaging_app_1/fastworkflow.env ./messaging_app_1/fastworkflow.passwords.env
 ```
 
 You can now interact with your first hand-built workflow. Try typing: `tell team@example.com hello from my first workflow!`

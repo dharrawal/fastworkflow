@@ -324,15 +324,10 @@ def _learned_main(args):
 
 
 def add_run_parser(subparsers):
-    """Add subparser for the 'run' command (alias: 'run_cli').
-
-    The alias names the transport the way its siblings do — run_cli /
-    run_chatbot / run_fastapi_mcp — while 'run' stays valid for existing
-    scripts and docs.
-    """
+    """Add subparser for the 'run_cli' command, named for its transport as its siblings
+    run_chatbot and run_fastapi_mcp are."""
     parser_run = subparsers.add_parser(
-        "run",
-        aliases=["run_cli"],
+        "run_cli",
         help="Run a workflow's interactive assistant in this terminal.",
     )
     parser_run.add_argument("workflow_path", help="Path to the workflow folder")
@@ -969,7 +964,7 @@ def run_with_defaults(args):  # sourcery skip: extract-duplicate-method
         sys.exit(1)
 
     # Lazy import here to avoid heavy startup when not needed
-    from .run.__main__ import run_main as _run_main
+    from .run_cli.__main__ import run_main as _run_main
     return _run_main(args)
 
 def _require_server_extra():

@@ -92,7 +92,7 @@ customer email/address/payment id lands in a world-readable
 `~/.local/state/.../observability.sqlite3`, retained 30 days, swept into $HOME
 backups.
 **Resolution direction:** 0700 dirs / 0600 DB explicitly; default ON only when the
-operator invoked the framework directly (`fastworkflow run`/`studio`/server),
+operator invoked the framework directly (`fastworkflow run_cli`/`studio`/server),
 opt-in for library embedders; document the delta.
 
 ### R5 — the Studio read layer is an unauthenticated cross-channel read primitive [security]
@@ -126,7 +126,7 @@ attribution lands wrong. **Direction:** deterministic span ids
 segment spans with the logical envelope computed at read time.
 
 ### R7 — CLI exit kills the writer thread with the just-debugged turn still queued [concurrency]
-The CLI exit path (`run/__main__.py:218-227` `//exit` → break) calls no
+The CLI exit path (`run_cli/__main__.py:218-227` `//exit` → break) calls no
 close/flush; house precedent is daemon threads (`chat_session.py:26-30`). §3.2
 specifies neither daemonness nor a flush protocol. **Failure:** developer runs one
 turn to reproduce a bug, exits, opens Studio — the last turn (the one under

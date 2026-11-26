@@ -201,7 +201,7 @@ question (candidate work item for the tau2 program).
 
 ### Live CLI traces (agent mode)
 
-`fastworkflow run` renders CommandTraceEvents while the spinner runs — dim
+`fastworkflow run_cli` renders CommandTraceEvents while the spinner runs — dim
 yellow `Agent >` (raw command), dim yellow/green `Workflow >` (resolved
 command + response), dim orange for failed steps. Methodology and event model:
 `docs/agent_mode_live_command_traces.md` — the design doc for this feature;
@@ -211,7 +211,7 @@ override were never implemented (traces are always on; verified by grep), and
 action-log records are appended by `workflow_agent.py`, not
 `command_executor.py` as §5 claims (§5 also describes the action.jsonl mirror,
 retired in Phase 7). Consumer loop:
-`fastworkflow/run/__main__.py:229-267`.
+`fastworkflow/run_cli/__main__.py:229-267`.
 Known open bug fix-5fv (code-reading evidence only, never reproduced): the CLI
 spinner may hang on agent-mode ask_user because the clarification is enqueued
 without the trace sentinel.

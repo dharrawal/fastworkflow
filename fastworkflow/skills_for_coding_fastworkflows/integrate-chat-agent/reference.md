@@ -383,7 +383,7 @@ LiteLLM Proxy: prefix model names with `litellm_proxy/`, set `LITELLM_PROXY_API_
 
 ## Troubleshooting
 
-- **A command file does not load**: `fastworkflow run`, `fastworkflow train` and the server print the problem at
+- **A command file does not load**: `fastworkflow run_cli`, `fastworkflow train` and the server print the problem at
   start. Fix the import or the error it names.
 - **PARAMETER EXTRACTION ERROR** or a repeated parameter question: the `Field` descriptions and examples are too weak,
   or the request lacks a required value.

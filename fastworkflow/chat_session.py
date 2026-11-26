@@ -113,7 +113,7 @@ class ChatSession:
             generate_insights: If True, enable teacher/student insights distillation
                          on each agent turn (Topology A / CLI only).
             detect_no_agent_mode: If True, an unset agent model (``LLM_AGENT``) puts the session in no-agent mode
-                         (``fastworkflow.no_agent_mode``). ``fastworkflow run`` sets it.
+                         (``fastworkflow.no_agent_mode``). ``fastworkflow run_cli`` sets it.
 
         A chat session can run multiple workflows that share the same message queues.
         Use start_workflow() to start a specific workflow within this session.

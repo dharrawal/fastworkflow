@@ -1,6 +1,6 @@
 """The CLI transport's three queues, and what they add to a plain ``queue.Queue``.
 
-``fastworkflow run`` drives the engine through queues: a worker thread runs a turn, and the terminal reads the
+``fastworkflow run_cli`` drives the engine through queues: a worker thread runs a turn, and the terminal reads the
 trace and output queues until the turn's sentinel (``None``). The engine cannot abort a turn in flight (a model
 call or a command's own code runs to its end), so "stop waiting" is built from two things here:
 

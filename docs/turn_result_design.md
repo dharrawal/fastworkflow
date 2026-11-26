@@ -399,7 +399,7 @@ producer emits two events per command execution at the same `invoke_command` cho
 
 Consumers drain it live:
 
-- **CLI** `fastworkflow/run/__main__.py` (`command_trace_queue.get_nowait()` / `get(timeout=0.1)`).
+- **CLI** `fastworkflow/run_cli/__main__.py` (`command_trace_queue.get_nowait()` / `get(timeout=0.1)`).
 - **Bundled FastAPI MCP server** `fastworkflow/run_fastapi_mcp/utils.py`: runs `process_message` in
   an executor and polls the queue every 50 ms, firing `on_trace` callbacks while the turn runs, then
   calls `persist_pending_after_turn` **once after** the turn. Streaming and persistence are already
@@ -1089,7 +1089,7 @@ Verified sites missing from section 11, with migration releases per A14:
   incl. `wildcard.py`'s artifact mutations at lines 86/123); all bundled examples (45
   files); the test workflows (`tests/example_workflow`, `tests/todo_list_workflow`,
   `tests/hello_world_workflow`, ~43 command files).
-- **v3.0** (migrate with the surfaces they exercise): `run/__main__.py` CLI printer (R43);
+- **v3.0** (migrate with the surfaces they exercise): `run_cli/__main__.py` CLI printer (R43);
   `run_fastapi_mcp/utils.py:355-357` awaiting check (A3); ~15 test modules asserting on
   `.command_responses[0]` / `artifacts["awaiting_user"]` (notably
   `test_execution_context_agent.py`, `test_fastapi_service.py`,

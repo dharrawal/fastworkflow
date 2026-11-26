@@ -241,7 +241,7 @@ To run our new class-based workflow, we follow the same steps as before:
 fastworkflow train ./messaging_app_2 ./messaging_app_2/fastworkflow.env ./messaging_app_2/fastworkflow.passwords.env
 
 # Run the workflow
-fastworkflow run ./messaging_app_2 ./messaging_app_2/fastworkflow.env ./messaging_app_2/fastworkflow.passwords.env
+fastworkflow run_cli ./messaging_app_2 ./messaging_app_2/fastworkflow.env ./messaging_app_2/fastworkflow.passwords.env
 ```
 
 When you start the workflow, you'll need to initialize the user context first:

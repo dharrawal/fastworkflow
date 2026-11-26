@@ -25,7 +25,7 @@ def run_main(args):
     import fastworkflow
     from fastworkflow.utils.logging import logger
     from fastworkflow.turn_progress import ProgressEvent
-    from fastworkflow.run.turn_wait import WaitOutcome, interrupted_message, timed_out_message, wait_for_turn
+    from fastworkflow.run_cli.turn_wait import WaitOutcome, interrupted_message, timed_out_message, wait_for_turn
 
     # Progress bar helper
     from fastworkflow.utils.startup_progress import StartupProgress

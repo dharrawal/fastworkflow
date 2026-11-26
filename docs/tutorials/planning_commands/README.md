@@ -133,13 +133,13 @@ From the repository root:
 fastworkflow command preview fastworkflow/examples/library --out /tmp/library_previews
 fastworkflow command run-code fastworkflow/examples/library book_loans --input '{"title": "Dune"}'
 fastworkflow train fastworkflow/examples/library
-fastworkflow run fastworkflow/examples/library
+fastworkflow run_cli fastworkflow/examples/library
 ```
 
 `command preview` renders one markdown page per planning command, which is the quickest way
 to see what the agent will plan from; add `--check` in CI to fail when a committed preview is
 stale or a `from_command_output` does not resolve. Planning commands run only in agent mode, the default
-of `fastworkflow run`: `--assistant` runs deterministic mode and refuses a planning command
+of `fastworkflow run_cli`: `--assistant` runs deterministic mode and refuses a planning command
 (page 14). `JEV_API_KEY` in `fastworkflow.passwords.env` is optional: without it no request
 matches a planning command, so the planner plans from each one's template, and the `classifier_confirms`
 option checks nothing (pages 9 and 14).

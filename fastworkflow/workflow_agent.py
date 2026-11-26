@@ -1601,7 +1601,7 @@ def load_planning_commands(workflow_folderpath: str) -> tuple[tuple[str, str, tu
     without parameters or phases, its fixed ``steps()``), and ``load_planning_command_map`` holds its
     parsed form. A planning command file that cannot be imported or is malformed fails that command only: it is not
     here, the other planning commands still load, and it is a load problem (``command_preview.load_problems``, which
-    ``fastworkflow run``, ``train``, the server and ``command preview`` report); a malformed workflow settings
+    ``fastworkflow run_cli``, ``train``, the server and ``command preview`` report); a malformed workflow settings
     file raises PlanningCommandFormatError. ``_commands`` also holds the workflow's
     settings, ``_workflow.py`` (``split_settings``), and the helper package ``_shared/``.
     """

@@ -301,7 +301,7 @@ class WorkflowExecutionContext:
 
     #: Whether this context reads the agent model's absence as no-agent mode (``no_agent_mode``). Off for a context
     #: built without asking (an embedder or a test that scripts its own agent LM); the entry points that serve
-    #: users (``fastworkflow run``, the FastAPI server) turn it on.
+    #: users (``fastworkflow run_cli``, the FastAPI server) turn it on.
     detect_no_agent_mode = False
 
     # Defaults for an object built without ``__init__`` (state restore, tests): every attribute ``__init__`` or

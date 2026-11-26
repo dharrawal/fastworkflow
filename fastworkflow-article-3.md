@@ -291,7 +291,7 @@ To run our inheritance-aware workflow, we follow the same steps as before:
 fastworkflow train ./messaging_app_3 ./messaging_app_3/fastworkflow.env ./messaging_app_3/fastworkflow.passwords.env
 
 # Run the workflow
-fastworkflow run ./messaging_app_3 ./messaging_app_3/fastworkflow.env ./messaging_app_3/fastworkflow.passwords.env
+fastworkflow run_cli ./messaging_app_3 ./messaging_app_3/fastworkflow.env ./messaging_app_3/fastworkflow.passwords.env
 ```
 
 When you start the workflow, you'll need to specify whether you're a regular or premium user:

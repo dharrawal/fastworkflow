@@ -1,7 +1,7 @@
 """The terminal's wait for one turn: read the trace queue to the sentinel, stoppable by Ctrl-C or a deadline.
 
-Kept apart from ``run/__main__.py`` (which needs prompt_toolkit and rich) so a test can drive the wait with a real
-``ChatSession`` and no terminal. The wait is the loop ``fastworkflow run`` always had: one blocking read of the
+Kept apart from ``run_cli/__main__.py`` (which needs prompt_toolkit and rich) so a test can drive the wait with a real
+``ChatSession`` and no terminal. The wait is the loop ``fastworkflow run_cli`` always had: one blocking read of the
 trace queue per 0.1 s tick. The deadline is one clock comparison per tick, and there is no watcher thread, so a
 turn that is not interrupted and has no deadline costs what it did before.
 """

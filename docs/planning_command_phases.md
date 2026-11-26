@@ -93,7 +93,7 @@ provides (and no default) or that names no such phase in any call, a facts field
 a command's `Output` or `Input` (a copy included), a method that fails while its template is built or writes `None` into a step, and a step that
 names a command the workflow lacks or a parameter its `Signature.Input` lacks
 (`planning_commands.check_step_commands`) fail the load of that planning command only: it does not load,
-the rest of the workflow does, and `fastworkflow run`, `fastworkflow train`, the server and
+the rest of the workflow does, and `fastworkflow run_cli`, `fastworkflow train`, the server and
 `fastworkflow command preview --check` list it (`docs/design_idioms/removed.html#load-rule`). Each output model is then checked
 against the workflow's command signatures (`typed_phase_facts.check_typed_facts_model`): a field typed with a
 class that is not a loaded command's `Output` or `Input` is a load error;

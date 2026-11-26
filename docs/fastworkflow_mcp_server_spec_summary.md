@@ -201,7 +201,7 @@ def invoke_agent(user_query: str, timeout_seconds: int = 60):
 
 **Related specs:**
 - [fastworkflow_fastapi_spec.md](./fastworkflow_fastapi_spec.md) - REST API counterpart
-- FastWorkflow CLI runner: `fastworkflow/run/__main__.py`
+- FastWorkflow CLI runner: `fastworkflow/run_cli/__main__.py`
 - Agent implementation: `fastworkflow/workflow_agent.py`
 
 ---

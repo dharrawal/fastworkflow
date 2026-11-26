@@ -1,7 +1,7 @@
 # 15. Troubleshooting
 
 A command file that does not load is skipped, and the workflow's other commands still load.
-`fastworkflow run` prints the error before its first prompt, `fastworkflow train` stops on
+`fastworkflow run_cli` prints the error before its first prompt, `fastworkflow train` stops on
 it before any training, `run_fastapi_mcp` logs it at startup, and
 `fastworkflow command preview --check` fails naming the file and its error. Each
 snippet below is a file saved in a copy of the sample workflow, at the path its message
@@ -656,7 +656,7 @@ _commands/Library/get_order.py: Input.order_id: available_from is written by fro
 ("in the current context") belongs in the field's description.
 
 **A `from_command_output` that does not resolve.** The command that wrote it does not load. It is a
-problem line printed by `fastworkflow run`, `fastworkflow train` and the server, and `command preview --check`
+problem line printed by `fastworkflow run_cli`, `fastworkflow train` and the server, and `command preview --check`
 reports it too; the rest of the workflow loads. The reasons follow (a bare command name, a command or field
 that is not there, a producer off the lookup path, a type that does not fit).
 
@@ -877,7 +877,7 @@ _commands/Library/bad_order.py: PlanGenerator adds the phase(s) overdue to those
 ## Calls between planning commands
 
 **A cycle.** If `a`'s steps name `b` and `b`'s name `a`, each command on the cycle gets a load
-error that names the path, so none of them loads, and `fastworkflow run`, `fastworkflow train`, the
+error that names the path, so none of them loads, and `fastworkflow run_cli`, `fastworkflow train`, the
 server and `fastworkflow command preview --check` list the same lines. For `Library/book_loans` and `Library/book_by_title` calling each
 other, the load reports:
 

@@ -39,7 +39,7 @@ RANKS = {
     "engine": 6,
     "agent": 7,
     "evaluation": 8,
-    "train": 9, "build": 9, "refine": 9, "run": 9, "run_chatbot": 9, "run_fastapi_mcp": 9, "experiment": 9,
+    "train": 9, "build": 9, "refine": 9, "run_cli": 9, "run_chatbot": 9, "run_fastapi_mcp": 9, "experiment": 9,
     "benchmark": 9, "cli": 9,
 }
 # Modules that import nothing from fastworkflow, so every layer may use them.

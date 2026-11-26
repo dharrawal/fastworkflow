@@ -328,7 +328,7 @@ text; traceback artifacts persist only when `FW_OBS_CAPTURE_TRACEBACKS=1`.
 
 **File posture and capture default `[R4]`:** DB directory 0700, DB files 0600,
 set explicitly. Recording is always on, under fastWorkflow's own entry points
-(`fastworkflow run`, `studio`, `run_fastapi_mcp`, `train`) and for library
+(`fastworkflow run_cli`, `studio`, `run_fastapi_mcp`, `train`) and for library
 embedders alike.
 
 **Erasure `[R21]`:** `channel_id` on spans/artifacts plus a first-class

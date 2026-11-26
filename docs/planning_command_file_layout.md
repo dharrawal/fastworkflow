@@ -124,7 +124,7 @@ agent and assistant mode and through direct API and MCP calls. A **planning comm
 does the rest. Write an execution command when code can decide every step. Write a planning
 command when the agent should run, judge or recover part of the job: a value to find, a judgement
 to make, a step to recover when it goes wrong, or a question for the user. A planning command runs
-in agent mode. In assistant mode (`fastworkflow run --assistant`, or a message with a leading `/`)
+in agent mode. In assistant mode (`fastworkflow run_cli --assistant`, or a message with a leading `/`)
 an exactly named planning command runs when it is mechanical: code runs every step and nothing needs
 the agent. One that needs the agent is refused with the reasons, which name the step and what to
 change. Direct API and MCP calls still refuse a planning command, with "... is a planning command;

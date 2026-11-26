@@ -80,7 +80,7 @@ you the exact command if you forget.
 Required-var floor (train and run hard-fail without it): `SPEEDDICT_FOLDERNAME`
 (conventionally `___workflow_contexts`) — it doubles as the "did the env file load at all"
 probe. `run` additionally hard-fails if `LITELLM_API_KEY_SYNDATA_GEN` is absent
-(run/__main__.py:129-132), even though run never generates synthetic data — keep the key
+(run_cli/__main__.py:129-132), even though run never generates synthetic data — keep the key
 set. The parameter-extraction sentinels (`MISSING_INFORMATION_ERRMSG`,
 `INVALID_INFORMATION_ERRMSG`, `NOT_FOUND`, `INVALID`, `PARAMETER_EXTRACTION_ERROR_MSG`)
 have no code defaults and must be present in the env file (the templates carry them).

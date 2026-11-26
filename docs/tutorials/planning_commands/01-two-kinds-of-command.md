@@ -320,7 +320,7 @@ than the description promises.
 This trace is what `fastworkflow command run-code` prints for the call: it runs every step code
 can run, against the sample commands, with no model, and stops where the agent would take over.
 
-Planning commands run only in agent mode. In assistant mode (`fastworkflow run --assistant`,
+Planning commands run only in agent mode. In assistant mode (`fastworkflow run_cli --assistant`,
 or a message typed with a leading `/`), naming one gets `Library/overdue_summary is a
 planning command; it runs in agent mode.` Execution commands run in both modes.
 

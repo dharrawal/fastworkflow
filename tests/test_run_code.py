@@ -3,7 +3,7 @@
 The sample workflow (``fastworkflow/examples/library``) and ``tests/todo_list_workflow`` are copied to ``tmp_path``
 for every test, since a run changes the session's state (and a copy keeps the repository clean). No model is
 called: the run is checked for that with a seam that fails if one is reached, and by a CLI run with no LLM
-environment at all. The load-problem cases write a broken command into a copy and check ``fastworkflow run``
+environment at all. The load-problem cases write a broken command into a copy and check ``fastworkflow run_cli``
 (its output before the first prompt), ``fastworkflow train`` (it stops before training) and the FastAPI
 server's startup log.
 """
@@ -222,7 +222,7 @@ def test_fastworkflow_run_prints_the_load_problem_before_its_first_prompt(librar
     env_files = [os.path.join(library, "fastworkflow.env"), os.path.join(library, "fastworkflow.passwords.env")]
     # The copy is not trained, and this test wants the run to stop there. Its passwords file holds the planner key,
     # with which an untrained workflow now starts on the model matcher (fix-yu3l.3): the classifier is required here.
-    cli = _cli("run", library, *env_files, env={**_no_llm_env(), "FW_REQUIRE_HEADS": "1"})
+    cli = _cli("run_cli", library, *env_files, env={**_no_llm_env(), "FW_REQUIRE_HEADS": "1"})
     out = cli.stdout + cli.stderr
     problem = "Load problem: Library/broken_thing: PlanningCommandFormatError"
     assert problem in out

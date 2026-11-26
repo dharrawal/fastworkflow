@@ -10,7 +10,7 @@ Universal loop per example:
 ```sh
 fastworkflow examples fetch <name>
 fastworkflow train ./examples/<name> ./examples/fastworkflow.env ./examples/fastworkflow.passwords.env
-fastworkflow run   ./examples/<name> ./examples/fastworkflow.env ./examples/fastworkflow.passwords.env
+fastworkflow run_cli   ./examples/<name> ./examples/fastworkflow.env ./examples/fastworkflow.passwords.env
 ```
 
 Read them in this order — each introduces exactly one new concept.

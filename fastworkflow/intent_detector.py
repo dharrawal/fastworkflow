@@ -893,7 +893,7 @@ def startup_report(
     build: bool = False,
 ) -> tuple[list[str], list[str]]:
     """``(problems, notices)`` about the workflow's detection chain, for every gate that refuses an
-    untrained workflow (``fastworkflow run``, the MCP server, the chat page's workflow listing, the FastAPI
+    untrained workflow (``fastworkflow run_cli``, the MCP server, the chat page's workflow listing, the FastAPI
     server). The one decision of "may it start": a gate refuses, with its own words, when *problems* is not
     empty, and otherwise prints or logs the notice.
 
@@ -905,7 +905,7 @@ def startup_report(
     local model with nothing to stand in for it (no planner key, ``FW_REQUIRE_HEADS=1``, or a workflow that
     was never built) is one problem, and there is no notice. Never raises.
 
-    ``build=True`` is for a gate that is about to load the workflow anyway (``fastworkflow run``, the
+    ``build=True`` is for a gate that is about to load the workflow anyway (``fastworkflow run_cli``, the
     servers): a workflow that was never built (no routing definition yet, so nobody knows its contexts) gets
     its routing definition built and saved here when the matcher could decide its scopes, and is then
     reported like any other. A gate that only looks (the chat page's listing of many folders) leaves it
