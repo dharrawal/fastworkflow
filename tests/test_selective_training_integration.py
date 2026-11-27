@@ -380,7 +380,7 @@ def _preseed_fixed_utterance_cache(
     for command_name in sorted(commands):
         if command_name.split("/")[-1] == "wildcard":
             continue
-        # Framework machinery (fastworkflow/_framework_commands, e.g. review_plan) is not trained, so it
+        # Framework machinery (fastworkflow/review/commands, e.g. review_plan) is not trained, so it
         # has no provenance record (train.training_report: "not trained, reported or gated").
         framework_meta = cmd_dir.map_command_2_metadata.get(command_name)
         if framework_meta is not None and getattr(framework_meta, "framework", None):

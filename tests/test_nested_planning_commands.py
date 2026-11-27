@@ -19,8 +19,8 @@ from pydantic import BaseModel, Field
 
 import fastworkflow
 import fastworkflow.workflow_agent as workflow_agent
-from fastworkflow import planning_commands, planning_phases
-from fastworkflow import plan_frame as plan_frame_module
+from fastworkflow.planning import planning_commands, planning_phases
+from fastworkflow.planning import plan_frame as plan_frame_module
 from fastworkflow.observability import tracing
 from fastworkflow.command_executor import CommandExecutor, CommandNotFoundError
 from fastworkflow.context_identity import context_class_for
@@ -33,11 +33,11 @@ from fastworkflow.observation_offloading.state import (
     observability_db_path,
     scope_for_host,
 )
-from fastworkflow.plan_frame import TURN_MAX_STEPS_ENV, PlanFrame, runs_outside_ranges, turn_max_steps
-from fastworkflow.typed_phase_facts import fill_typed_phase_output
+from fastworkflow.planning.plan_frame import TURN_MAX_STEPS_ENV, PlanFrame, runs_outside_ranges, turn_max_steps
+from fastworkflow.planning.typed_phase_facts import fill_typed_phase_output
 from fastworkflow.examples.library._commands.Library.book_by_title import Signature as BookByTitle
 from fastworkflow.examples.library._commands.Library.find_book import Signature as FindBook
-from fastworkflow.planning_commands import PlanningCommandInputError
+from fastworkflow.planning.planning_commands import PlanningCommandInputError
 from fastworkflow.session.state_serialization import validate_state
 from fastworkflow.turn import TurnStatus
 from fastworkflow.workflow_execution_context import (
@@ -1116,7 +1116,7 @@ def open_by_uid_env(tmp_path, initialized_fastworkflow, monkeypatch):
 
 def _item_opened(state):
     """open_by_uid's Output, as the workflow loaded it: the model a fan-out phase fills."""
-    from fastworkflow import planning_commands
+    from fastworkflow.planning import planning_commands
 
     # A planning command is not routed: its Signature is in the field-source resolution.
     signatures = planning_commands.resolve_field_sources(state.wf.folderpath).signatures

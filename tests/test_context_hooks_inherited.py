@@ -163,7 +163,7 @@ def _library_dict(state: dict) -> dict:
 # (a) it loads, and nothing is reported as lacking a hook
 
 def test_a_the_inheriting_workflow_loads_and_no_context_lacks_a_hook(initialized_fastworkflow, inheriting, plain):
-    from fastworkflow import command_preview
+    from fastworkflow.planning import command_preview
     from fastworkflow.run_fastapi_mcp import checkpoint
 
     assert command_preview.load_problems(str(inheriting)) == []

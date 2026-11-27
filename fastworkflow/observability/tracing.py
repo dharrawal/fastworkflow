@@ -284,7 +284,7 @@ def call_scope(call_id: str, *, command_name: Optional[str] = None) -> Iterator[
 # `defaulted_sentinel_values` and `out_of_range_values` (fix-7t0q).
 #
 # v16: fw.skill.phase added (fix-hia1.2) -- one span per phase run of a phased
-# planning command call (`fastworkflow.planning_phases`). No existing span changed.
+# planning command call (`fastworkflow.planning.planning_phases`). No existing span changed.
 #
 # v17: fw.skill.phase v2 (fix-hia1.7, fix-hia1.3) -- `answer_only` (a phase whose
 # steps name no command, answered by one model call with no tools), and for one

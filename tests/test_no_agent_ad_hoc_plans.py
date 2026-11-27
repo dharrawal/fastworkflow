@@ -11,8 +11,9 @@ from __future__ import annotations
 
 import pytest
 
-from fastworkflow import no_agent_mode, review_proposals, run_listing
-from fastworkflow.approval_binding import Surface
+from fastworkflow import no_agent_mode, run_listing
+from fastworkflow.review import review_proposals
+from fastworkflow.review.approval_binding import Surface
 from fastworkflow.turn import TurnStatus
 from fastworkflow.workflow_execution_context import NOT_RUN_ARTIFACT, WorkflowExecutionContext
 from tests.test_approval_binding import (  # noqa: F401 - the real agent on the annotated library copy, and the guards

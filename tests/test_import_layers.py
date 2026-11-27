@@ -53,10 +53,8 @@ KNOWN_EXCEPTIONS = {
         "AskUserSuspend and NoSuspendedAgentStateError move out of the ReAct module (step 7)",
     ("fastworkflow.parameters.signatures", "fastworkflow.model_pipeline_training"):
         "CommandRouter and its path helpers move to intent/ (step 7)",
-    ("fastworkflow.parameters.signatures", "fastworkflow.planning_commands"):
+    ("fastworkflow.parameters.signatures", "fastworkflow.planning.planning_commands"):
         "the planning-argument gap code moves into parameters/ (later)",
-    ("fastworkflow.observation_offloading.facts", "fastworkflow.plan_frame"):
-        "runs_outside_ranges moves into observation_offloading (step 7)",
     ("fastworkflow.observation_offloading.agent", "fastworkflow.utils.react"):
         "the offloading wiring of the ReAct loop moves to agent/ (later)",
     ("fastworkflow.utils.dspy_utils", "fastworkflow.parameters.rules"):

@@ -58,7 +58,7 @@ def _resolve(phrase: str, pool: list) -> list[str]:
 
 
 def _ask_again(message: str):
-    from fastworkflow.review_engine import ReplyDecision, Verdict
+    from fastworkflow.review.review_engine import ReplyDecision, Verdict
 
     return ReplyDecision(Verdict.REPROMPT, "plan switch unclear", message=message)
 
@@ -148,7 +148,8 @@ def known_plan_names(workflow) -> dict[str, str]:
     if workflow is None or not getattr(workflow, "folderpath", None):
         return {}
     try:
-        from fastworkflow import planning_commands, run_listing
+        from fastworkflow.planning import planning_commands
+        from fastworkflow import run_listing
         from fastworkflow.workflow_agent import core_command_names
 
         folder = workflow.folderpath
@@ -228,8 +229,8 @@ def split_switch_clauses(proposal, text: str, workflow=None) -> Optional[SwitchS
     a question must be asked (nothing is applied), else ``edits`` (a means ``Change`` per switched step) and ``remainder``
     (the other clauses, in order, joined with ``;``, for the reader the reply policy uses for any other reply). Never calls
     a model."""
-    from fastworkflow.review_engine import Change
-    from fastworkflow.review_proposals import SubTaskProposal
+    from fastworkflow.review.review_engine import Change
+    from fastworkflow.review.review_proposals import SubTaskProposal
 
     if not isinstance(proposal, SubTaskProposal) or not proposal.items:
         return None

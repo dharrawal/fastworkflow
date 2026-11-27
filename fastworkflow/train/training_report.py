@@ -557,7 +557,7 @@ def _load_command_directory(
             if not isinstance(entry, dict):
                 continue
             if entry.get("framework"):
-                # Framework machinery (fastworkflow/_framework_commands) is not trained, reported or gated.
+                # Framework machinery (fastworkflow/review/commands) is not trained, reported or gated.
                 continue
             if entry.get("is_planning"):
                 planning.add(str(name))

@@ -21,7 +21,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from fastworkflow import approval_binding as ab
+from fastworkflow.review import approval_binding as ab
 from tests.test_approval_binding import (  # noqa: F401 - the real agent on a library copy, and the guards
     _COPY_IGNORE, LIBRARY, _annotate, no_live_model, no_model_call_for_parameters, todo)
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401

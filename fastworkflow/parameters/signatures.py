@@ -32,7 +32,7 @@ from fastworkflow.parameters.extraction_attempts import FirstAttemptGreedy
 from fastworkflow.parameters.input_validation import bound_fields, is_pydantic_model, set_field_unvalidated
 from fastworkflow.utils.dspy_logger import DSPyForward
 from fastworkflow.command_directory import CommandDirectory
-from fastworkflow import planning_commands
+from fastworkflow.planning import planning_commands
 from fastworkflow.parameters import ask, rules
 from fastworkflow.parameters.rules import allowed_member, is_union, literal_values, pattern_refusal
 from fastworkflow.parameters.workflow_vocabulary import (
@@ -649,7 +649,7 @@ def screen_parameter_values(cmd_parameters: BaseModel, quote_texts: Optional[str
 
     *field_names*, when given, limits the pass to those fields. ``validate_parameters``
     runs this before any other check of a command's parameters; a planning command call runs it on its
-    ``str`` and ``int`` arguments (``fastworkflow.planning_commands.check_arguments``).
+    ``str`` and ``int`` arguments (``fastworkflow.planning.planning_commands.check_arguments``).
     """
     screen = ParameterScreen()
     placeholder_fields = screen.placeholder_fields

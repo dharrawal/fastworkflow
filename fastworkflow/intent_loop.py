@@ -152,7 +152,7 @@ class Intent:
 
 def _kinds(workflow) -> tuple[set[str], set[str]]:
     """``(planning names, core names)`` of the workflow."""
-    from fastworkflow import planning_commands
+    from fastworkflow.planning import planning_commands
     from fastworkflow.workflow_agent import core_command_names
 
     return (set(planning_commands.resolve_field_sources(workflow.folderpath).planning_commands),
@@ -270,7 +270,7 @@ def first_word(text: str) -> str:
 
 
 def _is_framework_planning(folderpath: str, qualified: str) -> bool:
-    from fastworkflow.planning_commands import is_framework_planning_command, planning_command
+    from fastworkflow.planning.planning_commands import is_framework_planning_command, planning_command
 
     command = planning_command(folderpath, qualified)
     return command is not None and is_framework_planning_command(command)
@@ -649,7 +649,8 @@ def unconfirmed_pick(workflow, intent: "Intent", origin) -> bool:
     The one rule both paths read: "a command that changes data or needs approval runs only when the user named it
     (typed its exact name, picked it at the which-command question, or a client pinned or called it directly), or
     after the user says yes to it". Raises what reading the workflow's routing raises."""
-    from fastworkflow import approval_annotations, approval_binding, command_writes
+    from fastworkflow import approval_annotations, command_writes
+    from fastworkflow.review import approval_binding
 
     if intent.outcome != MATCH or intent.decided_by in NAMED_DECIDERS or not intent.command:
         return False

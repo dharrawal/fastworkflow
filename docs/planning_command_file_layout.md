@@ -179,7 +179,7 @@ An `Input` field takes options in `json_schema_extra`: a key per behaviour, its 
 key's own options. Combine keys by adding them. Plain pydantic `Field(...)`; there are no helper functions. An
 unknown key, a retired spelling, a value that is neither `True` nor a dict of known options, or two keys that
 conflict fails the load, naming the key to write instead. They work on planning commands today;
-`fastworkflow.planning_commands` has the full rules, and `fastworkflow.FieldOptions` (and its TypedDicts) gives IDE
+`fastworkflow.planning.planning_commands` has the full rules, and `fastworkflow.FieldOptions` (and its TypedDicts) gives IDE
 completion.
 
 - `copied_from_command_text: True` (a `str`, an `int` or a `list[str]`): a `str` must appear in the request as a
@@ -220,7 +220,7 @@ completion.
   the named words are removed from either end of the value before the check, so a kind word the model appends to
   a name ("Payroll group" becomes "Payroll") is cleaned as the request writes it. This is the cleanup the retired
   `strip` option did. A field with no check is cleaned in code instead: `strip_words(text, words)` from
-  `fastworkflow.planning_commands`, called in the field's `field_validator`.
+  `fastworkflow.planning.planning_commands`, called in the field's `field_validator`.
 - `command_text_after_command_name: True` (a `str`, at most one per `Input`; execution commands only): takes the text
   after the command name. `from_command_output: "<command>.<field>"` (or a list) names the command that supplies the
   value (see `declare-parameter-producers`). A field with no copy option keeps the

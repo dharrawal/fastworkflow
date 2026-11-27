@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from fastworkflow import planning_commands as sc
+from fastworkflow.planning import planning_commands as sc
 from fastworkflow import workflow_agent
 from tests.test_check_roles_one_step import workflow  # noqa: F401  (workflow is a fixture)
 

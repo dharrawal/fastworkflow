@@ -5,11 +5,11 @@ import dspy
 import pytest
 from dspy.utils import DummyLM
 
-from fastworkflow import review_engine as re
-from fastworkflow import review_proposals
+from fastworkflow.review import review_engine as re
+from fastworkflow.review import review_proposals
 from fastworkflow.command_writes import write_commands
-from fastworkflow.review_engine import Add, Change, Drop, PROPOSAL_TTL_SECONDS, apply_edits, parse_edits, reply_policy
-from fastworkflow.review_proposals import (
+from fastworkflow.review.review_engine import Add, Change, Drop, PROPOSAL_TTL_SECONDS, apply_edits, parse_edits, reply_policy
+from fastworkflow.review.review_proposals import (
     Means, PendingItemSlot, ProposedEdit, SubTask, SubTaskInput, SubTaskProposal, merge_subtask_input_edit,
     model_edit_reader, redraft_for_look_up)
 
@@ -183,7 +183,7 @@ def test_truncated_name_repaired_from_quotes():
 
 
 def test_function_call_goal_becomes_inputs_preserves_untouched_inputs(todo, monkeypatch):
-    from fastworkflow.review_proposals import DRAFT_ARGUMENTS_ENV_VAR
+    from fastworkflow.review.review_proposals import DRAFT_ARGUMENTS_ENV_VAR
 
     monkeypatch.setenv(DRAFT_ARGUMENTS_ENV_VAR, "on")
 
@@ -514,7 +514,7 @@ def test_the_reader_gets_the_model_rendering_not_the_user_one():
 
 
 def test_a_goal_edit_re_drafts_means_and_inputs(todo, monkeypatch):
-    from fastworkflow.review_proposals import DRAFT_ARGUMENTS_ENV_VAR
+    from fastworkflow.review.review_proposals import DRAFT_ARGUMENTS_ENV_VAR
 
     monkeypatch.setenv(DRAFT_ARGUMENTS_ENV_VAR, "on")
 

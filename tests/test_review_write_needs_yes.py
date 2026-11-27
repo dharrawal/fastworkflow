@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from fastworkflow.review_engine import CONFIRMED, DECLINED, reply_to_proposal, proposal_of
+from fastworkflow.review.review_engine import CONFIRMED, DECLINED, reply_to_proposal, proposal_of
 
 from tests.test_approval_binding import annotated_library, no_live_model, todo  # noqa: F401
 from tests.test_plan_reply_policy import (  # noqa: F401
@@ -37,7 +37,7 @@ def _open(gated, monkeypatch, *, writes: bool):
 
 
 def test_the_whole_accept_list_does_not_hold_dont_change_anything():
-    from fastworkflow import review_engine as re_
+    from fastworkflow.review import review_engine as re_
 
     assert "dont change anything" not in re_._ACCEPT_PHRASES
     assert not re_._affirmative_accept_cue("dont change anything")
@@ -93,7 +93,7 @@ def test_a_read_only_turn_accepts_as_before(gated, monkeypatch, text):
 
 @reader
 def test_the_first_ask_of_a_writing_turn_says_a_yes_is_needed(gated, monkeypatch):
-    from fastworkflow import review_engine as re_
+    from fastworkflow.review import review_engine as re_
 
     record = _open(gated, monkeypatch, writes=True)
     text = re_.prompt_for(proposal_of(record), gated.wf)      # the question as a review opened now would show it
@@ -105,7 +105,7 @@ def test_the_first_ask_of_a_writing_turn_says_a_yes_is_needed(gated, monkeypatch
 
 @reader
 def test_the_first_ask_of_a_read_only_turn_keeps_todays_hint(gated, monkeypatch):
-    from fastworkflow import review_engine as re_
+    from fastworkflow.review import review_engine as re_
 
     record = _open(gated, monkeypatch, writes=False)
     assert record.rendering.endswith(re_.SUB_TASK_PROMPT_HINT)
@@ -116,8 +116,8 @@ def test_the_first_ask_of_a_read_only_turn_keeps_todays_hint(gated, monkeypatch)
 def test_non_yes_accepts_in_a_row_are_asked_again_then_the_review_expires_unrun(gated, monkeypatch, planner, recorded_review_router):
     """Every non-yes accept is asked again (never run); at the reply cap the review expires as not run, with a plain
     message, and no accept ever confirmed it."""
-    from fastworkflow import approval_binding as ab
-    from fastworkflow import review_engine as re_
+    from fastworkflow.review import approval_binding as ab
+    from fastworkflow.review import review_engine as re_
 
     recorded_review_router.answers["dont change anything"] = recorded_review_router.answers["just do it"]
     planner(gated, *({"edits": []},) * 40)

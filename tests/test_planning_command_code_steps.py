@@ -15,9 +15,9 @@ import fastworkflow
 import pytest
 from pydantic import BaseModel, Field
 
-from fastworkflow import planning_phases
+from fastworkflow.planning import planning_phases
 from fastworkflow.observation_offloading import finish_check
-from fastworkflow.planning_phases import code_step, phase_query, plan_code_steps
+from fastworkflow.planning.planning_phases import code_step, phase_query, plan_code_steps
 
 CORE = ["IntentDetection/go_up", "IntentDetection/reset_context",
         "IntentDetection/what_can_i_do", "ErrorCorrection/abort"]
@@ -181,9 +181,9 @@ from fastworkflow.observability import tracing  # noqa: E402
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import (  # noqa: E402
     ParameterExtraction)
 from fastworkflow.command_executor import CommandExecutor  # noqa: E402
-from fastworkflow.planning_commands import PlanningCommandCallPlan, call_phases  # noqa: E402
+from fastworkflow.planning.planning_commands import PlanningCommandCallPlan, call_phases  # noqa: E402
 
-from fastworkflow.planning_phases import Phase  # noqa: E402
+from fastworkflow.planning.planning_phases import Phase  # noqa: E402
 from fastworkflow.turn import TurnStatus  # noqa: E402
 from fastworkflow.utils.react import _step_indexes  # noqa: E402
 from fastworkflow.workflow_agent import initialize_workflow_tool_agent  # noqa: E402
@@ -201,7 +201,7 @@ def command_from_module(name, module, path):
     """The skill a module of runtime parts gives (``plan(input) -> list[Phase]`` and/or
     ``steps(input)``), through ``planning_commands.planning_command_from_parts``, as the loader builds it
     from a ``PlanGenerator``: these runtime tests hand-build their ``Phase`` lists."""
-    from fastworkflow import planning_commands
+    from fastworkflow.planning import planning_commands
     return planning_commands.planning_command_from_parts(name, module.Signature, path,
                                            steps_fn=getattr(module, "steps", None),
                                            plan_fn=getattr(module, "plan", None))
@@ -459,7 +459,7 @@ def todo(initialized_fastworkflow, todo_workflow_path, monkeypatch):
     script_plan(monkeypatch, lambda text: state.planning_command or _planning_command(state.plan))
     monkeypatch.setattr("fastworkflow.workflow_agent.split_into_subtasks",
                         lambda *args, **kwargs: ["show the list groceries"])
-    monkeypatch.setattr("fastworkflow.planning_phases.write_answer",
+    monkeypatch.setattr("fastworkflow.planning.planning_phases.write_answer",
                         lambda query: state.answered.append(query) or "written")
 
     def turn(text="show the list groceries"):
@@ -1413,7 +1413,7 @@ def test_the_model_step_after_code_runs_a_command_the_plan_lacked(todo):
 def test_a_last_phase_of_say_that_lines_is_a_load_error():
     # Was: the answer-only last phase was written by code with no model step. A last phase
     # of 'say that' lines no longer loads (3.16): the answer is returned from __result__.
-    from fastworkflow.planning_commands import PlanningCommandFormatError
+    from fastworkflow.planning.planning_commands import PlanningCommandFormatError
 
     with pytest.raises(PlanningCommandFormatError, match="writes the answer as 'say that' lines"):
         _planning_command(_plan(

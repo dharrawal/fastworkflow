@@ -15,7 +15,8 @@ import pytest
 from dotenv import dotenv_values
 
 import fastworkflow
-from fastworkflow import planning_commands, command_preview, turn_cache, workflow_agent
+from fastworkflow.planning import planning_commands, command_preview
+from fastworkflow import turn_cache, workflow_agent
 from fastworkflow.build.class_analysis_structures import ClassInfo, MethodInfo
 from fastworkflow.build.command_file_template import create_command_file
 from fastworkflow.command_directory import CommandDirectory

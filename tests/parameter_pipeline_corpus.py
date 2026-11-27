@@ -470,7 +470,7 @@ def run_typed(env: Environment, case: dict) -> dict:
     """``planning_commands.typed_planning_call`` with the planner scripted (the typed fill and the step proposal)."""
     import dspy
 
-    from fastworkflow import planning_commands as pc
+    from fastworkflow.planning import planning_commands as pc
 
     workflow = env.workflow(case)
     command = env.command(case["command"])
@@ -489,7 +489,7 @@ def run_typed(env: Environment, case: dict) -> dict:
 def run_extracted(env: Environment, case: dict) -> dict:
     """``planning_commands.extracted_arguments`` (the shared extractor's arguments, unchecked) and, when the case asks,
     ``checked_arguments`` on them."""
-    from fastworkflow import planning_commands as pc
+    from fastworkflow.planning import planning_commands as pc
 
     workflow = env.workflow(case)
     command = env.command(case["command"])
@@ -510,7 +510,7 @@ def run_extracted(env: Environment, case: dict) -> dict:
 
 def run_reextract(env: Environment, case: dict) -> dict:
     """``planning_commands.reextracted_arguments``: the arguments read again after a first phase found nothing."""
-    from fastworkflow import planning_commands as pc
+    from fastworkflow.planning import planning_commands as pc
 
     workflow = env.workflow(case)
     command = env.command(case["command"])

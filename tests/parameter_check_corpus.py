@@ -233,7 +233,7 @@ def _verdicts(raw: Optional[dict]) -> Optional[dict]:
 
 def run_plan(command, case: dict) -> dict:
     """``check_arguments``, ``checked_arguments`` and ``argument_gaps`` of one planning-command case."""
-    from fastworkflow import planning_commands as pc
+    from fastworkflow.planning import planning_commands as pc
 
     raw, request, verdicts = dict(case["raw"]), case["request"], _verdicts(case.get("verdicts"))
     out: dict = {}
@@ -269,7 +269,7 @@ def run_exec(case: dict, commands: dict | None = None) -> dict:
 def run_option(case: dict) -> dict:
     """``check_arguments`` on the command ``option_command`` builds from an execution ``Input`` (what
     ``validate_parameters`` runs for the fields that carry options)."""
-    from fastworkflow import planning_commands as pc
+    from fastworkflow.planning import planning_commands as pc
 
     model = EXEC_MODELS[case["model"]]
     command = pc.option_command(model, "table_command", ACCOUNTS)

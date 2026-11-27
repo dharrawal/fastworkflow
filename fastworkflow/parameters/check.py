@@ -188,7 +188,7 @@ def number_rule(number: int, numbers) -> Tuple[str, Any]:
 def state_of_why(why: str) -> str:
     """``MISSING`` for a refusal that reads as the value not being given (a placeholder, a pronoun, a vocabulary
     word), else ``INVALID`` (as ``planning_commands`` words the question)."""
-    from fastworkflow import planning_commands as pc
+    from fastworkflow.planning import planning_commands as pc
     from fastworkflow.parameters.workflow_vocabulary import KIND_WORD_WHY
 
     return MISSING if why in (PLACEHOLDER_WHY, pc.PRONOUN_WHY, KIND_WORD_WHY) else INVALID
@@ -268,7 +268,7 @@ def _execution_str(name: str, value: Any, request: str, out: Checked) -> None:
     """Screen one given ``str`` value for what needs no knowledge of the request: a whole template token (the one
     verdict, ``utils.signatures.classify_bracketed_value``, which ``validate_parameters`` and a plan's check also read),
     only punctuation. Nothing is compared with the request here."""
-    from fastworkflow import planning_commands as pc
+    from fastworkflow.planning import planning_commands as pc
     from fastworkflow.parameters.signatures import NOT_FOUND, classify_bracketed_value, unwrap_quoted_value
 
     def refuse(why: str, code: str) -> None:
@@ -376,7 +376,7 @@ def check_plan(command, raw: dict, request: str, verdicts: Optional[dict] = None
 
     The rules are those documented on ``planning_commands.check_arguments``; a required argument the guards refuse
     is ``Checked.stop`` (a ``Gap``: ``call`` says the check finds no such argument in the request at all)."""
-    from fastworkflow import planning_commands as pc
+    from fastworkflow.planning import planning_commands as pc
     from fastworkflow.parameters.signatures import is_sentinel_number
     from fastworkflow.parameters.workflow_vocabulary import KIND_WORD_WHY, is_kind_word, is_pronoun_phrase
 

@@ -19,14 +19,14 @@ from types import SimpleNamespace
 import pytest
 
 import fastworkflow
-from fastworkflow import plan_frame as plan_frame_module
+from fastworkflow.planning import plan_frame as plan_frame_module
 from fastworkflow.command_executor import CommandExecutor
 from fastworkflow.observation_offloading.state import (
     archive_for_path,
     observability_db_path,
     scope_for_host,
 )
-from fastworkflow.plan_frame import (
+from fastworkflow.planning.plan_frame import (
     DEFAULT_TURN_MAX_STEPS,
     TURN_MAX_STEPS_ENV,
     PlanFrame,

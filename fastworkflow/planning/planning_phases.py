@@ -639,7 +639,7 @@ def active_phases(phases: Any, where: str = "plan()") -> list[Phase]:
         if not callable(phase.steps_fn):
             raise PhaseError(f"{where}: phase {phase.name!r}: steps_fn must be callable")
         if phase.output is not None:
-            from fastworkflow.typed_phase_facts import union_members
+            from fastworkflow.planning.typed_phase_facts import union_members
 
             if union_members(phase.output) is None and not (
                     inspect.isclass(phase.output) and issubclass(phase.output, BaseModel)):
@@ -928,7 +928,7 @@ def extra_steps_phase(phases: Sequence[Phase], steps_after: Sequence[str], *,
     (``say ...``) stay with the last phase (*kept*). Otherwise *phase* is None and *kept*
     is every step. The last phase stays answer-only.
     """
-    from fastworkflow.planning_commands import number
+    from fastworkflow.planning.planning_commands import number
 
     steps_after = [str(step) for step in steps_after if str(step).strip()]
     commands, core_commands = list(commands), list(core_commands)
@@ -1644,7 +1644,7 @@ def fill_output(model: type[BaseModel], runs: Sequence[Mapping[str, Any]], *,
         kept = runs_standing_in_for_openers(
             earlier_runs, runs, record, steps, fact_sources(model), done=kept,
             names=plain_names) + kept
-    from fastworkflow.typed_phase_facts import (
+    from fastworkflow.planning.typed_phase_facts import (
         fill_typed_phase_output, handles_typed_output, validate_phase_output_value,
     )
 
@@ -1681,7 +1681,7 @@ def is_answer_only(plan_text: str, commands: Iterable[str] = (),
     only under a condition) is not read: it does not make the step conditional.
     """
     from fastworkflow.observation_offloading import finish_check
-    from fastworkflow.planning_commands import without_condition_note
+    from fastworkflow.planning.planning_commands import without_condition_note
 
     commands, core_commands = list(commands), list(core_commands)
     if not commands or not str(plan_text or "").strip():
@@ -3453,7 +3453,7 @@ def bound_result_arguments(result_fn: Callable, input: Any, outputs: Mapping[str
 
 def typed_phase_outputs(raw: Mapping[str, Any], phases: Sequence[Phase]) -> dict[str, Any]:
     """Phase outputs as pydantic models (or lists of them for a fan-out), for ``__result__``."""
-    from fastworkflow.typed_phase_facts import validate_phase_output_value
+    from fastworkflow.planning.typed_phase_facts import validate_phase_output_value
 
     by_name = {phase.name: phase for phase in phases}
     typed: dict[str, Any] = {}

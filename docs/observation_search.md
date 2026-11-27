@@ -144,7 +144,7 @@ on its next open, rows archived before it read exactly as before (with no
 runs), and it is erased and aged with the turn's evidence.
 
 Phase facts are filled in code from those runs by `fill_output` in
-`fastworkflow/planning_phases.py`, which types each field by the command whose `Output` or `Input` it
+`fastworkflow/planning/planning_phases.py`, which types each field by the command whose `Output` or `Input` it
 is (design 3.12). A facts field is typed with a command's `Output` or `Input`, a union of them, or one
 of those `| None = None`. A field typed with an `Output` takes that command's `Output` from its run in
 the phase; a field typed with an `Input` takes the arguments that run was called with. There is no

@@ -399,7 +399,7 @@ def test_identifier_patterns_come_from_the_workflows_split_file(tmp_path):
     ("Signature = 'text'\n", "a Signature .* is removed: write split_examples"),   # any Signature, class or not
 ])
 def test_a_malformed_split_file_fails_the_load(tmp_path, text, match):
-    from fastworkflow.planning_commands import PlanningCommandFormatError
+    from fastworkflow.planning.planning_commands import PlanningCommandFormatError
     from fastworkflow.workflow_agent import load_planning_commands
 
     folder = _split_file(tmp_path, text)
@@ -990,7 +990,7 @@ def test_the_split_files_examples_change_the_splitter_prompt(tmp_path):
 def test_a_split_file_signature_no_longer_replaces_the_prompt_it_fails_the_load(tmp_path, text):
     """The replace path is removed: neither the docstring (instructions) nor ``Input``/``Output`` (field descriptions)
     is read; the file fails the load naming ``split_examples``."""
-    from fastworkflow.planning_commands import PlanningCommandFormatError
+    from fastworkflow.planning.planning_commands import PlanningCommandFormatError
     from fastworkflow.workflow_agent import _split_signature
 
     folder = _split_file(tmp_path, text)

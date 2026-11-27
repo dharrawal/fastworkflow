@@ -494,7 +494,7 @@ def review_nouns_workflow():
     Review tests that build proposals in memory from a recorded exchange use inputs such as ``unit``, ``right`` and
     ``person``; ``tests/review_nouns_workflow`` declares them."""
     from pathlib import Path
-    from fastworkflow.review_proposals import workflow_scope
+    from fastworkflow.review.review_proposals import workflow_scope
 
     folder = str(Path(__file__).parent.joinpath("review_nouns_workflow").resolve())
     with workflow_scope(folder):

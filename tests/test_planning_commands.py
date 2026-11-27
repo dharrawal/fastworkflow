@@ -14,7 +14,8 @@ from dotenv import dotenv_values
 from pydantic import BaseModel, Field, model_validator
 
 import fastworkflow
-from fastworkflow import planning_commands, command_preview, workflow_agent
+from fastworkflow.planning import planning_commands, command_preview
+from fastworkflow import workflow_agent
 from fastworkflow.capability_answer import context_commands
 from fastworkflow.command_executor import CommandExecutor, CommandNotFoundError
 from fastworkflow.command_metadata_api import CommandMetadataAPI
@@ -22,8 +23,8 @@ from fastworkflow.command_routing import RoutingRegistry
 from fastworkflow.context_navigation import home_contexts
 from fastworkflow.mcp_server import FastWorkflowMCPServer
 from fastworkflow.model_pipeline_training import trained_command_labels
-from fastworkflow.plan_frame import TURN_MAX_STEPS_ENV
-from fastworkflow.planning_needs_agent import planning_command_needs_agent, refusal_message
+from fastworkflow.planning.plan_frame import TURN_MAX_STEPS_ENV
+from fastworkflow.planning.planning_needs_agent import planning_command_needs_agent, refusal_message
 from fastworkflow.parameters.signatures import InputForParamExtraction
 from fastworkflow.workflow_agent import (
     _explicit_agent_command,
@@ -40,7 +41,7 @@ from fastworkflow.examples.library._commands.Library.find_member import Signatur
 from fastworkflow.examples.library._commands.Library.open_book import Signature as OpenBook
 from fastworkflow.planning import run
 from fastworkflow.planning import phase
-from fastworkflow.planning_commands import PlanningCommandFormatError
+from fastworkflow.planning.planning_commands import PlanningCommandFormatError
 from fastworkflow.turn import TurnStatus
 from fastworkflow.utils import python_utils
 

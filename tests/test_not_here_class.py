@@ -35,7 +35,7 @@ from fastworkflow.model_pipeline_training import (
     trained_command_labels,
 )
 from fastworkflow.nlu_labels import WILDCARD_LABEL, label_of
-from fastworkflow.planning_commands import command_utterances  # noqa: F401
+from fastworkflow.planning.planning_commands import command_utterances  # noqa: F401
 from fastworkflow.train import score_not_here as scorer
 from fastworkflow.workflow_agent import planning_command_utterances
 

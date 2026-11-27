@@ -198,7 +198,8 @@ def available_plans(workflow: Any, distribution: Optional[dict[str, float]] = No
     the root's, nearest first, each by name: exactly what the matcher offers), the descriptions the matcher's
     (``review_proposals.planning_descriptions``). Empty when none is available here.
     """
-    from fastworkflow import review_proposals, run_listing, workflow_agent
+    from fastworkflow.review import review_proposals
+    from fastworkflow import run_listing, workflow_agent
 
     if workflow is None:
         return []

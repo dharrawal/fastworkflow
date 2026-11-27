@@ -69,7 +69,7 @@ def test_a_workflow_with_no_file_has_no_default(tmp_path):
 
 def test_the_code_run_reads_the_file_through_the_same_helper():
     import inspect
-    from fastworkflow import planning_code_run
+    from fastworkflow.planning import planning_code_run
     assert "workflow_startup_action" in inspect.getsource(planning_code_run._open_session)
 
 

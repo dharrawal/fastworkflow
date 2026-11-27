@@ -15,18 +15,18 @@ import dspy
 import pytest
 from pydantic import BaseModel, Field, create_model, model_validator
 
-from fastworkflow import planning_phases
+from fastworkflow.planning import planning_phases
 from fastworkflow.observability import tracing
 from fastworkflow.planning import phase, planned
 from fastworkflow.observation_offloading.archive import command_run_record
-from fastworkflow.planning_commands import (
+from fastworkflow.planning.planning_commands import (
     PlanningCommandCallPlan,
     PlanningCommandFormatError,
     call_phases,
     phases_for,
 )
 
-from fastworkflow.planning_phases import (
+from fastworkflow.planning.planning_phases import (
     Phase,
     PhaseError,
     bound_arguments,
@@ -58,7 +58,7 @@ def command_from_module(name, module, path):
     """The skill a module of runtime parts gives (``plan(input) -> list[Phase]`` and/or
     ``steps(input)``), through ``planning_commands.planning_command_from_parts``, as the loader builds it
     from a ``PlanGenerator``: these runtime tests hand-build their ``Phase`` lists."""
-    from fastworkflow import planning_commands
+    from fastworkflow.planning import planning_commands
     return planning_commands.planning_command_from_parts(name, module.Signature, path,
                                            steps_fn=getattr(module, "steps", None),
                                            plan_fn=getattr(module, "plan", None))
@@ -229,7 +229,7 @@ def _module(**attrs):
 def _phased_command(**attrs):
     """The library skill: its PlanGenerator class, or a function plan given as ``plan=`` (which
     has no __result__: its last phase answers as an executor or the model does)."""
-    from fastworkflow import planning_commands
+    from fastworkflow.planning import planning_commands
     path = "_commands/show_book.py"
     if "plan" in attrs:
         return command_from_module("show_book", _module(**attrs), path).command
@@ -278,7 +278,7 @@ def test_when_false_leaves_the_phase_out():
 
 def test_a_malformed_from_fails_the_load():
     # A copy (a facts field with a "from", well formed or not) is a load error: copies are no longer read.
-    from fastworkflow.typed_phase_facts import check_typed_facts_model
+    from fastworkflow.planning.typed_phase_facts import check_typed_facts_model
 
     class Bad(BaseModel):
         uid: str = Field(json_schema_extra={"from": "open_book_by_uid"})
@@ -314,7 +314,7 @@ def test_a_plan_that_does_not_return_phases_fails_the_load():
 
 
 def test_a_plan_without_params_is_one_plan_for_every_call():
-    from fastworkflow.planning_commands import planning_command_from_parts
+    from fastworkflow.planning.planning_commands import planning_command_from_parts
 
     class NoParams:
         """Show the shelves."""
@@ -345,8 +345,8 @@ class ListLoans:
 def test_a_missing_source_field_is_a_load_warning_not_a_failure():
     # check_phase_sources is gone with the copies it checked: no phase output names a field of
     # another command to be missing. The facts of the library skill are typed with Outputs, which load.
-    from fastworkflow import planning_commands
-    from fastworkflow.typed_phase_facts import check_typed_facts_model
+    from fastworkflow.planning import planning_commands
+    from fastworkflow.planning.typed_phase_facts import check_typed_facts_model
 
     assert not hasattr(planning_commands, "check_phase_sources")
     command = _phased_command()
@@ -359,7 +359,7 @@ def test_a_missing_source_field_is_a_load_warning_not_a_failure():
 def test_a_plain_name_several_contexts_define_passes_when_one_context_resolves_it():
     # A facts model typed with the Output of a command several contexts define loads: each context's
     # Output is its own type, and the model names one of them.
-    from fastworkflow.typed_phase_facts import check_typed_facts_model
+    from fastworkflow.planning.typed_phase_facts import check_typed_facts_model
 
     class Shelf(BaseModel):
         loans: ListLoans.Output
@@ -562,7 +562,7 @@ def test_the_planned_row_is_picked_out_of_many():
 
 
 def test_narrowed_output_reads_equal_length_lists_as_rows():
-    from fastworkflow.planning_phases import narrowed_output
+    from fastworkflow.planning.planning_phases import narrowed_output
 
     output = {"uids": ["u1", "u2", "u3"], "labels": ["Ann", "Bo", "Cy"], "codes": ["x", "y"],
               "scope": "branch", "total": 3}
@@ -732,8 +732,8 @@ def test_the_last_phase_sees_the_request():
 
 def test_the_last_phase_code_ran_wholly_is_told_to_answer_from_the_outputs():
     # fix-hia1.34: nothing remains, so never "do these steps"; the copy rule applies.
-    from fastworkflow import planning_phases
-    from fastworkflow.planning_phases import clean_answer
+    from fastworkflow.planning import planning_phases
+    from fastworkflow.planning.planning_phases import clean_answer
 
     query = phase_query("show the book Dune", "1. find_book query=Dune\n2. list_loans",
                         index=0, count=1, name="show", code_steps=True, code_ran_all=True)
@@ -928,7 +928,7 @@ def phased(initialized_fastworkflow, todo_workflow_path, monkeypatch):
         name = next((n for n in state.script if f"({n})" in query), "report")
         return state.script[name]["answer"]
 
-    monkeypatch.setattr("fastworkflow.planning_phases.write_answer", fake_answer)
+    monkeypatch.setattr("fastworkflow.planning.planning_phases.write_answer", fake_answer)
     state.ctx, state.sink, state.reviews, state.start = ctx, sink, reviews, start
     state.answered = answered
     return state
@@ -1229,7 +1229,7 @@ def test_a_phase_whose_opening_step_finds_the_record_already_open_fills_its_fact
 # Answer-only phases (fix-hia1.7)
 # ----------------------------------------------------------------------
 
-from fastworkflow.planning_phases import (  # noqa: E402
+from fastworkflow.planning.planning_phases import (  # noqa: E402
     ANSWER_ONLY_RULE,
     check_bindings,
     fan_out_items,
@@ -1559,7 +1559,7 @@ def test_a_bad_over_fails_the_load():
 # stops on a condition (fix-hia1.9)
 # ----------------------------------------------------------------------
 
-from fastworkflow.planning_phases import (  # noqa: E402
+from fastworkflow.planning.planning_phases import (  # noqa: E402
     cap_note,
     fan_out_note,
     is_flat_plan,
@@ -2007,7 +2007,7 @@ def test_a_phase_whose_steps_ran_on_two_records_is_not_rebound():
 # Optional phases; a failed call shows only facts; answer-only checks (stage 10)
 # ----------------------------------------------------------------------
 
-from fastworkflow.planning_phases import (  # noqa: E402
+from fastworkflow.planning.planning_phases import (  # noqa: E402
     FOUND_FACTS_LEAD,
     MISSING_ITEMS_LEAD,
     answer_from_steps,
@@ -2132,7 +2132,7 @@ def test_an_answer_only_answer_that_drops_a_list_item_gets_it_appended(phased):
 
 def test_an_answer_only_reply_that_is_empty_is_written_from_the_steps(phased, monkeypatch):
     phased.command = _phased_command(plan=answer_by_model_plan)
-    monkeypatch.setattr("fastworkflow.planning_phases.write_answer", lambda query: "```\n```")
+    monkeypatch.setattr("fastworkflow.planning.planning_phases.write_answer", lambda query: "```\n```")
     phased.start()
     result = phased.ctx.process_turn("show the book Dune")
     # The judgement step is written from the steps too, as a line of its own.
@@ -2146,7 +2146,7 @@ def test_an_answer_only_reply_that_cannot_be_parsed_is_written_from_the_steps(mo
         raise AdapterParseError(adapter_name="ChatAdapter", lm_response="?",
                                 signature=dspy.Signature("user_query -> final_answer"))
 
-    monkeypatch.setattr("fastworkflow.planning_phases.write_answer", unparsable)
+    monkeypatch.setattr("fastworkflow.planning.planning_phases.write_answer", unparsable)
     book = BookFacts(uid="b1", loan_uids=["l1", "l2", "l3", "l4"])
     # written from the steps, so laid out as a code-written answer, and still checked
     steps = "1. say which loan is due first\n2. say what b1 has on loan, naming each: l1, l2, l3, l4"
@@ -2165,10 +2165,10 @@ def test_write_answer_retries_an_empty_reply_once_and_strips_field_markers():
 
 
 def test_the_star_import_is_the_author_api():
-    from fastworkflow import planning_phases
+    from fastworkflow.planning import planning_phases
 
     names: dict = {}
-    exec("from fastworkflow.planning_phases import *", names)
+    exec("from fastworkflow.planning.planning_phases import *", names)
     assert {"Phase", "concatenated_steps", "facts_text"} <= set(names)
     assert "fact_from" not in names
     assert "write_answer" not in names and "item_record" not in names
@@ -2179,10 +2179,10 @@ def test_the_star_import_is_the_author_api():
 def test_fact_from_is_the_field_of_a_fact_copied_from_a_command_field():
     # fact_from is removed: it is no longer importable, and the field it wrote (a "from" in the
     # field's json_schema_extra) is a load error, with the tail that says copies are not read.
-    from fastworkflow.typed_phase_facts import check_typed_facts_model
+    from fastworkflow.planning.typed_phase_facts import check_typed_facts_model
 
     with pytest.raises(ImportError):
-        from fastworkflow.planning_phases import fact_from  # noqa: F401
+        from fastworkflow.planning.planning_phases import fact_from  # noqa: F401
     with pytest.raises(ImportError):
         from fastworkflow.planning import fact_from  # noqa: F401,F811
 
@@ -2276,7 +2276,7 @@ def test_missing_list_items_pairs_a_nested_lists_rows_only_within_their_own_mode
 
 
 def test_answer_only_answer_appends_rows_left_out(monkeypatch):
-    monkeypatch.setattr("fastworkflow.planning_phases.write_answer", lambda query: "Loans: l1.")
+    monkeypatch.setattr("fastworkflow.planning.planning_phases.write_answer", lambda query: "Loans: l1.")
     book = ListLoansOutput(loan_uids=["l1", "l2"])
     # "list ...: facts" is no verbatim step (only "say that" is), so the model writes it.
     assert answer_only_answer("q", "1. list the loans of b1: l1, l2",
@@ -2289,7 +2289,7 @@ def test_answer_only_answer_appends_rows_left_out(monkeypatch):
 # verbatim only for "say that", fix-ajir.10)
 # ----------------------------------------------------------------------
 
-from fastworkflow.planning_phases import answer_by_code, answer_step_kind  # noqa: E402
+from fastworkflow.planning.planning_phases import answer_by_code, answer_step_kind  # noqa: E402
 
 
 def test_answer_steps_are_verbatim_guard_or_judgement():
@@ -2336,7 +2336,7 @@ def test_answer_from_steps_writes_each_verbatim_step_as_a_line():
 
 def test_answer_only_answer_makes_no_model_call_when_every_step_is_verbatim(monkeypatch):
     calls = []
-    monkeypatch.setattr("fastworkflow.planning_phases.write_answer",
+    monkeypatch.setattr("fastworkflow.planning.planning_phases.write_answer",
                         lambda query: calls.append(query) or "Model text.")
     book = ListLoansOutput(loan_uids=["l1", "l2"])
     steps = "1. say that what b1 has on loan: l1, l2\n2. apply no change"
@@ -2355,7 +2355,7 @@ def test_answer_only_answer_makes_no_model_call_when_every_step_is_verbatim(monk
 
 
 def test_bulleted_answer_splits_only_runs_of_output_values():
-    from fastworkflow.planning_phases import bulleted_answer
+    from fastworkflow.planning.planning_phases import bulleted_answer
 
     class Shelf(BaseModel):
         uids: list[str] = []
@@ -2380,7 +2380,7 @@ def test_bulleted_answer_splits_only_runs_of_output_values():
 
 
 def test_answer_only_answer_bullets_a_code_written_answer_after_its_checks(monkeypatch):
-    monkeypatch.setattr("fastworkflow.planning_phases.write_answer", lambda query: "a, b, c, d")
+    monkeypatch.setattr("fastworkflow.planning.planning_phases.write_answer", lambda query: "a, b, c, d")
     book = BookFacts(uid="b1", loan_uids=["l1", "l2", "l3", "l4"])
     steps = ("1. say that what b1 has on loan, naming each: l1, l2, l3, l4\n"
              "2. say that it is due back\n3. apply no change")
@@ -2415,7 +2415,7 @@ def test_a_say_that_phase_before_the_last_writes_no_answer_and_its_span_says_so(
 # Stage-10 follow-ups: leaked framing, long background lists, extra command steps
 # ----------------------------------------------------------------------
 
-from fastworkflow.planning_phases import (  # noqa: E402
+from fastworkflow.planning.planning_phases import (  # noqa: E402
     EXTRA_STEPS_PHASE,
     STEPS_BEFORE_PHASE,
     capped_steps,
@@ -2746,7 +2746,7 @@ def _extraction_stub(phased, monkeypatch, *, extracted, on_extract=None):
             on_extract(len(queries))
         return dict(extracted)
 
-    monkeypatch.setattr("fastworkflow.planning_commands.extracted_arguments", fake_extracted)
+    monkeypatch.setattr("fastworkflow.planning.planning_commands.extracted_arguments", fake_extracted)
     return queries
 
 

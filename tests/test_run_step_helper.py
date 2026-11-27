@@ -11,10 +11,11 @@ from types import SimpleNamespace
 import pytest
 from pydantic import BaseModel, Field, model_validator
 
-from fastworkflow import planning, planning_commands
+from fastworkflow import planning
+from fastworkflow.planning import planning_commands
 from fastworkflow.planning import (StepFormError, command_inputs_for_steps, count,
                                    count_and_names_read, row_id_field, run)
-from fastworkflow.planning_phases import CODE_MAX_PAGES, Placeholder
+from fastworkflow.planning.planning_phases import CODE_MAX_PAGES, Placeholder
 
 
 class OpenBookInput(BaseModel):
@@ -230,7 +231,7 @@ _MISREADABLE = ["When Harry Met Sally", "Only Fools and Horses", "Gone if needed
 @pytest.mark.parametrize("value", _MISREADABLE)
 def test_run_quotes_a_value_the_step_parser_could_misread_and_code_runs_it(value):
     from fastworkflow.observation_offloading import finish_check
-    from fastworkflow.planning_phases import plan_code_steps
+    from fastworkflow.planning.planning_phases import plan_code_steps
 
     text = run("find_book", query=value)
     (step,) = finish_check.parse_plan(f"1. {text}", ["find_book"], [])

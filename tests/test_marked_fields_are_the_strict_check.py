@@ -14,7 +14,7 @@ import pytest
 from dspy.utils import DummyLM
 from pydantic import BaseModel, Field
 
-from fastworkflow import planning_commands as pc
+from fastworkflow.planning import planning_commands as pc
 from fastworkflow.parameters import check
 from tests.scripted_extractor import script_extractor
 from tests.test_argument_checks import _command, _module

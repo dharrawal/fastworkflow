@@ -23,7 +23,8 @@ from tests.conftest import script_matcher
 from dspy.utils import DummyLM
 
 import fastworkflow
-from fastworkflow import review_proposals, turn_cache, turn_progress
+from fastworkflow.review import review_proposals
+from fastworkflow import turn_cache, turn_progress
 from fastworkflow.utils import subtask_pool
 from fastworkflow.turn_progress import ProgressEvent
 from fastworkflow.utils import dspy_logger

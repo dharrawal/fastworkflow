@@ -14,8 +14,8 @@ from __future__ import annotations
 
 import pytest
 
-from fastworkflow import review_engine as re_
-from fastworkflow.review_engine import proposal_of, reply_to_proposal
+from fastworkflow.review import review_engine as re_
+from fastworkflow.review.review_engine import proposal_of, reply_to_proposal
 
 from tests.test_review_reader_repairs import _Reader, _review, _step, workflow  # noqa: F401
 

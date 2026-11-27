@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from fastworkflow.review_engine import (
+from fastworkflow.review.review_engine import (
     Change,
     Drop,
     EditParseError,
@@ -30,7 +30,7 @@ from fastworkflow.review_engine import (
     apply_edits,
     parse_edits,
 )
-from fastworkflow.review_proposals import SubTaskProposal
+from fastworkflow.review.review_proposals import SubTaskProposal
 
 CASES = json.loads((Path(__file__).parent / "fixtures" / "review_form_edits.json").read_text(encoding="utf-8"))
 ACCEPTED = [case for case in CASES if "reply" in case]
@@ -152,7 +152,7 @@ def test_the_fixture_covers_what_the_review_asked_for():
 import itertools  # noqa: E402
 import random  # noqa: E402
 
-from fastworkflow.review_proposals import SubTask, SubTaskInput, unreadable_input_value  # noqa: E402
+from fastworkflow.review.review_proposals import SubTask, SubTaskInput, unreadable_input_value  # noqa: E402
 
 _META_NAMES = ("check", "goal", "outcome", "means", "desired_outcome")
 _INPUT_NAMES = ("member", "book") + _META_NAMES
@@ -360,7 +360,7 @@ def test_the_fixture_marks_every_case_the_form_refuses():
 
 # ---- fix-j6xa: one packed inputs edit never loses a part named like a step field; the model-read path agrees ----
 
-from fastworkflow.review_proposals import ProposedEdit, _proposed_edits_to_engine  # noqa: E402
+from fastworkflow.review.review_proposals import ProposedEdit, _proposed_edits_to_engine  # noqa: E402
 
 
 @pytest.mark.parametrize("reply, lost", [

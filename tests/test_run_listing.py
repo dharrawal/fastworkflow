@@ -19,8 +19,9 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow import planning_commands, run_listing, workflow_agent
-from fastworkflow.planning_commands import PlanningCommandInputError
+from fastworkflow.planning import planning_commands
+from fastworkflow import run_listing, workflow_agent
+from fastworkflow.planning.planning_commands import PlanningCommandInputError
 from fastworkflow.run_listing import (
     COMMAND_SHORTLIST, FULL, FULL_LISTING_MAX_CHARS, ARMS, THRESHOLD, check_planned_arguments,
     listing_arm, planning_candidates, run_listing_text, shortlist_for)

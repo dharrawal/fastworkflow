@@ -20,11 +20,12 @@ import pytest
 from pydantic import BaseModel, Field
 
 import fastworkflow
-from fastworkflow import ModuleType, planning_commands, command_preview, workflow_agent
+from fastworkflow import ModuleType, workflow_agent
+from fastworkflow.planning import planning_commands, command_preview
 from fastworkflow.command_directory import CommandDirectory, get_cached_command_directory
 from fastworkflow.command_metadata_api import CommandMetadataAPI
 from fastworkflow.command_routing import RoutingRegistry
-from fastworkflow.planning_phases import fill_output
+from fastworkflow.planning.planning_phases import fill_output
 from fastworkflow.parameters.signatures import InputForParamExtraction, not_given_value, parameters_with_unfilled
 from tests.context_declarations import declare_inherits
 
@@ -119,7 +120,7 @@ def _preview_check(folder: str, out_dir: str, capsys) -> tuple[int, str]:
 
 def test_from_exports_and_field_construction():
     import fastworkflow.planning as planning
-    import fastworkflow.planning_phases as planning_phases
+    import fastworkflow.planning.planning_phases as planning_phases
 
     assert not hasattr(fastworkflow, "from_")
     with pytest.raises(ImportError, match='from_command_output'):
@@ -161,7 +162,7 @@ _COPY_LOAD_ERROR = (
 
 def test_fact_from_is_no_longer_importable():
     import fastworkflow.planning as planning
-    import fastworkflow.planning_phases as planning_phases
+    import fastworkflow.planning.planning_phases as planning_phases
 
     assert not hasattr(planning, "fact_from")
     assert not hasattr(planning_phases, "fact_from")

@@ -33,7 +33,7 @@ from fastworkflow.observation_offloading.state import (
     note_command_run,
     reset_observation_state,
 )
-from fastworkflow.typed_phase_facts import check_typed_facts_model, fill_typed_phase_output
+from fastworkflow.planning.typed_phase_facts import check_typed_facts_model, fill_typed_phase_output
 from fastworkflow.utils.react import fastWorkflowReAct
 from fastworkflow.workflow_agent import _hold_command_run
 

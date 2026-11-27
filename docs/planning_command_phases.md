@@ -1,7 +1,7 @@
 # Planning command phases
 
 A planning command with parameters (`_commands/<name>.py`, see the `fastworkflow.planning` and
-`fastworkflow.planning_commands` module documentation) may expand into one flat list of steps
+`fastworkflow.planning.planning_commands` module documentation) may expand into one flat list of steps
 that one executor run works through. A long planning command can instead be written as
 **phases**: bounded sub-plans run one after another, each by a fresh executor run with its own
 step budget, with the facts one phase found passed in code to the next. A planning command
@@ -322,7 +322,7 @@ instead of one executor run on the whole list.
      answer from these facts only." (`ANSWER_ONLY_RULE`) and to copy every name, id and
      number exactly. It takes no executor steps (`steps_used` 0), and no finish check
      applies. So the steps must carry the earlier facts as finished text: build them in
-     `steps_fn`, for example with `facts_text(model)` (`fastworkflow.planning_phases`, from
+     `steps_fn`, for example with `facts_text(model)` (`fastworkflow.planning.planning_phases`, from
      `observation_offloading.facts`), which renders a facts model as
      `uid: b1; loan_uids: l1, l2; total: 3` (lists joined with `, `, `none` for an empty
      list or `None`, nested models in parentheses; `fields=` picks fields, `sep=` the
@@ -448,7 +448,7 @@ check and fill.
 
 ```python
 from fastworkflow.planning import phase
-from fastworkflow.planning_phases import facts_text
+from fastworkflow.planning.planning_phases import facts_text
 
 from .find_item import Signature as FindItem
 from .list_parts import Signature as ListParts

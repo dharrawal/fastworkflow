@@ -21,7 +21,7 @@ import pytest
 
 import fastworkflow
 from fastworkflow.planning import run_code
-from fastworkflow.planning_code_run import RunCodeError
+from fastworkflow.planning.planning_code_run import RunCodeError
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIBRARY = os.path.join(ROOT, "fastworkflow", "examples", "library")

@@ -13,11 +13,12 @@ import pytest
 from dspy.utils import DummyLM
 from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 
-from fastworkflow import command_preview, workflow_agent
+from fastworkflow.planning import command_preview
+from fastworkflow import workflow_agent
 from fastworkflow.observability import tracing
-from fastworkflow import planning_commands as pc
-from fastworkflow.plan_frame import TURN_MAX_STEPS_ENV
-from fastworkflow.planning_commands import PlanningCommandInputError
+from fastworkflow.planning import planning_commands as pc
+from fastworkflow.planning.plan_frame import TURN_MAX_STEPS_ENV
+from fastworkflow.planning.planning_commands import PlanningCommandInputError
 from fastworkflow.turn import TurnStatus
 from fastworkflow.parameters.signatures import InputForParamExtraction
 from tests.scripted_extractor import script_extractor
@@ -817,7 +818,7 @@ def test_ignore_keeps_the_strip_outcomes_of_head_on_the_payroll_group_cases():
 
 def test_a_field_validator_that_cleans_a_value_changes_the_argument_of_a_planning_command(tmp_path):
     text = ('from pydantic import BaseModel, Field, field_validator\n'
-            'from fastworkflow.planning_commands import strip_words\n\n\n'
+            'from fastworkflow.planning.planning_commands import strip_words\n\n\n'
             'class Signature:\n    """Weigh one group."""\n\n'
             '    class Input(BaseModel):\n'
             '        name: str = Field(description="the group", json_schema_extra={"copied_from_command_text": True})\n\n'

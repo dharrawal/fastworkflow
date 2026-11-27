@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 import fastworkflow
-from fastworkflow import review_engine
+from fastworkflow.review import review_engine
 from fastworkflow.command_routing import RoutingRegistry
 from fastworkflow.model_pipeline_training import (
     BUILT_IN_VAGUE_REPLIES,
@@ -179,7 +179,7 @@ def _head_has_wildcard_class() -> bool:
 
 
 def _reply(gated, monkeypatch, text):
-    from fastworkflow.review_engine import reply_to_proposal
+    from fastworkflow.review.review_engine import reply_to_proposal
 
     record = _open_review_two_step(gated, monkeypatch)
     gated.ctx._current_planner_lm = _PlannerLM([{"edits": []}] * 30)

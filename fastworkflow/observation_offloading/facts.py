@@ -85,8 +85,6 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from pydantic import BaseModel, ValidationError
 
-from fastworkflow.plan_frame import runs_outside_ranges
-
 
 class FactsError(ValueError):
     """A facts model could not be filled."""
@@ -366,7 +364,7 @@ def facts_text(facts: Any, *, fields: Optional[Iterable[str]] = None, sep: str =
     answer to name a list must give it whole.
 
     The text is plain data: a phase that writes its answer from earlier facts (an
-    answer-only phase, see ``fastworkflow.planning_phases``) reads the values as given.
+    answer-only phase, see ``fastworkflow.planning.planning_phases``) reads the values as given.
     """
     if isinstance(facts, (list, tuple)):
         return ", ".join(f"({facts_text(item, fields=fields, sep=sep, max_items=max_items)})"

@@ -20,11 +20,12 @@ from dspy.utils import DummyLM
 import pytest
 from pydantic import BaseModel, Field
 
-from fastworkflow import approval_binding, no_agent_mode
+from fastworkflow.review import approval_binding
+from fastworkflow import no_agent_mode
 from fastworkflow.parameters import parameter_clarification as loops
-from fastworkflow import planning_commands as pc
+from fastworkflow.planning import planning_commands as pc
 from fastworkflow import workflow_agent
-from fastworkflow.approval_binding import Surface
+from fastworkflow.review.approval_binding import Surface
 from fastworkflow.parameters.parameter_clarification import ParameterLoop
 from fastworkflow.turn import TurnStatus
 from fastworkflow.workflow_agent import build_query_with_next_steps as REAL_BUILD
@@ -583,7 +584,7 @@ def test_a_session_saved_before_the_loop_existed_is_ignored(no_agent):
 def test_a_value_bound_to_an_earlier_part_is_never_asked_for(no_agent, monkeypatch):
     """The note's member is declared to come from part 1's output ("from sub-task 1", what a field's
     ``from_command_output`` gives): the question asks for the text only, and nobody is asked for the member."""
-    from fastworkflow import review_proposals
+    from fastworkflow.review import review_proposals
 
     real = review_proposals._producers
     monkeypatch.setattr(review_proposals, "_producers",

@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import pytest
 
-from fastworkflow import review_engine as re_
-from fastworkflow.review_engine import EditRefused, Verdict, apply_edits
-from fastworkflow.review_proposals import (
+from fastworkflow.review import review_engine as re_
+from fastworkflow.review.review_engine import EditRefused, Verdict, apply_edits
+from fastworkflow.review.review_proposals import (
     Means, ProposedEdit, SubTask, SubTaskInput, SubTaskProposal, _proposed_edits_to_engine, merge_subtask_input_edit)
 
 pytestmark = pytest.mark.usefixtures("review_nouns_workflow")
@@ -537,7 +537,7 @@ import uuid  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 import fastworkflow  # noqa: E402
-from fastworkflow.review_engine import Add, Change, ProposalReplyPolicy, Split  # noqa: E402
+from fastworkflow.review.review_engine import Add, Change, ProposalReplyPolicy, Split  # noqa: E402
 
 _TUTORIAL = str(Path(__file__).resolve().parent / "planning_tutorial_workflow")
 _FREE_TEXT = "please make that step about authors instead"   # not the typed grammar: the reader model reads it
@@ -624,7 +624,7 @@ def test_non_string_or_mixed_choice_sets_are_never_checked():
     import enum
     from typing import Literal, Optional
 
-    from fastworkflow.review_proposals import _string_choices
+    from fastworkflow.review.review_proposals import _string_choices
 
     class Level(enum.IntEnum):
         LOW = 1
@@ -647,7 +647,7 @@ def test_non_string_or_mixed_choice_sets_are_never_checked():
 # ---------------------------------------------------------------- an edit's field written as a path names one input
 
 def _read_edits(proposal, *edits):
-    from fastworkflow.review_proposals import workflow_scope
+    from fastworkflow.review.review_proposals import workflow_scope
 
     with workflow_scope(_TUTORIAL):
         return _proposed_edits_to_engine(proposal, [ProposedEdit(**each) for each in edits], reply_text="")
@@ -662,7 +662,7 @@ def test_a_field_written_as_a_path_replaces_that_input(tutorial_workflow):
 
 
 def test_a_path_that_names_another_step_or_a_field_that_names_no_input_is_asked_again(tutorial_workflow):
-    from fastworkflow.review_engine import EditParseError
+    from fastworkflow.review.review_engine import EditParseError
 
     with pytest.raises(EditParseError, match="names another step"):
         _read_edits(_find_record_plan(), {"op": "change", "index": 1, "field": "sub_tasks[2].inputs.kind",

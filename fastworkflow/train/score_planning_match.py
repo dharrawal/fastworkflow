@@ -668,9 +668,9 @@ def estimate(arm: str, cases: Sequence[Mapping[str, Any]], workflow_folderpath: 
 
 def _planning_templates(workflow_folderpath: str) -> dict[str, tuple]:
     """Each planning command's template steps (what the planner's listing shows), by qualified name."""
-    from fastworkflow.planning_commands import resolve_field_sources
+    from fastworkflow.planning.planning_commands import resolve_field_sources
 
-    from fastworkflow.planning_commands import visible_planning_commands
+    from fastworkflow.planning.planning_commands import visible_planning_commands
 
     return {name: tuple(cmd.template) for name, cmd in visible_planning_commands(workflow_folderpath).items()}
 
@@ -923,12 +923,12 @@ def score_listing_run(doc: Mapping[str, Any]) -> dict[str, Any]:
 def _job_types_by_scope(workflow_folderpath: str) -> dict[str, str]:
     """The Jev matcher's job-type text per scope (``""`` for root), as ``workflow_agent._matcher_job_types``
     lays it out, read through ``resolve_field_sources`` (no write)."""
-    from fastworkflow.planning_commands import resolve_field_sources
+    from fastworkflow.planning.planning_commands import resolve_field_sources
     from fastworkflow.workflow_agent import MATCHER_EXAMPLES
 
     resolution = resolve_field_sources(workflow_folderpath)
     by_scope: dict[str, list[str]] = {}
-    from fastworkflow.planning_commands import visible_planning_commands
+    from fastworkflow.planning.planning_commands import visible_planning_commands
 
     for name, command in sorted(visible_planning_commands(workflow_folderpath).items()):
         scope = name.rpartition("/")[0]
@@ -945,14 +945,14 @@ def _job_types_by_scope(workflow_folderpath: str) -> dict[str, str]:
 def _listing_chars(workflow_folderpath: str) -> int:
     """Rough size of the planner's listing: every command's name and a description, plus each planning
     command's template. Estimated from the loader; the planner's real listing needs a live Workflow."""
-    from fastworkflow.planning_commands import resolve_field_sources
+    from fastworkflow.planning.planning_commands import resolve_field_sources
 
     resolution = resolve_field_sources(workflow_folderpath)
     total = 0
     for name, sig in resolution.signatures.items():
         doc = (getattr(sig, "__doc__", None) or "").strip()
         total += len(name) + len(doc) + 40
-    from fastworkflow.planning_commands import visible_planning_commands
+    from fastworkflow.planning.planning_commands import visible_planning_commands
 
     for planning in visible_planning_commands(workflow_folderpath).values():
         total += sum(len(str(step)) for step in planning.template)
@@ -981,12 +981,12 @@ def _plan_names(workflow_folderpath: str) -> tuple[list[str], list[str]]:
     them: ``workflow_execution_context._workflow_command_names`` (routed commands, then planning
     commands) and ``workflow_agent.core_command_names``. Needs the workflow created (routing loaded)."""
     import fastworkflow
-    from fastworkflow.planning_commands import resolve_field_sources
+    from fastworkflow.planning.planning_commands import resolve_field_sources
     from fastworkflow.workflow_agent import core_command_names
 
     routing = fastworkflow.RoutingRegistry.get_definition(workflow_folderpath)
     names = list(routing.routing_definition_map)
-    from fastworkflow.planning_commands import visible_planning_commands
+    from fastworkflow.planning.planning_commands import visible_planning_commands
 
     names += list(visible_planning_commands(workflow_folderpath))
     return names, sorted(core_command_names())

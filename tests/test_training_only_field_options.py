@@ -18,7 +18,7 @@ import pytest
 from pydantic import BaseModel, Field
 
 import fastworkflow
-from fastworkflow import planning_commands as pc
+from fastworkflow.planning import planning_commands as pc
 from fastworkflow.command_routing import RoutingRegistry
 
 LIBRARY = Path(fastworkflow.__file__).resolve().parent / "examples" / "library"
@@ -266,7 +266,7 @@ def library_pair(tmp_path):
 
 
 def test_a_planning_command_with_the_declarations_loads_without_problems(library_pair):
-    from fastworkflow import command_preview
+    from fastworkflow.planning import command_preview
     from fastworkflow.workflow_agent import load_planning_command_map
 
     plain, declared = library_pair
@@ -305,7 +305,7 @@ def test_the_command_listings_are_byte_identical(library_pair):
 
 
 def test_the_command_preview_is_byte_identical(library_pair):
-    from fastworkflow import command_preview
+    from fastworkflow.planning import command_preview
 
     plain, declared = library_pair
     plain_previews = command_preview.render_previews(str(plain))
@@ -333,7 +333,7 @@ def _hello_copy(tmp_path, name: str, label_examples: str) -> Path:
 
 
 def test_an_execution_command_with_the_declarations_loads_and_its_schema_carries_them(tmp_path):
-    from fastworkflow import command_preview
+    from fastworkflow.planning import command_preview
     from fastworkflow.mcp_server import command_schema_listing
 
     folder = _hello_copy(tmp_path, "hello_declared", '["Q3 total", "Year to date"]')
@@ -348,7 +348,7 @@ def test_an_execution_command_with_the_declarations_loads_and_its_schema_carries
 
 
 def test_an_execution_command_with_a_bad_example_is_a_load_problem_naming_it(tmp_path):
-    from fastworkflow import command_preview
+    from fastworkflow.planning import command_preview
 
     folder = _hello_copy(tmp_path, "hello_bad_example", "[2026]")
     try:
@@ -375,4 +375,4 @@ def test_no_runtime_module_reads_the_declarations():
         if lookup.search(path.read_text(encoding="utf-8")):
             readers.add(relative)
     # workflow_vocabulary's payload.get("words") reads its own cache file, unrelated to classifier_confirms
-    assert readers == {"parameters/field_options.py", "planning_commands.py", "parameters/workflow_vocabulary.py"}, readers
+    assert readers == {"parameters/field_options.py", "planning/planning_commands.py", "parameters/workflow_vocabulary.py"}, readers

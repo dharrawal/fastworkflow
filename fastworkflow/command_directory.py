@@ -16,7 +16,7 @@ from fastworkflow.workflow_inheritance_model import WorkflowInheritanceModel
 
 
 #: The framework-provided planning commands (global scope, lowest precedence).
-FRAMEWORK_PLANNING_COMMANDS_DIR = Path(__file__).resolve().parent / "_framework_commands"
+FRAMEWORK_PLANNING_COMMANDS_DIR = Path(__file__).resolve().parent / "review" / "commands"
 
 class CommandMetadata(BaseModel):
     """Command metadata"""
@@ -29,7 +29,7 @@ class CommandMetadata(BaseModel):
     response_generation_module_path: str
     response_generation_class_name: str
     is_planning: bool = False
-    # A framework-provided command (fastworkflow/_framework_commands, fix-3rsq.plan-review.1): system machinery.
+    # A framework-provided command (fastworkflow/review/commands, fix-3rsq.plan-review.1): system machinery.
     # Loaded and callable by name through the executor and loader, but never listed to the planner, the agent or
     # the user, never a head label, and never counted by the artifact construction check.
     framework: bool = False
@@ -343,7 +343,7 @@ class CommandDirectory(BaseModel):
     @classmethod
     def _load_framework_planning_commands(cls, command_directory: "CommandDirectory") -> None:
         """Register the framework's global planning commands: the ``.py`` files directly in
-        ``fastworkflow/_framework_commands`` (no context folder, so the global ``*`` scope). They are
+        ``fastworkflow/review/commands`` (no context folder, so the global ``*`` scope). They are
         ordinary planning commands in every other respect (the same loader as an app's).
         """
         root = FRAMEWORK_PLANNING_COMMANDS_DIR
@@ -418,10 +418,10 @@ class CommandDirectory(BaseModel):
     def check_planning_command_path(name: str, path: str) -> None:
         """Validate a planning command's file name before load: its stem is a Python identifier.
 
-        Raises :class:`fastworkflow.planning_commands.PlanningCommandFormatError` when it is not.
+        Raises :class:`fastworkflow.planning.planning_commands.PlanningCommandFormatError` when it is not.
         """
         # planning_commands imports command_directory at load (via command_context_model); import here to break the cycle
-        from fastworkflow.planning_commands import PlanningCommandFormatError
+        from fastworkflow.planning.planning_commands import PlanningCommandFormatError
 
         _context, _, stem = name.rpartition("/")
         if not stem.isidentifier():
@@ -829,7 +829,7 @@ def command_load_errors(directory: CommandDirectory, command_name: str) -> list[
     wf_folder = directory.workflow_folderpath or metadata.workflow_folderpath
     if not wf_folder:
         return []
-    from fastworkflow import planning_commands  # circular import: planning_commands -> command_context_model -> command_directory
+    from fastworkflow.planning import planning_commands  # circular import: planning_commands -> command_context_model -> command_directory
 
     wf_abs = os.path.abspath(wf_folder)
     if wf_abs in _RESOLVING_FIELD_SOURCES_WORKFLOWS:
@@ -871,7 +871,7 @@ def _ensure_workflow_field_sources_resolved(
     if _RESOLVED_COMMAND_SIGNATURES.get(cache_key) is signature_cls:
         return True
 
-    from fastworkflow import planning_commands  # circular import: planning_commands -> command_context_model -> command_directory
+    from fastworkflow.planning import planning_commands  # circular import: planning_commands -> command_context_model -> command_directory
 
     _RESOLVING_FIELD_SOURCES_WORKFLOWS.add(wf_abs)
     try:

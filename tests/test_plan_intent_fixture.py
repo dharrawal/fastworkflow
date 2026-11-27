@@ -17,7 +17,7 @@ import pytest
 
 import fastworkflow
 from fastworkflow.command_routing import RoutingRegistry
-from fastworkflow.planning_commands import command_utterances, resolve_field_sources
+from fastworkflow.planning.planning_commands import command_utterances, resolve_field_sources
 
 LIBRARY = os.path.join("fastworkflow", "examples", "library")
 SETS = os.path.join("tests", "planning_test_sets")

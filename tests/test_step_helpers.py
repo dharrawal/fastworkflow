@@ -15,7 +15,8 @@ import pytest
 from pydantic import BaseModel, Field
 
 import fastworkflow
-from fastworkflow import planning_commands, planning_phases, command_preview, workflow_agent
+from fastworkflow.planning import planning_commands, planning_phases, command_preview
+from fastworkflow import workflow_agent
 from fastworkflow.observability import tracing
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import (
     ParameterExtraction,
@@ -37,7 +38,7 @@ from fastworkflow.observation_offloading.state import (
     observability_db_path,
     scope_for_host,
 )
-from fastworkflow.plan_frame import runs_outside_ranges
+from fastworkflow.planning.plan_frame import runs_outside_ranges
 from fastworkflow.planning import (
     StepFormError,
     count_and_names_read,
@@ -46,8 +47,8 @@ from fastworkflow.planning import (
     when,
 )
 from fastworkflow.planning import Step, command_inputs_for_steps, planned
-from fastworkflow.planning_commands import PlanningCommandCallPlan, PlanningCommandFormatError, call_phases
-from fastworkflow.planning_phases import Placeholder, step_paging
+from fastworkflow.planning.planning_commands import PlanningCommandCallPlan, PlanningCommandFormatError, call_phases
+from fastworkflow.planning.planning_phases import Placeholder, step_paging
 from fastworkflow.turn import TurnStatus
 from fastworkflow.utils import python_utils
 from fastworkflow.utils.react import fastWorkflowReAct
@@ -852,7 +853,7 @@ def library_env(tmp_path, initialized_fastworkflow, monkeypatch):
         "fastworkflow.workflow_agent.split_into_subtasks",
         lambda *args, **kwargs: ["look up the book"],
     )
-    monkeypatch.setattr("fastworkflow.planning_phases.write_answer", lambda query: "written")
+    monkeypatch.setattr("fastworkflow.planning.planning_phases.write_answer", lambda query: "written")
 
     runner.sent.clear()
     yield state
@@ -957,7 +958,7 @@ def _make_library_runner_env(
         "fastworkflow.workflow_agent.split_into_subtasks",
         lambda *args, **kwargs: ["look up the book"],
     )
-    monkeypatch.setattr("fastworkflow.planning_phases.write_answer", lambda query: "written")
+    monkeypatch.setattr("fastworkflow.planning.planning_phases.write_answer", lambda query: "written")
 
     runner.sent.clear()
     return state

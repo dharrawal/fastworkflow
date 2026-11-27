@@ -15,7 +15,8 @@ import json
 from pathlib import Path
 
 import fastworkflow
-from fastworkflow import command_executor, planning_commands
+from fastworkflow import command_executor
+from fastworkflow.planning import planning_commands
 from fastworkflow.command_directory import CommandDirectory, is_visible_planning
 from fastworkflow.train.artifact_versioning import construction_record_problem, workflow_has_planning_commands
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401 - the routing registry
@@ -118,7 +119,7 @@ def test_e_the_parameter_example_commands_exclude_framework_commands():
 
 def test_f_the_test_set_inventory_excludes_framework_commands_and_counts_only_app_planning_commands():
     from fastworkflow.train.planning_test_set import inventory
-    from fastworkflow.planning_commands import resolve_field_sources, visible_planning_commands
+    from fastworkflow.planning.planning_commands import resolve_field_sources, visible_planning_commands
 
     planning = set(inventory(LIBRARY).planning)
     assert not planning & FRAMEWORK_NAMES
@@ -129,6 +130,6 @@ def test_f_the_test_set_inventory_excludes_framework_commands_and_counts_only_ap
 
 
 def test_f_the_scoring_listing_excludes_framework_commands():
-    from fastworkflow import planning_commands
+    from fastworkflow.planning import planning_commands
 
     assert not set(planning_commands.visible_planning_commands(LIBRARY)) & FRAMEWORK_NAMES

@@ -6,9 +6,9 @@ import re
 import pytest
 from dspy.utils import DummyLM
 
-from fastworkflow import planning_commands as sc
+from fastworkflow.planning import planning_commands as sc
 from fastworkflow import workflow_agent
-from fastworkflow.planning_commands import PlanningCommandCallError
+from fastworkflow.planning.planning_commands import PlanningCommandCallError
 from tests.scripted_extractor import script_extractor
 from tests.test_planning_command_files import _load_error
 from tests.test_text_planner_and_split import (  # noqa: F401 - workflow_env is a fixture
@@ -1549,7 +1549,7 @@ def test_a_verified_choice_with_duplicate_labels_builds_and_its_check_runs(monke
     first occurrence of each label is offered, and the check runs."""
     import dspy
     from types import SimpleNamespace
-    from fastworkflow import planning_commands as sc
+    from fastworkflow.planning import planning_commands as sc
 
     param = SimpleNamespace(type="choice", name="kind", desc="the kind of record", verify=True, default=None,
                             values=("group", "feed", "group"), means=(("group", "a group of people"),))

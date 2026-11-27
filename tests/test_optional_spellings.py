@@ -8,7 +8,7 @@ from typing import Optional
 import pytest
 from pydantic import BaseModel, Field
 
-from fastworkflow import planning_commands as pc
+from fastworkflow.planning import planning_commands as pc
 from fastworkflow.parameters import check
 from fastworkflow.parameters.fill import unwrap_optional
 from fastworkflow.parameters.rules import is_union

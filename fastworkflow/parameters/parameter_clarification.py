@@ -265,7 +265,7 @@ def made_progress(asked: Iterable[str], names: Iterable[str]) -> bool:
 def refusal_from_gaps(gaps, values: Optional[dict] = None):
     """A refusal that stands for *gaps*, worded as the argument checks word theirs, for the question builders that read
     a refusal. It carries the gaps, so a question about several arguments names them all."""
-    from fastworkflow import planning_commands
+    from fastworkflow.planning import planning_commands
 
     from fastworkflow.parameters import check
 
@@ -462,7 +462,7 @@ def advance(loop: ParameterLoop, reply: str, command, *,
     open here. The rule is the one above (``made_progress``, ``MAX_NO_PROGRESS``): what the caller does with
     ``exhausted`` is its one hand-over.
     """
-    from fastworkflow import planning_commands
+    from fastworkflow.planning import planning_commands
 
     names = [p.name for p in command.params]
     listed = [*loop.open, *(name for name in names if loop.confirm or loop.values.get(name) not in (None, ""))]

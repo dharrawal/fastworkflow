@@ -63,7 +63,7 @@ def stored_plans(db, experiments=()):
 
 def replay(folder, db, experiments=()):
     import fastworkflow
-    from fastworkflow import planning_phases
+    from fastworkflow.planning import planning_phases
     from fastworkflow.observation_offloading.facts import paging_parameters
 
     env = os.path.join(folder, "fastworkflow.env")

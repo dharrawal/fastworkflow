@@ -57,7 +57,7 @@ How a planning command runs:
 The one-page guide is `docs/planning_command_file_layout.md` in the fastWorkflow repository (not in
 the wheel), with the preview; `docs/planning_command_phases.md` covers phases, facts, code-run steps
 and answers. The module documentation of `fastworkflow.planning` (the form),
-`fastworkflow.planning_commands` and `fastworkflow.planning_phases` (the runtime) ships with the
+`fastworkflow.planning.planning_commands` and `fastworkflow.planning.planning_phases` (the runtime) ships with the
 package.
 
 Code references below name a module of the `fastworkflow` package and a symbol in it.
@@ -268,7 +268,7 @@ name: str = Field(..., examples=["Maria Okafor", "Payroll Approvers EMEA"], json
 
 Adding them edits the command file, so, like any such edit, the workflow's next `fastworkflow train` retrains it.
 
-A field with no check is cleaned in code: `strip_words(text, words)` from `fastworkflow.planning_commands`,
+A field with no check is cleaned in code: `strip_words(text, words)` from `fastworkflow.planning.planning_commands`,
 called in the field's `field_validator`. A validator's correction is kept when it passes and dropped
 when it refuses. Full rules: `docs/parameter_pipeline_design.md` and the `planning_commands` module doc.
 

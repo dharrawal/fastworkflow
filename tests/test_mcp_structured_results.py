@@ -326,8 +326,8 @@ def test_the_wrapper_adds_no_second_pass_over_a_stream():
 def test_a_review_turn_validates_against_the_output_schema():
     """The review artifact of a sub-task review, built by the real review code (items, the reply forms) and carried in a
     real TurnOutput, is a valid turn result."""
-    from fastworkflow import review_engine
-    from fastworkflow.review_proposals import Means, SubTask, SubTaskProposal
+    from fastworkflow.review import review_engine
+    from fastworkflow.review.review_proposals import Means, SubTask, SubTaskProposal
 
     proposal = SubTaskProposal(items=[
         SubTask(goal="Find the books", means=Means(kind="planning", name="Library/book_by_title")),

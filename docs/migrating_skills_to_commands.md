@@ -342,7 +342,7 @@ Apps write or import these names. Check the app for each one.
 | `SkillFormatError`, `SkillInputError`, `SkillCallError` | `PlanningCommandFormatError`, `PlanningCommandInputError`, `PlanningCommandCallError`. Only an app that catches them is affected. |
 | `load_skills` | `load_planning_commands` (only an app that calls it) |
 | `PlanGenerator.__call__` | `PlanGenerator.__phases__` (section 5) |
-| `FW_SKILL_PHASE_MAX_STEPS`, `FW_SKILL_FANOUT_MAX_ITEMS`, `FW_SKILL_FACTS_MAX_LIST_ITEMS` | Module constants, `PHASE_MAX_STEPS` (15), `FANOUT_MAX_ITEMS` (10) and `FACTS_MAX_LIST_ITEMS` (100) in `fastworkflow.planning_phases`. The environment settings are no longer read. Remove them from the app's env files. |
+| `FW_SKILL_PHASE_MAX_STEPS`, `FW_SKILL_FANOUT_MAX_ITEMS`, `FW_SKILL_FACTS_MAX_LIST_ITEMS` | Module constants, `PHASE_MAX_STEPS` (15), `FANOUT_MAX_ITEMS` (10) and `FACTS_MAX_LIST_ITEMS` (100) in `fastworkflow.planning.planning_phases`. The environment settings are no longer read. Remove them from the app's env files. |
 | `fact_from`, a `"from"` key on a facts model's field, `facts_from_runs`, `facts_from_archive`, `check_fact_sources`, `check_phase_sources`, `FactSourceError`, `AmbiguousFactSourceError` | Removed. A facts field is typed with a command's `Output` or `Input` (section 12). |
 
 The `fastworkflow.planning` module exports `count`, `do_not_run`, `from_`, `full_list`, `listed`,

@@ -55,7 +55,7 @@ from jwt.exceptions import PyJWTError as JWTError
 from dotenv import dotenv_values
 
 import fastworkflow
-from fastworkflow import approval_binding
+from fastworkflow.review import approval_binding
 from fastworkflow.session import state_paths
 from fastworkflow.experiment.readiness import runtime_readiness_snapshot
 from fastworkflow.utils.logging import logger
@@ -450,7 +450,7 @@ async def lifespan(_app: FastAPI):
         # A command that does not load is skipped by the server: log each one at startup. A workflow-wide problem (a
         # shared file such as startup_action.json or _workflow.py, or neither the agent model nor Jev set:
         # fastworkflow.no_agent_mode) stops it, naming the file.
-        from fastworkflow.command_preview import load_problems
+        from fastworkflow.planning.command_preview import load_problems
 
         from fastworkflow import no_agent_mode
 
@@ -486,7 +486,7 @@ async def lifespan(_app: FastAPI):
         if startup_action is None and not ARGS.startup_command:
             # A command with no Signature runs only as the startup action. Said here, not refused: a session may pass
             # its own startup action when it is created; one that does not stands on no record.
-            from fastworkflow.command_preview import missing_startup_action_problem
+            from fastworkflow.planning.command_preview import missing_startup_action_problem
 
             if (problem := missing_startup_action_problem(ARGS.workflow_path)) is not None:
                 logger.error(f"startup problem: {problem}; a session that passes no startup_action starts on "

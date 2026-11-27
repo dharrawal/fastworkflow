@@ -26,9 +26,9 @@ import pytest
 from dspy.utils import DummyLM
 
 import fastworkflow
-from fastworkflow import review_proposals
+from fastworkflow.review import review_proposals
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import extract_arguments
-from fastworkflow.review_proposals import Means, SubTask, SubTaskInput, draft_inputs, resolve_inputs, run_text
+from fastworkflow.review.review_proposals import Means, SubTask, SubTaskInput, draft_inputs, resolve_inputs, run_text
 from fastworkflow.run_listing import has_trained_heads
 from fastworkflow.parameters import signatures
 from tests.test_approval_binding import annotated_library  # noqa: F401 - the library copy with its trained heads
@@ -317,7 +317,8 @@ def test_a_drafted_input_round_trips_through_the_review_json():
 
 
 def _signature_text(folder: str, name: str) -> str:
-    from fastworkflow import ModuleType, planning_commands
+    from fastworkflow import ModuleType
+    from fastworkflow.planning import planning_commands
     from fastworkflow.parameters.signatures import InputForParamExtraction
 
     fastworkflow.RoutingRegistry.get_definition(folder, load_cached=False)
@@ -328,7 +329,7 @@ def _signature_text(folder: str, name: str) -> str:
 
 
 def test_a_planning_commands_str_field_is_told_to_copy_only_when_it_is_marked(annotated_library):  # noqa: F811
-    from fastworkflow.planning_commands import IN_REQUEST_STR_SENTENCE
+    from fastworkflow.planning.planning_commands import IN_REQUEST_STR_SENTENCE
 
     text = _signature_text(str(annotated_library), "Library/note_member")
     # member and text both carry copied_from_command_text; a field without it is told nothing about copying, as on
@@ -337,7 +338,7 @@ def test_a_planning_commands_str_field_is_told_to_copy_only_when_it_is_marked(an
 
 
 def test_an_execution_commands_fields_are_told_nothing_new():
-    from fastworkflow.planning_commands import IN_REQUEST_STR_SENTENCE
+    from fastworkflow.planning.planning_commands import IN_REQUEST_STR_SENTENCE
 
     assert IN_REQUEST_STR_SENTENCE.rstrip(".") not in _signature_text(TUTORIAL, "count_overdue")
 
@@ -366,7 +367,7 @@ def _refused_name_plan(**check) -> "review_proposals.SubTaskProposal":
 def _revised(plan, *changes):
     import types
 
-    from fastworkflow.review_engine import Change, apply_edits
+    from fastworkflow.review.review_engine import Change, apply_edits
 
     host = types.SimpleNamespace(_app_workflow=_workflow(TUTORIAL), _current_planner_lm=None)
     return apply_edits(plan, [Change(index=1, field="inputs", value=value) for value in changes]).revised(host, plan)
@@ -451,7 +452,7 @@ def test_a_validators_rewrite_of_a_marked_value_is_not_refused_by_a_later_check(
     """The validator writes the singular, which the request does not write: the draft keeps the value the checks
     stand behind (the one the request writes), so the later checks (the values question's, the run's) pass, and the run's
     own validators write the singular again."""
-    from fastworkflow import planning_commands
+    from fastworkflow.planning import planning_commands
 
     scripted({"reasoning": "the group", "name": "contractors", "kind": "group"})
     goal = "tag the contractors group"
@@ -491,7 +492,7 @@ class PlanGenerator:
 def test_a_refused_draft_does_not_keep_an_int_at_its_default_for_a_later_check_to_refuse(singular_workflow, scripted):
     """The request gives no number: the draft's refusal of the owner keeps the values the checks stand behind, and the
     count's default is not one of them, so the values question asks for the owner alone (not a whole number)."""
-    from fastworkflow import planning_commands
+    from fastworkflow.planning import planning_commands
 
     (Path(singular_workflow.folderpath) / "_commands" / "count_line.py").write_text(_COUNT_LINE, encoding="utf-8")
     workflow = _workflow(singular_workflow.folderpath)
@@ -579,7 +580,7 @@ def test_a_draft_that_leaves_a_refused_value_out_prints_no_refusal_about_it(conn
 def test_the_error_reshow_rechecks_a_refusal_of_a_value_the_item_does_not_hold():
     """An unreadable review reply shows the steps again: a refusal of a value the item does not hold is worked out
     again first (``review_engine._structured_error_prompt``), as a revised review's is."""
-    from fastworkflow.review_engine import _structured_error_prompt
+    from fastworkflow.review.review_engine import _structured_error_prompt
 
     plan = _refused_name_plan(check="kind='author' is not one of book, member", check_refused=["kind"])
     plan = plan.model_copy(update={"items": [plan.items[0].model_copy(update={

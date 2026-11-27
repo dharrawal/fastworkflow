@@ -64,7 +64,7 @@ def test_the_page_cap_and_the_step_limit_share_one_sentence():
 
 def test_a_planning_command_phase_out_of_steps_states_the_rows_read_of_the_total(library_env, monkeypatch):
     """A phase whose agent ran out of steps while it paged a read ends the answer with the same partial-read note."""
-    from fastworkflow import planning_phases
+    from fastworkflow.planning import planning_phases
     from fastworkflow.planning import run
     from tests.test_no_agent_mode import _plan
     from tests.test_step_helpers import _build_planning_command

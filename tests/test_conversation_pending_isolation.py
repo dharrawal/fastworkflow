@@ -16,9 +16,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from fastworkflow import approval_binding as ab
-from fastworkflow import review_proposals, workflow_agent
-from fastworkflow.review_engine import AWAITING, INVALIDATED
+from fastworkflow.review import approval_binding as ab
+from fastworkflow.review import review_proposals
+from fastworkflow import workflow_agent
+from fastworkflow.review.review_engine import AWAITING, INVALIDATED
 from fastworkflow.turn import TurnStatus
 from tests.test_approval_binding import (  # noqa: F401 - fixtures and the scripted agent
     _added, _ask, _finish, annotated_library, no_live_model, no_model_call_for_parameters, todo)

@@ -614,7 +614,7 @@ def open_for_workflow(workflow: Any, proposal: Proposal, *, items_text: str = ""
 
 def proposal_of(record: ReviewRecord) -> Proposal:
     """The typed proposal a proposal record holds, rebuilt (and so re-validated) from its binding."""
-    import fastworkflow.review_proposals  # noqa: F401 - registers the framework's proposal specs
+    import fastworkflow.review.review_proposals  # noqa: F401 - registers the framework's proposal specs
 
     cls = PROPOSAL_SPECS.get(record.command)
     if cls is None:
@@ -689,7 +689,7 @@ def reply_forms(rendering: str, proposal: Proposal, *, structured: bool = False)
     The hint is found in *rendering* (the text the user was shown, which ends with it); a text that carries none
     (a refusal message) falls back to the hint ``prompt_for`` would pick for *proposal* and *structured*. Each form is
     ``{kind, reply | pattern | free_text, per_item}``, and an edit form with a pattern also carries ``separator``."""
-    from fastworkflow.review_proposals import SubTaskProposal
+    from fastworkflow.review.review_proposals import SubTaskProposal
 
     chosen = next((forms for hint, forms in REPLY_FORMS_OF_HINT if hint in (rendering or "")), None)
     if chosen is None:
@@ -711,7 +711,7 @@ def _no_agent_of(host: Any) -> bool:
 
 
 def prompt_for(proposal: Proposal, workflow: Any = None, *, structured: bool = False, no_agent: bool = False) -> str:
-    from fastworkflow.review_proposals import SubTaskProposal
+    from fastworkflow.review.review_proposals import SubTaskProposal
 
     folder = getattr(workflow, "folderpath", None) if workflow is not None else None
     if isinstance(proposal, SubTaskProposal):
@@ -722,7 +722,7 @@ def prompt_for(proposal: Proposal, workflow: Any = None, *, structured: bool = F
 
 def _structured_error_prompt(proposal: Proposal, workflow: Any = None, message: str = "", *,
                              no_agent: bool = False) -> str:
-    from fastworkflow.review_proposals import SubTaskProposal, _rechecked_if_changed
+    from fastworkflow.review.review_proposals import SubTaskProposal, _rechecked_if_changed
 
     if isinstance(proposal, SubTaskProposal):
         if not message or message in (SUB_TASK_UNREADABLE_REPLY, SUB_TASK_STRUCTURED_UNREADABLE_REPLY):
@@ -745,7 +745,7 @@ def _input_signature(inputs: Any) -> list[tuple]:
 
 
 def _normalize_parsed_subtask_edits(proposal: Proposal, edits: list[Edit]) -> list[Edit]:
-    from fastworkflow.review_proposals import (
+    from fastworkflow.review.review_proposals import (
         SubTaskProposal, declared_input_names, merge_subtask_input_edit, unreadable_input_value)
 
     if not isinstance(proposal, SubTaskProposal):
@@ -799,7 +799,7 @@ def _known_means_edits(proposal: Proposal, edits: list[Edit]) -> list[Edit]:
     """Typed edits with each means edit resolved as a read one is (``review_proposals.edited_means``, bd fix-ftdl.11): a
     means naming a command in another spelling takes its name, one naming no command raises ``UnknownMeansEdit`` (an
     ``EditRefused``: the reply is refused with the names). No model is called."""
-    from fastworkflow.review_proposals import SubTaskProposal, edited_means
+    from fastworkflow.review.review_proposals import SubTaskProposal, edited_means
 
     if not isinstance(proposal, SubTaskProposal):
         return edits
@@ -814,7 +814,7 @@ def _refuse_dropped_input_parts(proposal: Proposal, edits: list[Edit]) -> None:
     the part named. (A model's reading of a plain-language reply is not checked: it echoes the shown step's means and
     outcome into its inputs text, and dropping those is what keeps that reading correct.)
     """
-    from fastworkflow.review_proposals import SubTaskProposal, dropped_input_part, merge_subtask_input_edit
+    from fastworkflow.review.review_proposals import SubTaskProposal, dropped_input_part, merge_subtask_input_edit
 
     if not isinstance(proposal, SubTaskProposal):
         return
@@ -1027,7 +1027,7 @@ def apply_edits(proposal: Proposal, edits: list[Edit]) -> Proposal:
         field_change[key] = "change"
 
     def _inputs_claim_keys(number: int, value: str) -> list[str]:
-        from fastworkflow.review_proposals import SubTaskInput, _input_edit_parts
+        from fastworkflow.review.review_proposals import SubTaskInput, _input_edit_parts
 
         stripped = value.strip()
         if stripped.lower() == "none":
@@ -1041,7 +1041,7 @@ def apply_edits(proposal: Proposal, edits: list[Edit]) -> Proposal:
     def claim_inputs(number: int, value: str) -> None:
         if number in whole_item:
             raise EditRefused(f"Item {number} is named by more than one edit.")
-        from fastworkflow.review_proposals import unreadable_input_value
+        from fastworkflow.review.review_proposals import unreadable_input_value
 
         if (problem := unreadable_input_value(value)) is not None:
             raise EditRefused(f"Item {number}: {problem}")
@@ -1104,7 +1104,7 @@ def apply_edits(proposal: Proposal, edits: list[Edit]) -> Proposal:
                               f"{', '.join(shown_fields(item_model))}.")
         data = changed[position].model_dump()
         if edit.field == "inputs" and item_model.__name__ == "SubTask":
-            from fastworkflow.review_proposals import merge_subtask_input_edit
+            from fastworkflow.review.review_proposals import merge_subtask_input_edit
 
             before_named = {
                 each.name: each.value for each in changed[position].inputs if each.name
@@ -1181,7 +1181,7 @@ def apply_edits(proposal: Proposal, edits: list[Edit]) -> Proposal:
     except ValidationError as exc:
         raise EditRefused(f"The edited proposal is not valid: {exc.errors()[0]['msg']}.") from exc
     if model is not None and model.__name__ == "SubTask":
-        from fastworkflow.review_proposals import SubTask
+        from fastworkflow.review.review_proposals import SubTask
 
         for item, (_, before, look_up) in zip(edited.items, provenance):
             if isinstance(item, SubTask):
@@ -1256,7 +1256,7 @@ def _review_planning_names(app_workflow: Any) -> tuple[str, ...]:
     folder = getattr(app_workflow, "folderpath", None)
     if not folder:
         return ()
-    from fastworkflow import planning_commands
+    from fastworkflow.planning import planning_commands
 
     return tuple(sorted(planning_commands.resolve_field_sources(folder).planning_commands))
 
@@ -1329,7 +1329,7 @@ def _validate_edits_decision(
     if workflow is not None and reason == READ_REASON:
         # Edits a model read from free text may set an enumerated input outside its choices (fix-j9qk): refused through
         # the same path as any invalid edit, so the user is asked again. Typed and form edits are not checked here.
-        from fastworkflow.review_proposals import refused_choice_message
+        from fastworkflow.review.review_proposals import refused_choice_message
 
         if (message := refused_choice_message(workflow, edited)) is not None:
             return ReplyDecision(Verdict.REFUSE, "edits refused", message=message)
@@ -1347,7 +1347,7 @@ def _validate_edits_decision(
 def _clears_a_refusal(proposal: Proposal, edits: Sequence[Any]) -> bool:
     """Whether *edits* clear an input whose value the step's check refuses while the step does not show it (the draft's
     refused value, left out): the steps read the same, but the refusal goes, so it is a change, never a no-op."""
-    from fastworkflow.review_proposals import SubTaskInput, SubTaskProposal, _clears, _input_edit_parts
+    from fastworkflow.review.review_proposals import SubTaskInput, SubTaskProposal, _clears, _input_edit_parts
 
     if not isinstance(proposal, SubTaskProposal):
         return False
@@ -1714,7 +1714,7 @@ def switch_clause_in_goal_message(clause: str) -> str:
 def _refuse_switch_clause_in_goal(edits: list, text: str) -> None:
     """Refuse a typed edit whose goal is, or ends with, an explicit switch clause of the reply (``change 6: goal=show it,
     step 7: use NAME``): the clause is a plan switch, not goal text (bd fix-1ma8.1)."""
-    from fastworkflow.review_plan_switch import goal_copies_switch_clause
+    from fastworkflow.review.review_plan_switch import goal_copies_switch_clause
 
     for edit in edits:
         goal = (edit.value if isinstance(edit, Change) and edit.field == "goal"
@@ -1731,7 +1731,7 @@ def _switch_clauses_decision(proposal: Proposal, text: str, workflow: Any, read_
     any reply). A question about a switch (unknown name, no such step, which plan) asks again and applies nothing. When the
     other clauses are not read as edits (a question, a refusal) that decision is returned and the switch is not applied
     either: the plan stays as it was. Read after the accept and decline cues, so an accept never gets here."""
-    from fastworkflow.review_plan_switch import split_switch_clauses
+    from fastworkflow.review.review_plan_switch import split_switch_clauses
 
     split = split_switch_clauses(proposal, text, workflow)
     if split is None:
@@ -1767,7 +1767,7 @@ MAY_CHANGE_DATA_NEEDS_YES = f"{MAY_CHANGE_DATA_SENTENCE} {_NEEDS_YES_TAIL}"
 def _data_sentence(proposal: Proposal, folder: Optional[str]) -> Optional[str]:
     """The sentence that a yes is needed, or None when no part changes data: the definite one when a part surely changes
     data, else the "may change" one for a turn with an ad hoc part that may (``SubTaskProposal.badges``)."""
-    from fastworkflow.review_proposals import CHANGES_DATA_BADGE
+    from fastworkflow.review.review_proposals import CHANGES_DATA_BADGE
 
     if getattr(proposal, "changes_data", None) is None or not proposal.changes_data(folder):
         return None
@@ -1787,7 +1787,7 @@ def _needs_a_yes(proposal: Proposal, message: str, folder: Optional[str]) -> boo
     reply is not a yes (``no_agent_mode.is_yes``: yes, true, ok, agreed, accept, go), which code reads. ``dont change
     anything`` and ``no changes`` are accepts of the plan's text, and may as well mean "make no change", so they never
     run a write."""
-    from fastworkflow.review_proposals import SubTaskProposal
+    from fastworkflow.review.review_proposals import SubTaskProposal
 
     if not isinstance(proposal, SubTaskProposal) or not proposal.changes_data(folder):
         return False
@@ -1817,7 +1817,7 @@ class ProposalReplyPolicy:
         self._structured_fallback = structured_fallback
 
     def decide(self, proposal: Proposal, message: str) -> ReplyDecision:
-        from fastworkflow.review_proposals import workflow_scope
+        from fastworkflow.review.review_proposals import workflow_scope
 
         folder = getattr(self._app_workflow, "folderpath", None)
         self._read_nothing = False
@@ -1835,7 +1835,7 @@ class ProposalReplyPolicy:
         return decision
 
     def _decide(self, proposal: Proposal, message: str) -> ReplyDecision:
-        from fastworkflow.review_proposals import SubTaskProposal
+        from fastworkflow.review.review_proposals import SubTaskProposal
 
         text = (message or "").strip()
         word = text.lower()
@@ -1971,7 +1971,7 @@ class ProposalReplyPolicy:
     ) -> ReplyDecision:
         from fastworkflow.command_executor import CommandExecutor
         from fastworkflow._workflows.plan_metadata_extraction._item_validation import explicit_out_of_range_step
-        from fastworkflow.review_proposals import certain_removals
+        from fastworkflow.review.review_proposals import certain_removals
 
         _prepare_plan_workflow(self, proposal)
         slot_question = _slot_question(proposal)
@@ -2195,7 +2195,7 @@ class ProposalReplyPolicy:
     def _drop_decision(self, proposal: Proposal, text: str, items: list) -> ReplyDecision:
         """Drops for the steps a routed drop (or the slot) names, held to the reply's own step numbers: a list the
         extractor read short is completed, a step the reply says to keep is not dropped, an unclear one asks again."""
-        from fastworkflow.review_proposals import reconcile_dropped_items
+        from fastworkflow.review.review_proposals import reconcile_dropped_items
 
         try:
             numbers = reconcile_dropped_items(proposal, [str(item) for item in items], text)
@@ -2253,7 +2253,7 @@ _READ_AS = {Verdict.CONFIRM: "accept", Verdict.DECLINE: "decline", Verdict.EDIT:
 
 def _explicit_yes_required(proposal: Proposal, workflow: Any) -> Optional[bool]:
     """Whether only an explicit yes accepts this review (a part changes data); None when it cannot be told."""
-    from fastworkflow.review_proposals import SubTaskProposal
+    from fastworkflow.review.review_proposals import SubTaskProposal
 
     try:
         return isinstance(proposal, SubTaskProposal) and bool(proposal.changes_data(getattr(workflow, "folderpath", None)))
@@ -2392,7 +2392,7 @@ def reply_to_proposal(
     if cap_turn and decision.verdict not in (Verdict.CONFIRM, Verdict.DECLINE):
         transition(host, store, record, EXPIRED, reason="ttl", surface=surface, outcome="expired")
         propagate(host, store, record, surface=surface)
-        from fastworkflow.approval_binding import MSG_EXPIRED
+        from fastworkflow.review.approval_binding import MSG_EXPIRED
 
         return ReviewReply(True, MSG_EXPIRED.format(command=record.command))
     if decision.verdict is Verdict.CONFIRM:
@@ -2432,7 +2432,7 @@ def reply_to_proposal(
     if producing_q3_or_later:
         if getattr(store, "plan_cme", None) is not None:
             _clear_plan_cme_continuation(store.plan_cme)
-        from fastworkflow.review_proposals import SubTaskProposal
+        from fastworkflow.review.review_proposals import SubTaskProposal
 
         if isinstance(proposal, SubTaskProposal):
             return ReviewReply(

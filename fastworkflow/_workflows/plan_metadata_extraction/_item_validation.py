@@ -129,7 +129,7 @@ _COUNT_WORDS = {
 
 def extract_step_numbers(segment: str, count: int) -> list[int]:
     """Collect 1-based step numbers named in *segment* within ``1..count`` (one grammar, ``review_step_refs``)."""
-    from fastworkflow.review_step_refs import step_numbers
+    from fastworkflow.review.review_step_refs import step_numbers
 
     return step_numbers(segment, count)
 

@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from fastworkflow import approval_binding as ab
+from fastworkflow.review import approval_binding as ab
 from pathlib import Path as _Path
 
 from tests.test_approval_binding import _annotate

@@ -17,8 +17,9 @@ import pytest
 from dotenv import dotenv_values
 
 import fastworkflow
-from fastworkflow import command_preview, workflow_agent
-from fastworkflow import planning_commands as pc
+from fastworkflow.planning import command_preview
+from fastworkflow import workflow_agent
+from fastworkflow.planning import planning_commands as pc
 from fastworkflow.command_context_model import CommandContextModel, CommandContextModelValidationError
 from fastworkflow.command_routing import RoutingRegistry
 from fastworkflow.migrate_context_declarations import migrate

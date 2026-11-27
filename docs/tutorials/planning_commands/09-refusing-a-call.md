@@ -34,7 +34,7 @@ The keys are not the whole list: `command_text_after_command_name`, `from_comman
 other field keys, and the
 [planning command file layout](../../planning_command_file_layout.md) has them under "Field
 options". A field with no check is cleaned in code: call `strip_words(text, words)` from
-`fastworkflow.planning_commands` in a `field_validator` on that field. A validator's returned value
+`fastworkflow.planning.planning_commands` in a `field_validator` on that field. A validator's returned value
 is written back, so a validator that cleans a value changes the argument. A validator cannot
 replace "required" or `ignore`: a missing required field fails before any validator runs, and
 `ignore` strips the value before it is matched against the request.

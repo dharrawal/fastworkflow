@@ -13,8 +13,8 @@ from __future__ import annotations
 
 import pytest
 
-from fastworkflow import approval_binding
-from fastworkflow.approval_binding import Surface
+from fastworkflow.review import approval_binding
+from fastworkflow.review.approval_binding import Surface
 from fastworkflow.turn import TurnStatus
 from fastworkflow.workflow_execution_context import NOT_RUN_ARTIFACT
 from tests.test_approval_binding import (  # noqa: F401 - the real agent on the annotated library copy, and the guards
@@ -215,7 +215,7 @@ def test_a_turn_where_nothing_would_run_never_opens_a_review(gated, monkeypatch,
 
 
 def _draft(gated, sub_task):
-    from fastworkflow import review_proposals
+    from fastworkflow.review import review_proposals
 
     return review_proposals.draft_round1_proposal(gated.wf, [sub_task]).items[0]
 
@@ -245,7 +245,7 @@ def test_a_confident_match_runs_bound(gated, monkeypatch):
 
 
 def test_a_write_command_never_runs_from_an_unconfident_match(gated):
-    from fastworkflow import review_proposals
+    from fastworkflow.review import review_proposals
     from fastworkflow.command_writes import write_commands
 
     assert "Record/add_note" in write_commands(gated.wf.folderpath)
@@ -366,7 +366,7 @@ def test_the_review_text_marks_an_ad_hoc_item_on_first_render_and_after_an_edit(
     edited = _reply(gated, "change 2: outcome=a short joke", token)
     assert edited.status is TurnStatus.AWAITING_USER, edited.answer
     assert _lines(record.rendering)[1].endswith(SUFFIX)
-    from fastworkflow.review_engine import rendering_hash
+    from fastworkflow.review.review_engine import rendering_hash
     assert record.rendering_hash == rendering_hash(record.rendering)
     revised = _reply(gated, "change 1: means=from_scratch", token)
     assert revised.status is TurnStatus.AWAITING_USER
@@ -382,7 +382,7 @@ def test_the_review_text_marks_an_ad_hoc_item_on_first_render_and_after_an_edit(
 
 
 def test_with_an_agent_model_the_review_text_is_what_it_always_was(gated):
-    from fastworkflow import review_engine, review_proposals
+    from fastworkflow.review import review_engine, review_proposals
 
     proposal = review_proposals.SubTaskProposal(items=[review_proposals.SubTask(goal=EMMA),
                                                        review_proposals.SubTask(goal=JOKE)])

@@ -24,7 +24,7 @@ import pytest
 from pydantic import BaseModel, Field
 
 import fastworkflow
-from fastworkflow import planning_commands as sc
+from fastworkflow.planning import planning_commands as sc
 from fastworkflow import workflow_agent
 from fastworkflow.parameters import signatures
 from fastworkflow.parameters import workflow_vocabulary as wv

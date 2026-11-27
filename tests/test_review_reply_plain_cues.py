@@ -7,9 +7,9 @@ from __future__ import annotations
 
 import pytest
 
-from fastworkflow import review_engine as re_
-from fastworkflow.review_engine import CONFIRMED, DECLINED
-from fastworkflow.review_engine import _affirmative_accept_cue, _plain_decline_cue, _polarity_conflict
+from fastworkflow.review import review_engine as re_
+from fastworkflow.review.review_engine import CONFIRMED, DECLINED
+from fastworkflow.review.review_engine import _affirmative_accept_cue, _plain_decline_cue, _polarity_conflict
 
 from tests.test_approval_binding import annotated_library, no_live_model, todo  # noqa: F401
 from tests.test_plan_reply_policy import (  # noqa: F401
@@ -113,7 +113,7 @@ reader = pytest.mark.usefixtures("initialized_fastworkflow", "no_live_model", "n
 
 
 def _reply(gated, monkeypatch, text):
-    from fastworkflow.review_engine import reply_to_proposal
+    from fastworkflow.review.review_engine import reply_to_proposal
 
     # A workflow with no command that changes data: the turn's ad hoc part then needs no explicit yes (bd fix-ftdl.8.4),
     # so the plain cues are read as they are on any turn with no write.
@@ -169,7 +169,7 @@ def test_the_reader_asks_again_when_the_routed_answer_contradicts_the_reply(gate
 @reader
 @pytest.mark.parametrize("text", GUARDED)
 def test_the_decision_records_why_it_did_not_act(gated, monkeypatch, text, planner):
-    from fastworkflow.review_engine import Verdict, proposal_of, reply_policy
+    from fastworkflow.review.review_engine import Verdict, proposal_of, reply_policy
 
     planner(gated, *({"edits": []},) * 6)
     record = _open_review_two_step(gated, monkeypatch)
@@ -252,7 +252,7 @@ def test_accept_cues_stay_plain_accepts(text):
 
 
 def _two_step_proposal():
-    from fastworkflow.review_proposals import SubTask, SubTaskProposal
+    from fastworkflow.review.review_proposals import SubTask, SubTaskProposal
 
     return SubTaskProposal(items=[SubTask(goal="List the books"), SubTask(goal="Count the members")])
 
@@ -260,7 +260,7 @@ def _two_step_proposal():
 @pytest.mark.parametrize("text", ACCEPT_THEN_REQUEST)
 def test_an_accept_followed_by_a_request_goes_to_the_edit_reader(text):
     """The path of a reply with a corrective word: the reader is asked, and what it reads is the decision."""
-    from fastworkflow.review_engine import Add, Verdict
+    from fastworkflow.review.review_engine import Add, Verdict
 
     seen = []
 
@@ -277,7 +277,7 @@ def test_an_accept_followed_by_a_request_goes_to_the_edit_reader(text):
 def test_an_accept_followed_by_a_request_the_reader_reads_no_change_in_is_an_accept(text):
     """A reader that reads no change in the rest of an accept leaves the accept (bd fix-ftdl.8.28): what follows it asks
     for nothing the plan does not already do, so the reply accepts the plan as shown, with no read-back."""
-    from fastworkflow.review_engine import Change, Verdict
+    from fastworkflow.review.review_engine import Change, Verdict
 
     def reader(reply, proposal):
         return [Change(index=1, field="goal", value="List the books")]       # the plan as it stands
@@ -289,7 +289,7 @@ def test_an_accept_followed_by_a_request_the_reader_reads_no_change_in_is_an_acc
 @pytest.mark.parametrize("text", ["List the books first, then count", "go back and count the members"])
 def test_a_reply_that_is_no_accept_and_reads_as_no_change_asks_again(text):
     """With no accept before it, a reply the reader reads no change in is asked about again."""
-    from fastworkflow.review_engine import Change, Verdict
+    from fastworkflow.review.review_engine import Change, Verdict
 
     def reader(reply, proposal):
         return [Change(index=1, field="goal", value="List the books")]       # the plan as it stands
@@ -300,7 +300,7 @@ def test_a_reply_that_is_no_accept_and_reads_as_no_change_asks_again(text):
 
 @pytest.mark.parametrize("text", STILL_PLAIN_ACCEPTS)
 def test_a_plain_accept_never_reaches_the_edit_reader(text):
-    from fastworkflow.review_engine import Verdict
+    from fastworkflow.review.review_engine import Verdict
 
     def reader(reply, proposal):
         raise AssertionError(f"the edit reader was asked about {reply!r}")

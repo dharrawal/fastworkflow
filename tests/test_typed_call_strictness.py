@@ -25,7 +25,7 @@ import pytest
 from dspy.utils import DummyLM
 
 import fastworkflow
-from fastworkflow import planning_commands as pc
+from fastworkflow.planning import planning_commands as pc
 from fastworkflow import workflow_agent
 from fastworkflow.parameters import signatures
 from fastworkflow.parameters.signatures import NOT_FOUND

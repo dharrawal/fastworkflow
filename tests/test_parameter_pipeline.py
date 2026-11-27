@@ -449,7 +449,7 @@ def test_a_guard_refusal_names_the_argument_so_it_is_asked(environment):
 
 @pytest.mark.parametrize("mode", ["assist", "agent"])
 def test_a_guard_refusal_naming_no_argument_ends_the_command_with_no_pending_loop(environment, monkeypatch, mode):
-    from fastworkflow import planning_commands as pc
+    from fastworkflow.planning import planning_commands as pc
 
     def refuse(*args, **kwargs):
         raise pc.PlanningCommandCallError("the call as a whole is refused")

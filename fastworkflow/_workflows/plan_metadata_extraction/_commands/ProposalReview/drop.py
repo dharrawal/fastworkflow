@@ -28,7 +28,7 @@ class Signature:
                 return self
             if not self.items:
                 raise fastworkflow.Refused("Which steps should I drop?", fields=["items"])
-            from fastworkflow.review_step_refs import bare_step_numbers
+            from fastworkflow.review.review_step_refs import bare_step_numbers
 
             count = len(proposal.items)
             normalized: list[str] = []

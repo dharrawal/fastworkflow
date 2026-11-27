@@ -15,10 +15,11 @@ import pytest
 from pydantic import BaseModel, Field
 
 import fastworkflow
-from fastworkflow import command_preview, planning_commands, planning_phases, workflow_agent
+from fastworkflow.planning import command_preview, planning_commands, planning_phases
+from fastworkflow import workflow_agent
 from fastworkflow.observability import tracing
 from fastworkflow.planning import ANSWER_BY_MODEL, phase, run, when
-from fastworkflow.planning_commands import PlanningCommandFormatError
+from fastworkflow.planning.planning_commands import PlanningCommandFormatError
 from fastworkflow.turn import TurnStatus
 from tests.test_turn_result_capture import no_review_gate  # noqa: F401 - the review gate is off for these turns
 from tests.test_step_helpers import FoundBooks, OpenedBook, _build_planning_command, library_env  # noqa: F401
@@ -63,7 +64,7 @@ def answered(monkeypatch):
         queries.append(query)
         return "written"
 
-    monkeypatch.setattr("fastworkflow.planning_phases.write_answer", write)
+    monkeypatch.setattr("fastworkflow.planning.planning_phases.write_answer", write)
     return queries
 
 

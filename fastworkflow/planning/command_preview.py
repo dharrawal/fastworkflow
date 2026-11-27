@@ -112,9 +112,9 @@ from pydantic import BaseModel
 
 from fastworkflow import object_model_view
 from fastworkflow.command_context_model import CommandContextModelValidationError
-from fastworkflow import planning_commands
-from fastworkflow.planning_commands import MAX_GRID, input_grid  # noqa: F401 - MAX_GRID bounds input_grid
-from fastworkflow.planning_phases import (output_members, over_path_problem, over_path_reads_property,
+from fastworkflow.planning import planning_commands
+from fastworkflow.planning.planning_commands import MAX_GRID, input_grid  # noqa: F401 - MAX_GRID bounds input_grid
+from fastworkflow.planning.planning_phases import (output_members, over_path_problem, over_path_reads_property,
                                           placeholder_member)
 from fastworkflow.utils import python_utils
 
@@ -674,7 +674,7 @@ class _PhaseRender:
     items: Optional[list[tuple[str, list[str]]]] = None
 
     def key(self) -> tuple:
-        from fastworkflow.typed_phase_facts import union_members
+        from fastworkflow.planning.typed_phase_facts import union_members
 
         if self.output is None:
             out_key = ""
@@ -771,7 +771,7 @@ FAN_OUT_SHOWN = 2
 
 def _fan_out_items(phase, outputs: dict) -> tuple[list[Any], list[str]]:
     """The items a fan-out phase is rendered for, and the heading of each."""
-    from fastworkflow.planning_phases import fan_out_items
+    from fastworkflow.planning.planning_phases import fan_out_items
 
     items, total = fan_out_items(phase, outputs)
     shown = f"`{phase.item}` = "
@@ -785,7 +785,7 @@ def _fan_out_items(phase, outputs: dict) -> tuple[list[Any], list[str]]:
 
 def _model_to_command(command) -> Mapping[type, str]:
     """``{Signature.Output | Signature.Input: qualified command name}`` of the workflow *command* is in."""
-    from fastworkflow import planning_commands
+    from fastworkflow.planning import planning_commands
 
     folder = _workflow_root_from_path(command.path) if getattr(command, "path", None) else ""
     if not folder:
@@ -836,8 +836,8 @@ def _over_is_computed(phase, outputs: Mapping[str, Any]) -> bool:
 
 
 def _render_phases(command, args: dict) -> _Render:
-    from fastworkflow import planning_commands
-    from fastworkflow.planning_phases import (Phase, PhaseError, active_phases, is_flat_plan,
+    from fastworkflow.planning import planning_commands
+    from fastworkflow.planning.planning_phases import (Phase, PhaseError, active_phases, is_flat_plan,
                                            phase_steps, placeholder_steps)
 
     try:
@@ -932,7 +932,7 @@ def result_answer(plan_cls: type, input: Any, outputs: Mapping[str, Any], phase_
     rule (``planning_phases.judge_result``, the declared *output_model* included) and shown as the failure it is.
     """
     from fastworkflow.planning import ANSWER_BY_MODEL, _template_self
-    from fastworkflow.planning_phases import _result_fn_on_class, bound_result_arguments, judge_result
+    from fastworkflow.planning.planning_phases import _result_fn_on_class, bound_result_arguments, judge_result
 
     result_fn = _result_fn_on_class(plan_cls)
     if result_fn is None:
@@ -979,7 +979,7 @@ def pass_on_placeholders(phase, outputs: dict, earlier: list, items: Optional[li
 
 
 def _render(command, args: dict) -> _Render:
-    from fastworkflow import planning_commands
+    from fastworkflow.planning import planning_commands
 
     if command.plan_fn is not None:
         return _render_phases(command, args)
@@ -1001,7 +1001,7 @@ def _validated(command, args: dict) -> tuple[bool, str]:
     ``info.context["workflow"]`` None and an empty ``command_text``. A validator that raises there instead of refusing
     (it read the workflow) is skipped for *args*, which render with the note ``VALIDATOR_SKIPPED`` as the second
     value."""
-    from fastworkflow import planning_commands
+    from fastworkflow.planning import planning_commands
 
     try:
         if planning_commands.check_input(command, args, "", None):
@@ -1128,7 +1128,7 @@ class _Variant:
 
 def _layout(render: _Render) -> tuple:
     """The shape of a render: flat, or its phases with their outputs and fan-outs."""
-    from fastworkflow.typed_phase_facts import union_members
+    from fastworkflow.planning.typed_phase_facts import union_members
 
     def _out_name(output: Any) -> str:
         if output is None:
@@ -1316,8 +1316,8 @@ def answer_mode(steps: list[str], last: bool = True) -> str:
     judgement or no step is verbatim. A phase before the last made only of 'say that' lines
     writes no answer (3.16): its text reaches the answer only through ``__result__``.
     """
-    from fastworkflow.planning_commands import number
-    from fastworkflow.planning_phases import answer_by_code, answer_step_kind
+    from fastworkflow.planning.planning_commands import number
+    from fastworkflow.planning.planning_phases import answer_by_code, answer_step_kind
 
     kinds: dict[str, list[int]] = {}
     for i, step in enumerate(steps, 1):
@@ -1359,7 +1359,7 @@ def phase_command_names(workflow_folder: str) -> dict[str, Any]:
             return []
 
     def parameters(folder: str) -> Callable[[str], list]:
-        from fastworkflow.planning_phases import parameter_classes
+        from fastworkflow.planning.planning_phases import parameter_classes
 
         try:
             try:
@@ -1385,8 +1385,8 @@ def pages_line(steps: list[str], names: Optional[dict]) -> list[str]:
     (then the agent reads on, from the next page), when its note asks for the full list; else
     page 1 is all it reads. A step that writes a paging value reads that page and is not
     listed. Else nothing."""
-    from fastworkflow.planning_commands import number
-    from fastworkflow.planning_phases import code_max_pages, code_step_pages
+    from fastworkflow.planning.planning_commands import number
+    from fastworkflow.planning.planning_phases import code_max_pages, code_step_pages
 
     if not names or not steps or names.get("parameters") is None:
         return []
@@ -1405,8 +1405,8 @@ def _answer_line(steps: list[str], names: Optional[dict], outputs: list, last: b
     (``planning_phases.is_answer_only``, with *names* and the commands the facts of the plan's
     phase *outputs* come from, as a run reads them); else nothing."""
     from fastworkflow.observation_offloading.facts import fact_sources
-    from fastworkflow.planning_commands import number
-    from fastworkflow.planning_phases import is_answer_only
+    from fastworkflow.planning.planning_commands import number
+    from fastworkflow.planning.planning_phases import is_answer_only
 
     if not names or not steps:
         return []
@@ -1506,7 +1506,7 @@ def _cell_alternatives(pairs: list[tuple[str, str]]) -> str:
 def _phase_output_label(output: Any, model_to_command: Mapping[type, str]) -> str:
     if output is None:
         return "none"
-    from fastworkflow import typed_phase_facts as tpf
+    from fastworkflow.planning import typed_phase_facts as tpf
 
     if tpf.union_members(output) is not None or output in model_to_command:
         return tpf.preview_output_type(output, model_to_command)
@@ -1539,7 +1539,7 @@ def _workflow_root_from_path(path: str) -> str:
 def _facts_lines(model: Any, model_to_command: Mapping[type, str]) -> list[str]:
     """The facts table of one phase output model: its typed facts, else its copy-edge fields
     with the command each is filled from."""
-    from fastworkflow import typed_phase_facts as tpf
+    from fastworkflow.planning import typed_phase_facts as tpf
     from fastworkflow.observation_offloading.facts import fact_sources
 
     if not inspect.isclass(model):
@@ -1572,7 +1572,7 @@ def _facts_lines(model: Any, model_to_command: Mapping[type, str]) -> list[str]:
 
 
 def _phases_section(found: list[_Variant], model_to_command: Mapping[type, str]) -> list[str]:
-    from fastworkflow import typed_phase_facts as tpf
+    from fastworkflow.planning import typed_phase_facts as tpf
 
     order = _phase_order(found)
     lines = ["## Phases", ""]
@@ -1652,7 +1652,7 @@ def _render_lines(render: _Render, level: str, first: Optional[_Render] = None,
             continue
         output_note = ""
         if phase.output is not None:
-            from fastworkflow import typed_phase_facts as tpf
+            from fastworkflow.planning import typed_phase_facts as tpf
 
             if tpf.union_members(phase.output) is not None:
                 output_note = "Output: one of the outputs listed under Facts."
@@ -1831,7 +1831,8 @@ def render_previews(workflow_folder: str) -> dict[str, str]:
 
 def _load_error(name: str, path: str, folder: str) -> str:
     """Why the planning command file at *path* does not load: ``<name>: <error>``."""
-    from fastworkflow import planning_commands, workflow_agent
+    from fastworkflow.planning import planning_commands
+    from fastworkflow import workflow_agent
 
     try:
         loaded = workflow_agent._read_planning_command_file(name, path, folder)
@@ -2089,7 +2090,8 @@ def check_previews(workflow_folder: str, out_dir: Optional[str] = None) -> list[
     root-level file when the workflow renders root-level previews. Files in other folders belong
     to another workflow that shares *out_dir* and are ignored.
     """
-    from fastworkflow import planning_commands, workflow_agent
+    from fastworkflow.planning import planning_commands
+    from fastworkflow import workflow_agent
 
     out_dir = out_dir or default_out_dir(workflow_folder)
     fresh = render_previews(workflow_folder)
@@ -2171,7 +2173,8 @@ def write_previews(workflow_folder: str, out_dir: Optional[str] = None) -> dict[
 
 def check_hand_typed_warnings(workflow_folder: str) -> list[str]:
     """The hand-typed step warnings (3.13) across the loaded planning commands of *workflow_folder*."""
-    from fastworkflow import planning_commands, workflow_agent
+    from fastworkflow.planning import planning_commands
+    from fastworkflow import workflow_agent
     from fastworkflow.observation_offloading.facts import workflow_signatures
 
     folder = os.path.abspath(workflow_folder)
@@ -2196,7 +2199,8 @@ def check_hand_typed_warnings(workflow_folder: str) -> list[str]:
 
 def check_note_condition_warnings(workflow_folder: str) -> list[str]:
     """The note-condition step warnings (3.13) across loaded planning commands of *workflow_folder*."""
-    from fastworkflow import planning_commands, workflow_agent
+    from fastworkflow.planning import planning_commands
+    from fastworkflow import workflow_agent
     from fastworkflow.observation_offloading.facts import workflow_signatures
 
     folder = os.path.abspath(workflow_folder)
@@ -2254,7 +2258,7 @@ def check_ungrouped_list_notices(workflow_folder: str) -> list[str]:
     """Notices (not warnings, not failures) for a command whose ``Signature.Output`` has two or more visible
     list-of-scalar fields in no ``table`` group: the page draws them as separate lists. Printed by
     ``command preview --check`` only; nothing is read from a field's name and nothing at run time changes."""
-    from fastworkflow import planning_commands
+    from fastworkflow.planning import planning_commands
     from fastworkflow.observation_offloading.facts import workflow_signatures
 
     try:
@@ -2302,7 +2306,7 @@ def check_matcher_example_notices(workflow_folder: str) -> list[str]:
 
 def preview_main(args) -> int:
     """``fastworkflow command preview``: write the previews, or with ``--check`` compare them."""
-    from fastworkflow import planning_commands
+    from fastworkflow.planning import planning_commands
 
     out_dir = args.out or default_out_dir(args.workflow_folder)
     if args.check:

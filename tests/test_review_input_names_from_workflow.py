@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import pytest
 
-from fastworkflow.review_engine import EditParseError, EditRefused, Verdict, apply_edits, parse_edits
-from fastworkflow.review_engine import _normalize_parsed_subtask_edits
-from fastworkflow.review_proposals import (
+from fastworkflow.review.review_engine import EditParseError, EditRefused, Verdict, apply_edits, parse_edits
+from fastworkflow.review.review_engine import _normalize_parsed_subtask_edits
+from fastworkflow.review.review_proposals import (
     Means, ProposedEdit, SubTask, SubTaskInput, SubTaskProposal, _proposed_edits_to_engine, declared_input_names,
     entity_input_names, workflow_scope)
 

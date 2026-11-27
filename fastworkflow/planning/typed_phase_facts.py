@@ -24,7 +24,7 @@ from fastworkflow.observation_offloading.facts import (
     _scalar_of_pages,
 )
 from fastworkflow.parameters.field_options import FROM_COMMAND_OUTPUT
-from fastworkflow.planning_phases import FULL_LIST_PHRASES
+from fastworkflow.planning.planning_phases import FULL_LIST_PHRASES
 from fastworkflow.utils.python_utils import type_text
 
 
@@ -291,7 +291,7 @@ def _command_qname_from_class(cls: type) -> str | None:
     if cls.__name__ not in ("Input", "Output"):
         return None
     mod = getattr(cls, "__module__", "")
-    framework = "fastworkflow._framework_commands."
+    framework = "fastworkflow.review.commands."
     if mod.startswith(framework):
         # A framework command (global scope, no context): its routing name is its plain module name.
         name = mod[len(framework):]

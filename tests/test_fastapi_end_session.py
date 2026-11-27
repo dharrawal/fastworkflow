@@ -21,7 +21,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import fastworkflow
-from fastworkflow import approval_binding as ab
+from fastworkflow.review import approval_binding as ab
 from tests.test_approval_endpoint_surfaces import (  # noqa: F401  (fixtures and helpers)
     ACTION, _configure, app_module, no_live_model)
 from tests.test_approval_fastapi import _auth

@@ -105,7 +105,7 @@ def test_the_not_in_request_advisory_is_on_the_plan_path_s_extraction_span(no_ag
 def test_both_paths_call_the_one_writer():
     from fastworkflow._workflows.command_metadata_extraction import intent_detection, parameter_extraction
     from fastworkflow._workflows.plan_metadata_extraction import resolution
-    from fastworkflow import review_proposals
+    from fastworkflow.review import review_proposals
 
     assert "traced_decision" in inspect.getsource(intent_detection.CommandNamePrediction.predict)
     assert "traced_decision" in inspect.getsource(resolution._decided)

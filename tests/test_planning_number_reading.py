@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from fastworkflow import planning_commands as pc
+from fastworkflow.planning import planning_commands as pc
 from fastworkflow.parameters import rules
 from tests.test_planning_command_files import _write
 

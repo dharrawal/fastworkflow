@@ -15,7 +15,7 @@ import pytest
 
 from fastworkflow import intent_loop, no_agent_mode
 from fastworkflow.parameters import read, reply as replies
-from fastworkflow.review_engine import ActionReplyPolicy, Verdict
+from fastworkflow.review.review_engine import ActionReplyPolicy, Verdict
 
 YES = ["yes", "true", "ok", "agreed", "accept", "go", "Yes", "YES", "yes.", "OK!", " agreed ", "Go.", "TRUE"]
 NOT_YES = ["y", "Y", "run it", "okay", "run", "confirm", "sure", "yes please", "go ahead", "yes, go", "",
@@ -83,8 +83,8 @@ def test_a_conditional_decision_step_does_not_take_y_or_run_it(reply):
 @pytest.mark.parametrize("reply, needs", [("ok", False), ("agreed", False), ("Go!", False), ("yes", False),
                                           ("y", True), ("run it", True), ("go ahead", True)])
 def test_the_explicit_yes_of_a_turn_that_changes_data_is_the_one_yes(reply, needs):
-    from fastworkflow import review_engine
-    from fastworkflow.review_proposals import SubTaskProposal
+    from fastworkflow.review import review_engine
+    from fastworkflow.review.review_proposals import SubTaskProposal
 
     class Writing(SubTaskProposal):
         def __init__(self):

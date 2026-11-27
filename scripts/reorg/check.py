@@ -217,7 +217,7 @@ def _is_framework_copy(copy: Path, args) -> bool:
 
 G3_CODE = PRELUDE + r"""
 import io, json, re, sys, contextlib
-from fastworkflow.command_preview import load_problems
+from fastworkflow.planning.command_preview import load_problems
 from fastworkflow.cli import main
 folder = {folder!r}
 problems = sorted(str(p) for p in load_problems(folder))

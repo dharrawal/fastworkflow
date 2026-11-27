@@ -42,7 +42,7 @@ import pytest
 from pydantic import BaseModel, Field
 
 import fastworkflow
-from fastworkflow import planning_commands as pc
+from fastworkflow.planning import planning_commands as pc
 from fastworkflow.parameters import check
 from fastworkflow.parameters import check as one_guard
 from fastworkflow import workflow_agent

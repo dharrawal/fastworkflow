@@ -26,7 +26,8 @@ import pytest
 from pydantic import BaseModel, Field
 
 import fastworkflow
-from fastworkflow import ModuleType, command_preview, planning_commands
+from fastworkflow import ModuleType
+from fastworkflow.planning import command_preview, planning_commands
 from fastworkflow.parameters import parameter_clarification
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import (
     ParameterExtraction,

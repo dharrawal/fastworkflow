@@ -1,7 +1,7 @@
 """A recorded command output says whether the command is the framework's own (fix-2nsr).
 
 ``CommandOutput.framework`` is a semantic fact about the command, set from the command's metadata
-(``CommandMetadata.framework``, the files of ``fastworkflow/_framework_commands``) when the output is
+(``CommandMetadata.framework``, the files of ``fastworkflow/review/commands``) when the output is
 recorded on the turn. It is not a display instruction: any client may read it. ``None`` means "recorded
 before the field existed", the same convention as ``ask_user_entry``.
 """
@@ -40,7 +40,7 @@ def test_the_metadata_flag_marks_exactly_the_framework_commands_folder(tmp_path)
     folder, _ctx, _wf = _make(tmp_path, LIBRARY, "library")
     flagged = {name for name, meta in CommandDirectory.load(str(folder)).map_command_2_metadata.items()
                if meta.framework}
-    on_disk = {p.stem for p in (ROOT / "fastworkflow" / "_framework_commands").glob("*.py")
+    on_disk = {p.stem for p in (ROOT / "fastworkflow" / "review" / "commands").glob("*.py")
                if not p.stem.startswith("_")}
     assert flagged == on_disk
 

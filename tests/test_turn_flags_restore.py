@@ -40,7 +40,7 @@ def _suspended_in_an_accepted_review(annotated_library, monkeypatch):
     script_matcher(monkeypatch, REMOTE_ANSWERS)   # the remote decision model binds EMMA and leaves JOKE ad hoc
     first = _scripted_context(annotated_library, monkeypatch)
     first.ctx.process_turn(f"{EMMA} and {JOKE}")
-    _open_review(type("S", (), {"store": __import__("fastworkflow.approval_binding", fromlist=["x"]).store_for(first.wf)}))
+    _open_review(type("S", (), {"store": __import__("fastworkflow.review.approval_binding", fromlist=["x"]).store_for(first.wf)}))
     first.script.steps = [("finish", {}), ("ask_user", {"clarification_request": "Which copy?"})]
     asked = first.ctx.process_turn("accept")
     assert asked.status is TurnStatus.AWAITING_USER

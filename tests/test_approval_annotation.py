@@ -19,7 +19,7 @@ import fastworkflow
 from fastworkflow import approval_annotations as aa
 from fastworkflow.approval_annotations import (
     REQUIRED_ALWAYS, REQUIRED_UNTIL_DELEGATED, command_approval)
-from fastworkflow import command_preview
+from fastworkflow.planning import command_preview
 from fastworkflow.command_directory import CommandLoadError
 from fastworkflow.command_metadata_api import CommandMetadataAPI
 from fastworkflow.command_routing import RoutingRegistry
@@ -226,7 +226,7 @@ def test_the_annotation_on_a_planning_command_is_a_load_error(tmp_path):
     folder = _copy(tmp_path, "planning_self")
     _annotate(folder, "Library/member_report.py", "REQUIRED_ALWAYS", on="PlanGenerator")
 
-    from fastworkflow.command_preview import load_problems
+    from fastworkflow.planning.command_preview import load_problems
 
     [problem] = [p for p in load_problems(str(folder)) if "member_report" in p]
     assert "Library/member_report.py" in problem

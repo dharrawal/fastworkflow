@@ -1,4 +1,4 @@
-"""Skill previews (fix-553q): ``fastworkflow command preview`` and ``fastworkflow.command_preview``.
+"""Skill previews (fix-553q): ``fastworkflow command preview`` and ``fastworkflow.planning.command_preview``.
 
 Offline, no model: a neutral catalog workflow with a phased skill (with a conditional
 phase), a flat skill and a skill without inputs, rendered to markdown.
@@ -19,7 +19,8 @@ from typing import Optional
 import pytest
 from pydantic import BaseModel, model_validator
 
-from fastworkflow import cli, planning_commands, command_preview
+from fastworkflow import cli
+from fastworkflow.planning import planning_commands, command_preview
 
 SHOW_ITEM = '''
 """show_item: one named item, its parts and, when asked, its open checks."""
@@ -921,8 +922,8 @@ def test_a_planning_command_past_max_grid_lists_every_phase(tmp_path):
      "Answer: written by the model (no step is verbatim)."),
 ])
 def test_answer_mode_reads_the_steps_with_the_runtime_rules(steps, line):
-    from fastworkflow.planning_commands import number
-    from fastworkflow.planning_phases import answer_by_code
+    from fastworkflow.planning.planning_commands import number
+    from fastworkflow.planning.planning_phases import answer_by_code
 
     assert command_preview.answer_mode(steps) == line
     assert line.startswith("Answer: written by code") == answer_by_code(number(steps))
@@ -1422,7 +1423,7 @@ def test_optional_and_typing_unions_render_their_members(tmp_path, output):
 def test_output_members_and_placeholder_member_read_unions_and_optionals():
     from typing import Optional, Union
 
-    from fastworkflow import planning_phases
+    from fastworkflow.planning import planning_phases
 
     class Book(BaseModel):
         titles: list[str] = []
@@ -1444,7 +1445,7 @@ def test_output_members_and_placeholder_member_read_unions_and_optionals():
     assert planning_phases.placeholder_member(Book) is Book
 
 
-LIBRARY = os.path.join(os.path.dirname(os.path.abspath(command_preview.__file__)), "examples", "library")
+LIBRARY = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(command_preview.__file__))), "examples", "library")
 
 
 def test_the_library_find_record_preview_renders_both_variants():

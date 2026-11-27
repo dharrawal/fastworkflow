@@ -18,8 +18,9 @@ import pytest
 from dotenv import dotenv_values
 
 import fastworkflow
-from fastworkflow import ModuleType, command_preview, workflow_agent
-from fastworkflow import planning_commands as pc
+from fastworkflow import ModuleType, workflow_agent
+from fastworkflow.planning import command_preview
+from fastworkflow.planning import planning_commands as pc
 from fastworkflow.command_routing import RoutingRegistry
 from fastworkflow.workflow import MissingGetParentError
 from tests.test_field_sources import ROOT, _build_workflow

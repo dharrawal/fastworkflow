@@ -14,7 +14,8 @@ import pytest
 from pydantic import Field
 
 import fastworkflow
-from fastworkflow import command_preview, command_writes, workflow_agent
+from fastworkflow.planning import command_preview
+from fastworkflow import command_writes, workflow_agent
 from fastworkflow.observability import tracing
 from fastworkflow.command_directory import CommandLoadError
 from fastworkflow.command_routing import RoutingRegistry

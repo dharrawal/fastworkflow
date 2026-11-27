@@ -132,7 +132,7 @@ def run_main(args):
 
     # Command files that do not load are skipped; say so before the first prompt (not only in the log). A workflow-wide
     # problem (a shared file such as startup_action.json or _workflow.py) stops the run, naming the file.
-    from fastworkflow.command_preview import load_problems
+    from fastworkflow.planning.command_preview import load_problems
 
     problems = load_problems(args.workflow_path)
     for problem in problems:
@@ -196,7 +196,7 @@ def run_main(args):
         args.workflow_path, args.startup_command, args.startup_action)
     if startup_action is None and not args.startup_command:
         # A command with no Signature runs only as the startup action: with none, nothing would run it.
-        from fastworkflow.command_preview import missing_startup_action_problem
+        from fastworkflow.planning.command_preview import missing_startup_action_problem
 
         if problem := missing_startup_action_problem(args.workflow_path):
             StartupProgress.end()

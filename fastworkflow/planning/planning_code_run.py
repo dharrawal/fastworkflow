@@ -79,8 +79,9 @@ class _Walk:
     """One run: the session, the workflow's planning commands and parameter classes, and the lines printed."""
 
     def __init__(self, folder: str, workflow):
-        from fastworkflow import planning_commands, workflow_agent
-        from fastworkflow import planning_phases as sp
+        from fastworkflow.planning import planning_commands
+        from fastworkflow import workflow_agent
+        from fastworkflow.planning import planning_phases as sp
         from fastworkflow.command_routing import RoutingRegistry
 
         self.folder = folder
@@ -362,7 +363,7 @@ class _Walk:
 
     def result(self, key, command, args, outputs, phases, indent):
         """What ``__result__`` returns for these phase outputs: ``(answer, Output)``."""
-        from fastworkflow import planning_commands as pc
+        from fastworkflow.planning import planning_commands as pc
 
         sp = self.sp
 

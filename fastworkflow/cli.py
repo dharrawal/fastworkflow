@@ -413,7 +413,7 @@ def add_command_parser(subparsers):
 
     # Lazy-import the preview generator only if the user actually invokes the command
     def _preview_main_wrapper(args):
-        from .command_preview import preview_main
+        from fastworkflow.planning.command_preview import preview_main
         code = preview_main(args)
         if code:
             sys.exit(code)
@@ -439,7 +439,7 @@ def add_command_parser(subparsers):
     )
 
     def _run_code_main_wrapper(args):
-        from .planning_code_run import run_code_main
+        from fastworkflow.planning.planning_code_run import run_code_main
         code = run_code_main(args)
         if code:
             sys.exit(code)

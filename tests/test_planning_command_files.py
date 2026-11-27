@@ -10,9 +10,10 @@ import textwrap
 import pytest
 from dspy.utils import DummyLM
 
-from fastworkflow import planning_commands as sc
-from fastworkflow import command_preview, workflow_agent
-from fastworkflow.planning_commands import PlanningCommandCallError
+from fastworkflow.planning import planning_commands as sc
+from fastworkflow.planning import command_preview
+from fastworkflow import workflow_agent
+from fastworkflow.planning.planning_commands import PlanningCommandCallError
 from tests.scripted_extractor import script_extractor
 from tests.test_text_planner_and_split import (  # noqa: F401 - workflow_env is a fixture
     RecordingTraceSink, _prompt, _session, _text_answer, workflow_env)

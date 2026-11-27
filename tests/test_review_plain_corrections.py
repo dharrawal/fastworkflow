@@ -17,10 +17,10 @@ from __future__ import annotations
 import pytest
 
 from fastworkflow._workflows.plan_metadata_extraction import _item_validation
-from fastworkflow.review_engine import EditRefused, apply_edits
-from fastworkflow.review_proposals import (
+from fastworkflow.review.review_engine import EditRefused, apply_edits
+from fastworkflow.review.review_proposals import (
     Means, ProposedEdit, SubTask, SubTaskInput, SubTaskProposal, _proposed_edits_to_engine, reconcile_dropped_items)
-from fastworkflow.review_step_refs import bare_step_numbers, removal_reading, step_numbers
+from fastworkflow.review.review_step_refs import bare_step_numbers, removal_reading, step_numbers
 
 
 pytestmark = pytest.mark.usefixtures("review_nouns_workflow")
@@ -283,7 +283,7 @@ def test_a_field_less_change_that_repeats_a_change_naming_its_field_is_dropped_n
 
 
 def test_a_field_less_change_with_no_twin_still_raises():
-    from fastworkflow.review_engine import EditParseError
+    from fastworkflow.review.review_engine import EditParseError
     plan = _four_step_plan()
     with pytest.raises(EditParseError, match="names no field"):
         _read(plan, "Make step 2 an application.", [{"op": "change", "index": 2, "field": "", "value": "application"}])
@@ -456,7 +456,7 @@ def test_leave_step_3_out_is_a_removal_and_leave_it_as_is_is_a_keep_and_bare_lea
 def test_an_accept_is_decided_before_any_step_reference_is_read(reply, monkeypatch):
     """``ProposalReplyPolicy.decide`` returns CONFIRM for an accept before the typed-edit parser, the reader and every
     guard. A real reader that fails the test if it is called, and a counter over the reading, show nothing ran."""
-    from fastworkflow import review_engine, review_proposals, review_step_refs
+    from fastworkflow.review import review_engine, review_proposals, review_step_refs
 
     calls: list[str] = []
     real = review_step_refs.removal_reading
@@ -485,8 +485,8 @@ def test_an_accept_is_decided_before_any_step_reference_is_read(reply, monkeypat
 # planner and the parameter extractor are scripted with what they returned in the benchmark (the planner read the
 # reply as a drop of step 1; the extractor took step 2 only), which is the seam the other reader tests use.
 
-from fastworkflow import review_engine as re_  # noqa: E402
-from fastworkflow.review_engine import REVISED, open_review  # noqa: E402
+from fastworkflow.review import review_engine as re_  # noqa: E402
+from fastworkflow.review.review_engine import REVISED, open_review  # noqa: E402
 
 from tests.test_approval_binding import annotated_library, no_live_model, todo  # noqa: E402,F401
 from tests.test_plan_reply_policy import (  # noqa: E402,F401
@@ -500,7 +500,7 @@ def wiring(request, gated):
     """How the free-text reader is wired: the session's (``store.edit_reader``, as ``_give_review_reader`` sets it for a
     review the gate opened) or the plan ``edit`` command's own, used when the store has none."""
     if request.param == "session reader":
-        from fastworkflow.review_proposals import model_edit_reader
+        from fastworkflow.review.review_proposals import model_edit_reader
 
         gated.store.edit_reader = model_edit_reader(planner_lm=lambda: getattr(gated.ctx, "_current_planner_lm", None))
     return request.param
@@ -556,7 +556,7 @@ class TestThroughTheReview:
 
 
 def test_a_reply_that_names_the_steps_needs_no_question_about_which():
-    from fastworkflow.review_proposals import certain_removals
+    from fastworkflow.review.review_proposals import certain_removals
 
     plan = _four_step_plan()
     assert certain_removals(plan, "Please just remove step 2, the one called Drill down.") == [2]
@@ -606,7 +606,7 @@ class TestNotARemovalThroughTheReview:
 @pytest.mark.usefixtures("initialized_fastworkflow", "no_live_model", "no_draft_extraction")
 @pytest.mark.parametrize("reply", ["yes", "accept", "looks good", "go ahead"])
 def test_a_first_reply_accept_through_the_review_is_confirmed_without_reading_steps(reply, gated, monkeypatch):
-    from fastworkflow import review_proposals, review_step_refs
+    from fastworkflow.review import review_proposals, review_step_refs
 
     calls: list[str] = []
     real = review_step_refs.removal_reading

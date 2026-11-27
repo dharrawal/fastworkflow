@@ -370,7 +370,7 @@ def open_workflow(source: Path, label: str, scratch: Path, *, context_path: str 
         root = getattr(importlib.import_module(module_name), class_name)()
         app.root = root
         app.record = root
-    from fastworkflow import planning_commands
+    from fastworkflow.planning import planning_commands
 
     planning = frozenset(planning_commands.visible_planning_commands(str(folder)))
     info = Path(source) / "___command_info"

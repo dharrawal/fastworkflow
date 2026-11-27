@@ -2,7 +2,7 @@
 
 Assistant mode has no intent detection: an EXACTLY named planning command runs there when it is
 mechanical, and is refused with the 3.4 message, extended by the reasons, when it needs the agent.
-The classifier (``fastworkflow.planning_needs_agent``) is tested here on the library's real planning
+The classifier (``fastworkflow.planning.planning_needs_agent``) is tested here on the library's real planning
 commands and on copies with a mechanical and a needs-agent command added.
 
 The end-to-end dispatch tests run the real executor: a mechanical planning command runs by its exact
@@ -17,7 +17,7 @@ import pytest
 
 import fastworkflow
 from fastworkflow.command_executor import CommandExecutor
-from fastworkflow.planning_needs_agent import planning_command_needs_agent, refusal_message
+from fastworkflow.planning.planning_needs_agent import planning_command_needs_agent, refusal_message
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 from tests.test_planning_command_code_steps import Model
 from tests.test_step_helpers import (

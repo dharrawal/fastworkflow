@@ -23,7 +23,7 @@ import pytest
 import fastworkflow
 from fastworkflow import no_agent_mode
 from fastworkflow.parameters import parameter_clarification as pcl
-from fastworkflow import planning_commands as pc
+from fastworkflow.planning import planning_commands as pc
 from fastworkflow.parameters.parameter_clarification import Extraction
 from fastworkflow.parameters import ask, read
 from tests import parameter_ask_read_corpus as corpus
@@ -427,7 +427,7 @@ def test_a_refused_value_that_contains_is_keeps_its_value_and_its_reason(command
 
 
 def test_no_message_parser_is_left_in_the_planning_side():
-    import fastworkflow.planning_commands as module
+    import fastworkflow.planning.planning_commands as module
 
     assert not hasattr(module, "_refusal_gap") and not hasattr(module, "_ARGUMENT_REFUSAL")
     assert not hasattr(module, "_MISSING_ARGUMENT")

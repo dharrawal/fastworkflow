@@ -10,10 +10,10 @@ from dspy.utils import DummyLM
 import fastworkflow
 from fastworkflow import intent_loop, waiting
 from fastworkflow.parameters import parameter_clarification
-from fastworkflow import review_engine as re_
-from fastworkflow import review_proposals
-from fastworkflow.review_engine import CONFIRMED, DECLINED, REVISED
-from fastworkflow.review_proposals import Means, ProposedEdit, SubTask, SubTaskInput, SubTaskProposal
+from fastworkflow.review import review_engine as re_
+from fastworkflow.review import review_proposals
+from fastworkflow.review.review_engine import CONFIRMED, DECLINED, REVISED
+from fastworkflow.review.review_proposals import Means, ProposedEdit, SubTask, SubTaskInput, SubTaskProposal
 from fastworkflow.turn import TurnStatus
 
 from tests.test_approval_binding import _finish, annotated_library, no_live_model, todo  # noqa: F401
@@ -124,7 +124,7 @@ def _no_writes(monkeypatch) -> None:
 def test_policy_decide_confirm_paraphrase(gated, monkeypatch):
     _no_writes(monkeypatch)
     record = _open_review_two_step(gated, monkeypatch)
-    from fastworkflow.review_engine import Verdict, proposal_of, reply_policy
+    from fastworkflow.review.review_engine import Verdict, proposal_of, reply_policy
 
     decision = reply_policy(
         record.kind,
@@ -137,7 +137,7 @@ def test_policy_decide_confirm_paraphrase(gated, monkeypatch):
 
 
 def test_confirm_paraphrase(gated, monkeypatch):
-    from fastworkflow.review_engine import reply_to_proposal
+    from fastworkflow.review.review_engine import reply_to_proposal
 
     _no_writes(monkeypatch)
     record = _open_review_two_step(gated, monkeypatch)
@@ -231,7 +231,7 @@ def test_item_slot_jev_escape(intent, gated, monkeypatch, planner):
 
 
 def test_cap_turn_confirm_paraphrase(gated, monkeypatch):
-    from fastworkflow.review_engine import reply_to_proposal
+    from fastworkflow.review.review_engine import reply_to_proposal
 
     _no_writes(monkeypatch)
     record = _open_review_two_step(gated, monkeypatch)
@@ -268,14 +268,14 @@ def test_restart_during_edit_item_slot(gated, monkeypatch, planner):
     restored.bind_app_workflow(restored_wf)
     restored.apply_serialized_state(blob)
     assert restored._waiting.kind == "review" and restored._waiting.payload["slot"] is not None
-    restored_store = __import__("fastworkflow.approval_binding", fromlist=["store_for"]).store_for(restored_wf)
+    restored_store = __import__("fastworkflow.review.approval_binding", fromlist=["store_for"]).store_for(restored_wf)
     restored_store.plan_cme = restored._plan_cme
     restored_store.plan_workflow = restored._plan_workflow
     restored._current_planner_lm = _PlannerLM(
         [{"edits": [{"op": "change", "index": 2, "field": "goal", "value": "make it about trains instead"}]}]
     )
-    from fastworkflow import approval_binding as ab
-    from fastworkflow.review_engine import reply_to_proposal
+    from fastworkflow.review import approval_binding as ab
+    from fastworkflow.review.review_engine import reply_to_proposal
 
     restored_record = ab.store_for(restored_wf).active()
     assert restored_record is not None
@@ -286,7 +286,7 @@ def test_restart_during_edit_item_slot(gated, monkeypatch, planner):
 
 
 def test_look_up_on_read_command_preserves_goal(gated, monkeypatch):
-    from fastworkflow.review_engine import open_review
+    from fastworkflow.review.review_engine import open_review
 
     item = SubTask(
         goal="record a fact",
@@ -304,7 +304,7 @@ def test_look_up_on_read_command_preserves_goal(gated, monkeypatch):
 
 
 def test_look_up_on_write_command_rematches_without_writes(gated, monkeypatch):
-    from fastworkflow.review_engine import open_review
+    from fastworkflow.review.review_engine import open_review
 
     item = SubTask(
         goal="add a loan for Ann",
@@ -353,13 +353,13 @@ def test_parse_explicit_index_step_prefix_with_explanation():
     ],
 )
 def test_affirmative_restate_goal_not_corrective(phrase):
-    from fastworkflow.review_engine import _affirmative_accept_cue
+    from fastworkflow.review.review_engine import _affirmative_accept_cue
 
     assert _affirmative_accept_cue(phrase)
 
 
 def test_yes_shown_but_not_applied_is_accept_cue():
-    from fastworkflow.review_engine import _affirmative_accept_cue
+    from fastworkflow.review.review_engine import _affirmative_accept_cue
 
     text = (
         "Yes—finding summary first, then Catherine Taylor offboarding with corrections "
@@ -369,13 +369,13 @@ def test_yes_shown_but_not_applied_is_accept_cue():
 
 
 def test_compound_drop_edit_plain_drop_only():
-    from fastworkflow.review_engine import _compound_drop_edit
+    from fastworkflow.review.review_engine import _compound_drop_edit
 
     assert not _compound_drop_edit("drop step 2", ["2"])
 
 
 def test_compound_drop_edit_semicolon_and_extra_step():
-    from fastworkflow.review_engine import _compound_drop_edit
+    from fastworkflow.review.review_engine import _compound_drop_edit
 
     text = "Drop step 2; step 1 alone should return how many logins arrive on the RLIQA feed."
     assert _compound_drop_edit(text, ["2"])
@@ -387,7 +387,7 @@ def test_compound_drop_edit_is_one_organization_triggers_edit_reader(
     from fastworkflow._workflows.plan_metadata_extraction._commands.ProposalReview.drop import (
         Signature as DropSignature,
     )
-    from fastworkflow.review_engine import Change, Drop, ProposalReplyPolicy, Verdict, proposal_of
+    from fastworkflow.review.review_engine import Change, Drop, ProposalReplyPolicy, Verdict, proposal_of
 
     record = _open_review_two_step(gated, monkeypatch)
     proposal = proposal_of(record)
@@ -430,7 +430,7 @@ def test_compound_drop_edit_is_one_organization_triggers_edit_reader(
 
 def test_slot_whole_plan_confirm_clears_edit_slot(gated, monkeypatch, planner):
     from fastworkflow._workflows.plan_metadata_extraction._commands.ProposalReview.edit import Signature as EditSignature
-    from fastworkflow.review_engine import reply_to_proposal
+    from fastworkflow.review.review_engine import reply_to_proposal
     from fastworkflow.parameters.signatures import NOT_FOUND
 
     _no_writes(monkeypatch)
@@ -452,7 +452,7 @@ def test_slot_whole_plan_confirm_clears_edit_slot(gated, monkeypatch, planner):
 
 
 def test_yes_list_rights_confirms_single_step_review(gated, monkeypatch, planner):
-    from fastworkflow.review_engine import open_review, reply_to_proposal
+    from fastworkflow.review.review_engine import open_review, reply_to_proposal
 
     goal = "List every right Brent Randolph holds for recertification."
     item = SubTask(
@@ -473,7 +473,7 @@ def test_drop_fallback_keeps_valid_extraction_when_edit_reader_opens_slot(
     from fastworkflow._workflows.plan_metadata_extraction._commands.ProposalReview.drop import (
         Signature as DropSignature,
     )
-    from fastworkflow.review_engine import Change, Drop, ProposalReplyPolicy, Verdict, proposal_of
+    from fastworkflow.review.review_engine import Change, Drop, ProposalReplyPolicy, Verdict, proposal_of
 
     record = _open_review_two_step(gated, monkeypatch)
     proposal = proposal_of(record)
@@ -532,7 +532,7 @@ def test_resolve_proposal_step_last_and_ordinal_phrases():
 
 
 def test_yes_restate_goal_confirms_without_readback(gated, monkeypatch, planner):
-    from fastworkflow.review_engine import open_review, reply_to_proposal
+    from fastworkflow.review.review_engine import open_review, reply_to_proposal
 
     goal = "Is DrChrono onboarded as an application here?"
     item = SubTask(
@@ -557,7 +557,7 @@ def test_yes_restate_goal_confirms_without_readback(gated, monkeypatch, planner)
 
 
 def test_noop_edit_non_affirmative_reprompts(gated, monkeypatch, planner):
-    from fastworkflow.review_engine import AWAITING, open_review, reply_to_proposal
+    from fastworkflow.review.review_engine import AWAITING, open_review, reply_to_proposal
 
     goal = "Is DrChrono onboarded as an application here?"
     item = SubTask(
@@ -622,7 +622,7 @@ def test_not_just_decline_routes_to_edit_reader(gated, monkeypatch, planner):
 
 
 def test_q1_and_q2_sub_task_hints_stay_natural(gated, monkeypatch):
-    from fastworkflow.review_engine import reply_to_proposal
+    from fastworkflow.review.review_engine import reply_to_proposal
 
     record = _open_review_two_step(gated, monkeypatch)
     assert re_.SUB_TASK_PROMPT_HINT in record.rendering
@@ -636,7 +636,7 @@ def test_q1_and_q2_sub_task_hints_stay_natural(gated, monkeypatch):
 
 
 def test_q3_reprompt_uses_structured_fallback_and_clears_slot(gated, monkeypatch):
-    from fastworkflow.review_engine import reply_to_proposal
+    from fastworkflow.review.review_engine import reply_to_proposal
 
     record = _open_review_two_step(gated, monkeypatch)
     reply_to_proposal(gated.ctx, gated.store, record, "unclear one")
@@ -650,7 +650,7 @@ def test_q3_reprompt_uses_structured_fallback_and_clears_slot(gated, monkeypatch
 
 
 def test_q3_add_after_and_change_without_planner(gated, monkeypatch):
-    from fastworkflow.review_engine import reply_to_proposal
+    from fastworkflow.review.review_engine import reply_to_proposal
 
     record = _open_review_two_step(gated, monkeypatch)
     gated.ctx._current_planner_lm = _PlannerLM([{"edits": "must not run"}])
@@ -670,7 +670,7 @@ def test_q3_add_after_and_change_without_planner(gated, monkeypatch):
 
 
 def test_q3_answer_structured_edit_without_planner(gated, monkeypatch):
-    from fastworkflow.review_engine import reply_to_proposal
+    from fastworkflow.review.review_engine import reply_to_proposal
 
     record = _open_review_two_step(gated, monkeypatch)
     gated.ctx._current_planner_lm = _PlannerLM([{"edits": "must not run"}])
@@ -689,7 +689,7 @@ def test_q3_answer_structured_edit_without_planner(gated, monkeypatch):
 
 
 def test_tag_feed_confirmations_on_q1_with_plan(gated, monkeypatch):
-    from fastworkflow.review_engine import open_review, reply_to_proposal
+    from fastworkflow.review.review_engine import open_review, reply_to_proposal
 
     item = SubTask(
         goal="Apply audit-scope tag to the HR feed",

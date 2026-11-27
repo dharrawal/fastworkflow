@@ -922,7 +922,7 @@ def train_main(args):
         exit(1)
 
     # A command file that does not load would be missing from the model: stop before any training work.
-    from fastworkflow.command_preview import load_problems
+    from fastworkflow.planning.command_preview import load_problems
 
     if problems := load_problems(workflow_path):
         print(f"{Fore.RED}Error: {len(problems)} command file(s) do not load; training stopped before it started:"

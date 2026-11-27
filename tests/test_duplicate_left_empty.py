@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow import planning_commands as sc
+from fastworkflow.planning import planning_commands as sc
 from fastworkflow import workflow_agent
 from fastworkflow.parameters import ask
 from fastworkflow.parameters import check as one_guard

@@ -15,8 +15,9 @@ import socket
 
 import pytest
 
-from fastworkflow import approval_binding, no_agent_mode
-from fastworkflow.approval_binding import Surface
+from fastworkflow.review import approval_binding
+from fastworkflow import no_agent_mode
+from fastworkflow.review.approval_binding import Surface
 from fastworkflow.turn import TurnStatus
 from fastworkflow.workflow_execution_context import NOT_RUN_ARTIFACT, UsePlanError, WorkflowExecutionContext
 from tests.scripted_extractor import ScriptedExtractor, script_extractor

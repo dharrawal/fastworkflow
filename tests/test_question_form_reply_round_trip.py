@@ -24,7 +24,7 @@ from __future__ import annotations
 import dspy
 import pytest
 
-from fastworkflow import planning_commands as pc
+from fastworkflow.planning import planning_commands as pc
 from fastworkflow import workflow_agent
 from fastworkflow.turn import TurnStatus
 from tests.test_approval_binding import (  # noqa: F401 - the real agent on the library copy, and the guards

@@ -29,8 +29,8 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator,
 from fastworkflow.utils import subtask_pool
 from fastworkflow.observability import tracing
 from fastworkflow import turn_cache, turn_progress
-from fastworkflow.review_step_refs import NUMBER_LIST as _NUMBER_LIST, removal_reading
-from fastworkflow.review_engine import (
+from fastworkflow.review.review_step_refs import NUMBER_LIST as _NUMBER_LIST, removal_reading
+from fastworkflow.review.review_engine import (
     KIND_SUB_TASKS, Add, Change, Drop, EditParseError, EditRefused, Merge, NoEditsRead, Proposal,
     Split, _reader_notes, _SafeValues, note_reader_drop, register_proposal)
 
@@ -676,7 +676,8 @@ def rechecked(workflow, item: "SubTask") -> "SubTask":
     the values an earlier part produces are nobody's to give), and when they pass and no value waits on an earlier part,
     the ``Input``'s validators (``checked_arguments``, the checks the run makes on these values). Only a planning means
     has a check; anything else, or a check that cannot be made, leaves *item* as it is."""
-    from fastworkflow import intent_loop, planning_commands
+    from fastworkflow import intent_loop
+    from fastworkflow.planning import planning_commands
     from fastworkflow.parameters import ask as one_ask
 
     if item.means.kind != MEANS_PLANNING or workflow is None:
@@ -1021,7 +1022,8 @@ def drafted_item(workflow, item: SubTask, sub_task: str, earlier: list[SubTask],
     """*item* with its inputs drafted from *sub_task* for its means (``draft_inputs``), its planning check, and the means
     it was drafted for (``drafted_means``). With no draft (drafting off, from scratch, a failed draft) the inputs are
     empty and a planning pick's check is ``check_planned_arguments`` of no arguments."""
-    from fastworkflow import intent_loop, planning_commands, run_listing
+    from fastworkflow import intent_loop, run_listing
+    from fastworkflow.planning import planning_commands
 
     check = ""
     missing: list[str] = []
@@ -1109,7 +1111,8 @@ def _input_text(value: Any) -> str:
 def _producers(workflow, means: Means, earlier: list[SubTask]) -> dict[str, int]:
     """``{field: N}``: the fields of *means*'s ``Input`` whose declared producer (``from_command_output``, resolved as
     ``available_from``) an earlier sub-task N runs, as its command or as a step of its planning command; the latest N."""
-    from fastworkflow import ModuleType, RoutingRegistry, planning_commands
+    from fastworkflow import ModuleType, RoutingRegistry
+    from fastworkflow.planning import planning_commands
 
     folder = workflow.folderpath
     params_class = RoutingRegistry.get_definition(folder).get_command_class(
@@ -1214,7 +1217,7 @@ def _partial_inputs(workflow, item: SubTask, sub_task: str, values: dict, fields
     refusal (``planning_commands.argument_gaps``). A refusal that names no argument (a rule of the planning command)
     keeps no value, as before. The third result names the required arguments that are simply missing (*missing*: the
     extractor's, when it found only those), for the review line."""
-    from fastworkflow import planning_commands
+    from fastworkflow.planning import planning_commands
 
     if item.means.kind != MEANS_PLANNING:
         return [], refusal, tuple(missing)
@@ -1259,7 +1262,7 @@ def _typed_fallback_values(workflow, item: SubTask, sub_task: str, values: dict,
     fallback ``typed_planning_call`` runs), or None when the means is not a planning command, the fallback fills
     nothing, or the checks still refuse: the extractor's refusal then stands. Never raises: the draft is advisory.
     *left_empty* (when given) takes the duplicate rule's notes of the fallback's checks."""
-    from fastworkflow import planning_commands
+    from fastworkflow.planning import planning_commands
 
     if item.means.kind != MEANS_PLANNING:
         return None
@@ -1297,7 +1300,7 @@ def accepted_subtask_proposal(workflow) -> Optional[SubTaskProposal]:
     The hand-off hook (fix-3rsq.plan-review.2.9): the accepted record is CONFIRMED and was opened in the current turn.
     The gate also keeps it on the context as ``_turn_subtask_plan`` (the draft for a turn that was not reviewed).
     """
-    from fastworkflow import approval_binding, review_engine
+    from fastworkflow.review import approval_binding, review_engine
 
     store = approval_binding.store_for(workflow)
     if store is None:
@@ -2366,8 +2369,8 @@ def _step_list_text(steps: list[int]) -> str:
 def _guard_switch_clause_in_goal(proposed: list[ProposedEdit], reply_text: str) -> None:
     """Refuse a reader edit whose goal is, or ends with, an explicit plan-switch clause copied from the reply (``step 7: use
     NAME``): the clause asks to change a plan, and as goal text it would damage the step it lands in (bd fix-1ma8.1)."""
-    from fastworkflow.review_engine import switch_clause_in_goal_message
-    from fastworkflow.review_plan_switch import goal_copies_switch_clause
+    from fastworkflow.review.review_engine import switch_clause_in_goal_message
+    from fastworkflow.review.review_plan_switch import goal_copies_switch_clause
 
     for edit in proposed:
         goals = ([edit.value] if edit.op in ("add", "merge") or (edit.op == "change" and edit.field == "goal")
@@ -2651,7 +2654,8 @@ def _known_means(text: str) -> str:
     resolver: case, spaces, ``_`` and the context prefix ignored), as ``<kind>:<qualified name>``. A name that resolves
     to no command, or to several, raises ``UnknownMeansEdit`` with the names (bd fix-ftdl.11): the step is never turned
     into an ad hoc one. Unchecked when no workflow is in scope or its commands cannot be read."""
-    from fastworkflow import no_agent_mode, review_plan_switch
+    from fastworkflow import no_agent_mode
+    from fastworkflow.review import review_plan_switch
 
     stripped = (text or "").strip()
     if stripped == MEANS_FROM_SCRATCH:
@@ -2793,7 +2797,7 @@ def _validated_reader_edits(proposal: Proposal, proposed: list, text: str) -> li
     fields, the inputs and the means each edit names (``_engine_edit``: ``InvalidReadEdit``, ``UnknownMeansEdit``), the
     edited proposal's schema and item numbers (``apply_edits``) and the choices its inputs declare (``refused_choice_message``). A failure of these
     checks raises ``_Unappliable`` (the reader is asked once more); the guards' questions to the user raise as they are."""
-    from fastworkflow.review_engine import apply_edits
+    from fastworkflow.review.review_engine import apply_edits
 
     try:
         edits = _proposed_edits_to_engine(proposal, proposed, reply_text=text)
@@ -2969,7 +2973,7 @@ def reviewed_arguments(workflow, command, item: SubTask, resolved: ResolvedInput
     is what the user said, never the answer text of an earlier part (bd fix-ftdl.10). A refusal is returned: the
     caller hands the sub-task to the agent with it (F2) and records the deviation.
     """
-    from fastworkflow import planning_commands
+    from fastworkflow.planning import planning_commands
     from fastworkflow.run_listing import ArgumentCheck
 
     reviewed = reviewed_values(workflow, item, resolved, [p.name for p in command.params if p.required],

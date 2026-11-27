@@ -10,10 +10,11 @@ from __future__ import annotations
 import pytest
 
 import fastworkflow
-from fastworkflow import command_preview, no_agent_mode
+from fastworkflow.planning import command_preview
+from fastworkflow import no_agent_mode
 from fastworkflow.command_executor import CommandExecutor
 from fastworkflow.planning import run, when
-from fastworkflow.planning_commands import PlanningCommandCallPlan, call_phases
+from fastworkflow.planning.planning_commands import PlanningCommandCallPlan, call_phases
 from fastworkflow.turn import TurnStatus
 from fastworkflow.workflow_execution_context import (
     NOT_RUN_ARTIFACT, TURN_PARTS_ARTIFACT, WorkflowExecutionContext)
@@ -321,8 +322,8 @@ def test_a_nested_stop_bubbles_up_as_the_parents_stop(tmp_path, initialized_fast
 # ---------------------------------------------------------------- a plain single command answers from its response
 
 def test_a_plain_command_in_an_agent_turn_answers_from_its_own_response(library_env, monkeypatch):
-    from fastworkflow import review_proposals
-    from fastworkflow.review_proposals import Means, SubTask, SubTaskInput, SubTaskProposal
+    from fastworkflow.review import review_proposals
+    from fastworkflow.review.review_proposals import Means, SubTask, SubTaskInput, SubTaskProposal
 
     item = SubTask(goal="find the book Dune", means=Means(kind="plain", name="Library/find_book"),
                    inputs=[SubTaskInput(name="query", value="Dune")])

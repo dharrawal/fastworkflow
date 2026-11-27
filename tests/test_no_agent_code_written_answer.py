@@ -140,7 +140,7 @@ def test_the_statement_bounds_the_result_text_of_all_steps_together():
 
 
 def test_a_page_cap_stop_states_the_rows_read_and_the_total(library_env, monkeypatch):
-    from fastworkflow import planning_phases
+    from fastworkflow.planning import planning_phases
 
     lib = library_env.wf.root
     book_cls = type(lib.books["b1"])

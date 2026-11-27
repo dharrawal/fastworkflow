@@ -18,8 +18,9 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow import command_declarations, command_preview, command_writes, workflow_agent
-from fastworkflow import planning_commands as pc
+from fastworkflow import command_declarations, command_writes, workflow_agent
+from fastworkflow.planning import command_preview
+from fastworkflow.planning import planning_commands as pc
 from fastworkflow.approval_annotations import command_approval
 from fastworkflow.command_declarations import UserApproval
 from fastworkflow.command_directory import CommandLoadError

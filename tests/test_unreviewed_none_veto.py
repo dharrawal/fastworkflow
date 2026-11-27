@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import pytest
 
-from fastworkflow import review_proposals
-from fastworkflow.review_proposals import MEANS_FROM_SCRATCH, MEANS_PLANNING
+from fastworkflow.review import review_proposals
+from fastworkflow.review.review_proposals import MEANS_FROM_SCRATCH, MEANS_PLANNING
 from fastworkflow.turn import TurnStatus
 from tests.test_approval_binding import (  # noqa: F401 - the real agent on the annotated library copy, and the guards
     _finish, annotated_library, no_live_model, no_model_call_for_parameters, todo)
@@ -86,7 +86,7 @@ def test_unreviewed_and_no_match_leaves_the_sub_task_to_the_agent(gated, monkeyp
 
 
 def test_a_host_surface_turn_binds_only_a_match_too(gated, monkeypatch):
-    from fastworkflow.approval_binding import Surface
+    from fastworkflow.review.approval_binding import Surface
     _jev(monkeypatch, NONE)
     _split_into(monkeypatch, [EMMA, JOKE])
     gated.script.steps = _finish() + _finish()

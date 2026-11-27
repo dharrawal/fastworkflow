@@ -19,7 +19,7 @@ import pytest
 from pydantic import BaseModel, Field, model_validator
 
 import fastworkflow
-from fastworkflow import planning_commands as pc
+from fastworkflow.planning import planning_commands as pc
 from fastworkflow.parameters import check
 from tests.test_argument_checks import _command
 
@@ -337,7 +337,7 @@ def compare_workflow(tmp_path, monkeypatch):
 
 
 def _compare_step(goal: str = REQUEST):
-    from fastworkflow.review_proposals import Means, SubTask, SubTaskInput
+    from fastworkflow.review.review_proposals import Means, SubTask, SubTaskInput
 
     return SubTask(goal=goal, means=Means(kind="planning", name="compare"),
                    inputs=[SubTaskInput(name="record_a", value="Payroll"),
@@ -345,7 +345,7 @@ def _compare_step(goal: str = REQUEST):
 
 
 def test_the_review_check_line_on_a_tie_shows_the_validators_message(compare_workflow):
-    from fastworkflow import review_proposals as rp
+    from fastworkflow.review import review_proposals as rp
 
     item = rp.rechecked(compare_workflow(SAME_WITH_FIELD), _compare_step())
     assert item.check == SAME_MESSAGE.format(value="Payroll")
@@ -353,14 +353,14 @@ def test_the_review_check_line_on_a_tie_shows_the_validators_message(compare_wor
 
 
 def test_the_review_check_line_naming_no_field_shows_the_validators_message(compare_workflow):
-    from fastworkflow import review_proposals as rp
+    from fastworkflow.review import review_proposals as rp
 
     item = rp.rechecked(compare_workflow(SAME.replace('{field}', "")), _compare_step())
     assert item.check == item.refused_without_field == SAME_MESSAGE.format(value="Payroll")
 
 
 def test_the_review_check_line_keeps_the_duplicate_rule_when_the_validators_pass(compare_workflow):
-    from fastworkflow import review_proposals as rp
+    from fastworkflow.review import review_proposals as rp
 
     item = rp.rechecked(compare_workflow('if self.record_a == "Archive": raise fastworkflow.Refused("no archive")'),
                         _compare_step())

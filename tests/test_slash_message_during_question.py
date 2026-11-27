@@ -13,7 +13,7 @@ from __future__ import annotations
 import pytest
 
 import fastworkflow
-from fastworkflow import approval_binding as ab
+from fastworkflow.review import approval_binding as ab
 from fastworkflow import workflow_agent
 from fastworkflow.turn import TurnStatus
 from fastworkflow.workflow_execution_context import (

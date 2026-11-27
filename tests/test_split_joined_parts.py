@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import pytest
 
-from fastworkflow import review_proposals
+from fastworkflow.review import review_proposals
 from fastworkflow.split_merge import JoinedSubtask, reduce_to_cap
 from fastworkflow.turn import TurnStatus
 from fastworkflow.workflow_agent import MAX_SUBTASKS

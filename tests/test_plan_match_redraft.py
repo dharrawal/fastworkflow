@@ -12,9 +12,9 @@ from types import SimpleNamespace
 import pytest
 
 import fastworkflow
-from fastworkflow import review_proposals
-from fastworkflow.review_engine import ProposalReplyPolicy, Verdict, apply_edits
-from fastworkflow.review_proposals import Means, SubTaskInput
+from fastworkflow.review import review_proposals
+from fastworkflow.review.review_engine import ProposalReplyPolicy, Verdict, apply_edits
+from fastworkflow.review.review_proposals import Means, SubTaskInput
 from tests.test_approval_binding import annotated_library  # noqa: F401
 from tests.test_drafted_subtask_inputs import EMMA, JOKE, _framework, library, scripted  # noqa: F401
 from tests.conftest import no_local_model, script_matcher

@@ -922,7 +922,7 @@ def _start_argument_checks(app_workflow, extractor, command_name: str, params_cl
     """``(future, pool)`` of ``check_verdicts`` for *text*, started in a copy of this thread's context; or
     ``(None, None)`` when there is no Jev LM or the command has no ``verify`` parameter (nothing to start)."""
     import concurrent.futures
-    from fastworkflow import planning_commands
+    from fastworkflow.planning import planning_commands
     from fastworkflow.workflow_agent import _jev_lm
 
     lm = _jev_lm()

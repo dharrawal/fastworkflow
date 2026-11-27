@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import pytest
 
-from fastworkflow import approval_binding as ab
-from fastworkflow.approval_binding import Surface
+from fastworkflow.review import approval_binding as ab
+from fastworkflow.review.approval_binding import Surface
 from fastworkflow.planning import run, when
 from fastworkflow.turn import TurnStatus
 from tests.test_approval_binding import (  # noqa: F401 - fixtures and helpers

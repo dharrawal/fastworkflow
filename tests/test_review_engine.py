@@ -18,16 +18,16 @@ from typing import Optional
 import pytest
 from pydantic import BaseModel, Field
 
-from fastworkflow import approval_binding as ab
-from fastworkflow import review_engine as re_
-from fastworkflow.review_engine import (
+from fastworkflow.review import approval_binding as ab
+from fastworkflow.review import review_engine as re_
+from fastworkflow.review.review_engine import (
     AWAITING, CONFIRMED, DECLINED, EXECUTED, EXPIRED, INVALIDATED, KIND_ACTION,
     KIND_SUB_TASKS, REVISED, Change, Drop, EditParseError, IllegalTransition,
     Proposal, ReviewError, ReviewRecord, ReviewStore, Verdict, apply_edits, audit_attributes,
     fingerprint, link, open_review, parse_edits, propagate, proposal_of, register_proposal,
     reply_policy, reply_to_proposal, rendering_hash, set_model_interpreter, stale_upstream,
 )
-from fastworkflow.approval_binding import Surface
+from fastworkflow.review.approval_binding import Surface
 from fastworkflow.turn import TurnStatus
 from fastworkflow.observability import tracing
 from tests.test_approval_binding import annotated_library, no_live_model, no_model_call_for_parameters, todo  # noqa: F401,F811
@@ -184,7 +184,7 @@ def test_the_fingerprint_is_the_same_across_processes_and_key_order():
     proposal = _tasks("alpha", "beta")
     here = proposal.fingerprint()
     code = ("import json,sys\n"
-            "from fastworkflow import review_engine as r\n"
+            "from fastworkflow.review import review_engine as r\n"
             "print(r.fingerprint(json.loads(sys.argv[1])))")
     binding = json.dumps(proposal.binding())
     other = subprocess.run([sys.executable, "-I", "-c", code, binding], capture_output=True, text=True, check=True)

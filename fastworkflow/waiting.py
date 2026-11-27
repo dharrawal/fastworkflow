@@ -394,7 +394,7 @@ def can_review(ctx: Any) -> bool:
     can be accepted: the host approval path takes a reply to a review only from a verified end user
     (``Surface.satisfies_end_user``); with an unverified one the review would be a dead end, so none is opened.
     Unattended turns stay unreviewed. An agent-to-agent turn reaches the framework as an unattended turn."""
-    from fastworkflow import approval_binding
+    from fastworkflow.review import approval_binding
 
     store = approval_binding.store_for(ctx._app_workflow)
     host = store is not None and store.surface.kind == "host"

@@ -95,7 +95,7 @@ def is_fast_path(intent: PartIntent, workflow) -> bool:
     or carries an approval mark (``intent_loop.unconfirmed_pick``), unless its approval question will be asked anyway:
     that question is its yes.
     The part runs through the agent's command tool, so the approval is read for an agent's call."""
-    from fastworkflow.approval_binding import Origin
+    from fastworkflow.review.approval_binding import Origin
 
     return (intent.outcome == MATCH and intent.decided_by in FAST_PATH_DECIDERS
             and (intent.decided_by == BY_EXACT_NAME or intent.kind != KIND_PLANNING)
@@ -273,7 +273,8 @@ def _values_command(turn: Turn, item):
     a command with parameters (``planning_commands.execution_command``). With an agent model the agent finds an
     execution command's missing value."""
     from fastworkflow.parameters import parameter_clarification as loops
-    from fastworkflow import planning_commands, review_proposals
+    from fastworkflow.planning import planning_commands
+    from fastworkflow.review import review_proposals
 
     if item.means.kind == review_proposals.MEANS_PLANNING:
         return planning_commands.planning_command(turn.workflow.folderpath, item.means.name), loops.KIND_PLANNING
@@ -291,7 +292,8 @@ def _values_question(resolution: PlanResolution, plan, turn: Turn) -> Optional[s
     reader, the same asking rule. A pinned plan is always asked (every parameter shown, ``yes`` runs). With an agent model,
     a part whose inputs were not drafted (``FW_DRAFT_ARGUMENTS`` off) is not asked: the run reads its values."""
     from fastworkflow.parameters import parameter_clarification as loops
-    from fastworkflow import planning_commands, review_proposals
+    from fastworkflow.planning import planning_commands
+    from fastworkflow.review import review_proposals
 
     item = plan.items[resolution.index]
     if not turn.can_ask:
@@ -378,7 +380,7 @@ def _drop(resolution: PlanResolution, plan, reason: str):
 def _overlay(plan, index: int, given: dict, workflow):
     """The values the user's replies gave put on the part's item, as its inputs: the user's own (not drafted). Its check
     is worked out again from the inputs (``review_proposals.rechecked``), so the review shows what they now earn."""
-    from fastworkflow import review_proposals
+    from fastworkflow.review import review_proposals
 
     if not given:
         return plan
@@ -391,7 +393,7 @@ def _overlay(plan, index: int, given: dict, workflow):
 
 def _bind(plan, index: int, name: str, kind: str, turn: Turn):
     """The part at *index* bound to the command the user picked, its inputs drafted from its text."""
-    from fastworkflow import review_proposals
+    from fastworkflow.review import review_proposals
 
     item = plan.items[index]
     means = review_proposals.Means(kind=review_proposals.MEANS_PLANNING if kind == KIND_PLANNING
@@ -407,7 +409,7 @@ def _take_choice(resolution: PlanResolution, held, reply: str, plan, turn: Turn)
     """The reply to the which-command question, read by the intent loop's one reader (``intent_loop.answer``). Only the
     pick is read (words after a picked name are not its values, on this path and the CME's): the part's values are drafted
     from its own text and asked for after."""
-    from fastworkflow import planning_commands
+    from fastworkflow.planning import planning_commands
 
     record = held.payload["record"]
     names = [each["name"] for each in record["choices"]]
@@ -447,7 +449,7 @@ def ask_misunderstood(resolution: PlanResolution, plan, turn: Turn):
     """The reply said the command was not the one meant: the part goes back to the which-command question (every command
     of the part's scope the plan can run, the intent loop's misunderstanding question). The part is bound to nothing
     until the user picks; ``none`` leaves it ad hoc and unchosen (the deterministic path aborts instead)."""
-    from fastworkflow import review_proposals
+    from fastworkflow.review import review_proposals
 
     part = resolution.parts[resolution.index]
     item = plan.items[resolution.index]
@@ -467,7 +469,7 @@ def ask_misunderstood_running_part(text: str, turn: Turn):
     "you misunderstood" while the part ran (nothing of it ran): a one-part resolution of *text* and its from-scratch
     plan, built with no model call, put back to the which-command question (``ask_misunderstood``). The reply to it is
     read by ``take_reply`` like any which-command reply, then the part's values, then the run."""
-    from fastworkflow import review_proposals
+    from fastworkflow.review import review_proposals
 
     resolution = PlanResolution(parts=[{
         "text": text, "outcome": NONE, "ambiguous": [], "planning_scores": {}, "state": PART_OPEN, "chosen": False,
@@ -479,7 +481,8 @@ def ask_misunderstood_running_part(text: str, turn: Turn):
 
 def _take_values(resolution: PlanResolution, held, reply: str, plan, turn: Turn):
     from fastworkflow.parameters import parameter_clarification as loops
-    from fastworkflow import planning_commands, review_proposals
+    from fastworkflow.planning import planning_commands
+    from fastworkflow.review import review_proposals
 
     loop = loops.ParameterLoop.from_state(held.payload["loop"])
     item = plan.items[resolution.index]

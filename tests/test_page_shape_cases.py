@@ -33,7 +33,7 @@ def test_the_composed_card_uses_the_same_definition_plus_two_scalar_columns(case
 def test_the_pages_legacy_fallback_names_exactly_the_frameworks_own_review_commands():
     """The results view leaves out an output the server marks ``framework: true``. For a record WITHOUT that key
     (a turn stored before the marker existed) it falls back to ``TM_LEGACY_FRAMEWORK_COMMANDS`` in
-    ``254-chat-results.js``, which must be the files of ``fastworkflow/_framework_commands``. Delete the list and
+    ``254-chat-results.js``, which must be the files of ``fastworkflow/review/commands``. Delete the list and
     this test together when no stored turn predates the key."""
     import re
 
@@ -43,7 +43,7 @@ def test_the_pages_legacy_fallback_names_exactly_the_frameworks_own_review_comma
     listed = re.search(r"var TM_LEGACY_FRAMEWORK_COMMANDS = \[(.*?)\];", source, re.DOTALL)
     assert listed, "TM_LEGACY_FRAMEWORK_COMMANDS is gone"
     names = sorted(re.findall(r'"([^"]+)"', listed.group(1)))
-    on_disk = sorted(p.stem for p in (root / "_framework_commands").glob("*.py") if not p.stem.startswith("_"))
+    on_disk = sorted(p.stem for p in (root / "review" / "commands").glob("*.py") if not p.stem.startswith("_"))
     assert names == on_disk
 
 
@@ -52,7 +52,7 @@ def test_the_schema_listing_the_page_receives_omits_the_frameworks_own_commands(
     from fastworkflow.mcp_server import command_schema_listing
 
     root = Path(__file__).resolve().parents[1]
-    framework = {p.stem for p in (root / "fastworkflow" / "_framework_commands").glob("*.py")
+    framework = {p.stem for p in (root / "fastworkflow" / "review" / "commands").glob("*.py")
                  if not p.stem.startswith("_")}
     listing = command_schema_listing(str(root / "tests" / "example_workflow"))
     assert listing, "the example workflow lists commands"

@@ -15,9 +15,9 @@ import pytest
 
 import fastworkflow
 from fastworkflow.command_directory import CommandDirectory
-from fastworkflow import planning_commands as pc
-from fastworkflow.review_engine import AWAITING, CONFIRMED, EXPIRED, REVISED, open_review
-from fastworkflow.review_proposals import SubTaskProposal
+from fastworkflow.planning import planning_commands as pc
+from fastworkflow.review.review_engine import AWAITING, CONFIRMED, EXPIRED, REVISED, open_review
+from fastworkflow.review.review_proposals import SubTaskProposal
 from fastworkflow.turn import TurnStatus
 from tests.test_approval_binding import (  # noqa: F401 - the real agent on the library copy, and the guards
     _added, _ask, _finish, annotated_library, no_live_model, no_model_call_for_parameters, todo)
@@ -70,7 +70,7 @@ def test_an_app_command_of_the_same_name_overrides_the_framework_one(tmp_path):
     assert Path(metadata.response_generation_module_path).resolve().parent == (folder / "_commands").resolve()
     # The framework's review_proposal is still there: only the overridden name changed.
     assert Path(directory.map_command_2_metadata["review_proposal"].response_generation_module_path).parent \
-        == Path(fastworkflow.__file__).resolve().parent / "_framework_commands"
+        == Path(fastworkflow.__file__).resolve().parent / "review" / "commands"
 
 
 # ----------------------------------------------------------------------
@@ -109,7 +109,7 @@ def test_review_subtasks_runs_end_to_end_with_scripted_replies_and_returns_the_a
 
 
 def _sample_proposal():
-    from fastworkflow.review_proposals import SubTask, SubTaskInput, Means
+    from fastworkflow.review.review_proposals import SubTask, SubTaskInput, Means
 
     return SubTaskProposal(items=[
         SubTask(goal="book a loan for Ann", outcome="Ann holds a loan on Dune",
@@ -127,7 +127,7 @@ def test_a_sub_task_round_trips_through_json_with_its_goal_outcome_inputs_and_me
     item with SubTask(**item): the round trip keeps every field, and the fingerprint does not move."""
     import json
 
-    from fastworkflow.review_proposals import SubTask
+    from fastworkflow.review.review_proposals import SubTask
 
     proposal = _sample_proposal()
     rebuilt = SubTaskProposal.model_validate_json(proposal.model_dump_json())
@@ -160,7 +160,7 @@ def test_the_model_rendering_keeps_means_outcome_and_input_keys():
 def test_the_text_forms_of_means_and_inputs_are_read_and_bad_ones_refused():
     from pydantic import ValidationError
 
-    from fastworkflow.review_proposals import Means, SubTaskInput
+    from fastworkflow.review.review_proposals import Means, SubTaskInput
 
     assert Means.from_text("from_scratch") == Means()
     assert Means.from_text("planning:Library/book_loans") == Means(kind="planning", name="Library/book_loans")
@@ -187,7 +187,7 @@ def test_the_text_forms_of_means_and_inputs_are_read_and_bad_ones_refused():
 def test_a_sub_task_has_no_completion_field_because_completion_comes_only_from_the_finish_check():
     """Arch 19.0 invariant 3: a goal is never completed by its command's success. The model carries no status that a
     command result could set; the finish check is the only completion (documented on SubTask)."""
-    from fastworkflow.review_proposals import SubTask
+    from fastworkflow.review.review_proposals import SubTask
 
     assert not {"done", "completed", "complete", "success", "status"} & set(SubTask.model_fields)
     assert "finish check" in (SubTask.__doc__ or "")

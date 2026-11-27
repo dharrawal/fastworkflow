@@ -239,7 +239,7 @@ class CommandOutput(BaseModel):
     # scope and ``ran_in_context_clause`` is "" for a root with no printable identity.
     ran_in_context_name: Optional[str] = None
     ran_in_context_clause: Optional[str] = None
-    # True when the command is the framework's own (a file of ``fastworkflow/_framework_commands``, the
+    # True when the command is the framework's own (a file of ``fastworkflow/review/commands``, the
     # metadata's ``framework`` flag): machinery the framework runs for itself, such as the plan and
     # sub-task reviews, not an application result. A semantic fact about the command, set from its
     # metadata when the output is recorded on the turn; it says nothing about how any client shows

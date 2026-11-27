@@ -51,7 +51,7 @@ def reached_commands(workflow_folderpath: str) -> dict[str, frozenset[str]]:
     command writes (``write_commands``) and needs an approval (``approval_annotations.command_approval``) when a
     command it reaches does. Empty when the planning commands cannot be read."""
     try:
-        from fastworkflow import planning_commands
+        from fastworkflow.planning import planning_commands
 
         callees = planning_commands.resolve_field_sources(workflow_folderpath).callees
     except Exception:  # noqa: BLE001 - planning commands unread: nothing is known to be reached
@@ -122,7 +122,7 @@ def _planned_step_counts(chat_session: Any) -> Optional[dict[str, int]]:
     state = _phase_state(chat_session)
     if state is None:
         return None
-    from fastworkflow import planning_phases
+    from fastworkflow.planning import planning_phases
 
     try:
         names = _host(chat_session)._phase_command_names()

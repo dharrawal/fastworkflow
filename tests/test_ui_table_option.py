@@ -11,7 +11,7 @@ import pytest
 from pydantic import BaseModel, Field
 
 from fastworkflow import FieldOptions, UiOptions
-from fastworkflow import planning_commands as pc
+from fastworkflow.planning import planning_commands as pc
 
 
 def _problems(output_cls):

@@ -10,8 +10,8 @@ import json
 
 import pytest
 
-from fastworkflow import review_engine
-from fastworkflow.review_engine import (
+from fastworkflow.review import review_engine
+from fastworkflow.review.review_engine import (
     PROMPT_HINT, REPLY_FORMS_OF_HINT, SUB_TASK_PROMPT_HINT, SUB_TASK_STRUCTURED_PROMPT_HINT, reply_forms)
 from tests.test_approval_binding import (  # noqa: F401
     annotated_library, grant_root, no_live_model, no_model_call_for_parameters, todo)
@@ -43,7 +43,7 @@ def test_each_hints_forms_agree_with_its_text(hint):
 
 
 def test_a_text_with_no_hint_falls_back_to_the_hint_the_proposal_would_show():
-    from fastworkflow.review_proposals import SubTaskProposal
+    from fastworkflow.review.review_proposals import SubTaskProposal
     proposal = SubTaskProposal(items=[])
     assert [f.get("reply") for f in reply_forms("I could not read that.", proposal)][:1] == ["yes"]
     assert [f.get("reply") for f in reply_forms("I could not read that.", proposal, structured=True)][:2] == ["accept", "no"]

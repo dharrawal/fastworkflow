@@ -33,8 +33,9 @@ import sys
 
 import pytest
 
-from fastworkflow import ModuleType, planning_commands, command_preview, workflow_agent
-from fastworkflow import planning_phases as sp
+from fastworkflow import ModuleType, workflow_agent
+from fastworkflow.planning import planning_commands, command_preview
+from fastworkflow.planning import planning_phases as sp
 from fastworkflow.observation_offloading.finish_check import plain_command_name
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

@@ -22,9 +22,9 @@ import dspy
 import pytest
 
 import fastworkflow
-from fastworkflow import approval_binding as ab
+from fastworkflow.review import approval_binding as ab
 from fastworkflow.approval_annotations import REQUIRED_ALWAYS, REQUIRED_UNTIL_DELEGATED
-from fastworkflow.approval_binding import Origin, Outcome, Surface
+from fastworkflow.review.approval_binding import Origin, Outcome, Surface
 from fastworkflow.command_executor import CommandExecutor
 from fastworkflow.examples.library.application.library import Library  # noqa: F401
 from fastworkflow.command_routing import RoutingRegistry
@@ -727,7 +727,7 @@ def test_a_required_always_command_asks_every_time_and_an_always_reply_records_n
 
 def test_an_existing_grant_for_a_required_always_command_is_ignored_listed_and_revocable(todo, annotated_library,
                                                                                        grant_root):
-    from fastworkflow import approval_grants as ag
+    from fastworkflow.review import approval_grants as ag
     ag.record(f"channel:{ag.local_user()}", state_paths_workflow_id(todo), "Record/add_note", REQUIRED_ALWAYS)
     out = _ask(todo, "add_note <text>Ann</text>", steps=_finish())
     assert out.status is TurnStatus.AWAITING_USER and _added(todo.chores, todo.base) == []
@@ -770,8 +770,8 @@ def test_a_standing_approval_is_revocable_and_the_next_call_asks_again(todo, ann
 
 
 def test_a_standing_approval_belongs_to_one_user_only(grant_root, monkeypatch):
-    from fastworkflow import approval_grants as ag
-    from fastworkflow.approval_binding import Surface
+    from fastworkflow.review import approval_grants as ag
+    from fastworkflow.review.approval_binding import Surface
     alice = ag.identity_key(Surface("host", verified=True, uid="alice"), "c1")
     bob = ag.identity_key(Surface("host", verified=True, uid="bob"), "c1")
     assert alice == "end_user:alice" and bob == "end_user:bob"
@@ -784,7 +784,7 @@ def test_a_standing_approval_belongs_to_one_user_only(grant_root, monkeypatch):
 
 
 def test_a_corrupt_grant_file_grants_nothing_and_fails_closed(grant_root):
-    from fastworkflow import approval_grants as ag
+    from fastworkflow.review import approval_grants as ag
     path = Path(ag.grants_path())
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("{not json")
@@ -948,7 +948,7 @@ def test_the_unattended_policy_cells_for_a_channel_surface_and_a_verified_host()
 
 
 def test_the_channel_identity_names_the_origin_and_the_cli_keeps_the_legacy_key(grant_root):
-    from fastworkflow import approval_grants as ag
+    from fastworkflow.review import approval_grants as ag
     user = ag.local_user()
     assert ag.identity_key(CLI, "c1") == f"channel:{user}"                       # legacy: stored grants stay valid
     assert ag.identity_key(CHAT, "c1") == f"channel:{user}:chat"
@@ -966,7 +966,7 @@ def test_a_grant_made_in_one_origin_does_not_approve_in_the_other(todo, annotate
 
 def test_a_legacy_channel_grant_still_approves_on_the_cli_and_not_on_the_chat_origin(todo, annotated_library,
                                                                                     grant_root):
-    from fastworkflow import approval_grants as ag
+    from fastworkflow.review import approval_grants as ag
     # A grant stored before origins existed: identity channel:<user>, nothing else about it.
     ag.record(f"channel:{ag.local_user()}", state_paths_workflow_id(todo), "Record/show_notes", REQUIRED_UNTIL_DELEGATED)
     chat = _ask(todo, "show_notes", steps=_finish(), approval_surface=CHAT)

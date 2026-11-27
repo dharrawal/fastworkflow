@@ -21,8 +21,8 @@ import pytest
 
 import fastworkflow
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import extract_arguments
-from fastworkflow.planning_commands import call_phases, planning_command
-from fastworkflow.planning_phases import phase_steps
+from fastworkflow.planning.planning_commands import call_phases, planning_command
+from fastworkflow.planning.planning_phases import phase_steps
 from tests.test_approval_binding import annotated_library  # noqa: F401 - the library copy
 from tests.test_drafted_subtask_inputs import _framework, scripted  # noqa: F401 - fixtures
 

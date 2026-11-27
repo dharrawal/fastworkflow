@@ -6,7 +6,8 @@ from contextlib import nullcontext
 import fastworkflow
 from pydantic import BaseModel
 from fastworkflow.observability import tracing
-from fastworkflow import approval_binding, command_writes, intent_loop, waiting
+from fastworkflow.review import approval_binding
+from fastworkflow import command_writes, intent_loop, waiting
 from fastworkflow.command_interfaces import CommandExecutorInterface
 from fastworkflow.command_declarations import declared_descend
 
@@ -491,7 +492,7 @@ def _assistant_planning_refusal(
     refusal (the 3.4 message with its reasons) when it NEEDS THE AGENT, or when it cannot be
     classified at all: a command the framework cannot read is refused rather than run.
     """
-    from fastworkflow.planning_needs_agent import planning_command_needs_agent, refusal_message
+    from fastworkflow.planning.planning_needs_agent import planning_command_needs_agent, refusal_message
 
     try:
         needs_agent, reasons = planning_command_needs_agent(folderpath, qualified_name)

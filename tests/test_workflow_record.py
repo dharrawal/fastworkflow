@@ -17,7 +17,7 @@ from fastworkflow.command_context_model import (
     CommandContextModelError,
     context_class_problems,
 )
-from fastworkflow.command_preview import load_problems
+from fastworkflow.planning.command_preview import load_problems
 from fastworkflow.context_identity import declared_instance_label
 from fastworkflow.session.serialization_hooks import reset_warnings
 from fastworkflow.workflow import Workflow, running_command

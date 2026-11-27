@@ -142,7 +142,7 @@ def word(extraction: Any = None, *, form: str = FORM_REFUSAL, audience: str = HU
     if confirm:
         text, request = _presented(command, values or {}, extraction, description, retry)
         return Question(with_left_empty(text, left_empty), request)
-    from fastworkflow import planning_commands
+    from fastworkflow.planning import planning_commands
 
     if refusal is None:
         from fastworkflow.parameters import parameter_clarification
@@ -204,7 +204,7 @@ def _refusal_text(command: Any, refusal: Any) -> str:
     """The words for a refused planning call. What it says comes from the refusal's structured parts: ``gaps`` (every
     argument), ``fields`` (a validator's ``Refused(field=...)``), ``gap`` (the one argument a guard refused: name,
     state, why, value) and ``refusal`` (a validator's own message, bare); the message text is read for none of them."""
-    from fastworkflow import planning_commands as pc
+    from fastworkflow.planning import planning_commands as pc
 
     gaps = pc.refusal_gaps(command, refusal)
     if len(gaps.names) > 1:

@@ -19,8 +19,9 @@ import pytest
 from dotenv import dotenv_values
 
 import fastworkflow
-from fastworkflow import command_preview, context_navigation, intent_detector, workflow_agent
-from fastworkflow import planning_commands as pc
+from fastworkflow.planning import command_preview
+from fastworkflow import context_navigation, intent_detector, workflow_agent
+from fastworkflow.planning import planning_commands as pc
 from fastworkflow.command_routing import RoutingRegistry
 from tests.test_field_sources import ROOT, _build_workflow
 from tests.test_one_rule_for_author_mistakes import _exec
@@ -263,7 +264,8 @@ def _on_the_root(folder: str, name: str):
 
 @pytest.mark.usefixtures("no_planner_key")
 def test_a_command_with_no_signature_is_reached_by_no_name_and_no_words(tmp_path):
-    from fastworkflow import intent_loop, review_plan_switch, run_listing
+    from fastworkflow import intent_loop, run_listing
+    from fastworkflow.review import review_plan_switch
 
     folder = _build_workflow(tmp_path, "wf_startup_name")
     definition = RoutingRegistry.get_definition(folder)
@@ -314,7 +316,10 @@ def test_fastworkflow_run_stops_when_nothing_runs_the_startup_command(tmp_path):
     folder = _build_workflow(tmp_path, "wf_no_action")
     (Path(folder) / "startup_action.json").unlink()
     assert command_preview.load_problems(folder) == []     # a client may still pass its own startup action
-    cli = _cli("run_cli", folder, *_env_files(), env=_no_llm_env(), timeout=300)
+    # The copy is untrained, so the run needs the remote decision model's key to start at all; the run stops at the
+    # startup check, before any model call.
+    env = {**_no_llm_env(), "JEV_API_KEY": "placeholder-never-called"}
+    cli = _cli("run_cli", folder, *_env_files(), env=env, timeout=300)
     out = " ".join((cli.stdout + cli.stderr).split())
     assert cli.returncode == 1, out
     assert ("startup has no Signature, so it runs only as the workflow's startup action, and nothing names it: "
@@ -340,7 +345,7 @@ def test_a_failing_field_validator_refuses_its_field_on_both_kinds_of_command(tm
 
 def test_a_refusal_from_a_command_body_names_its_field_on_the_failed_answer():
     from fastworkflow.command_executor import call_response_generator
-    from fastworkflow.planning_phases import run_call_result
+    from fastworkflow.planning.planning_phases import run_call_result
 
     class ResponseGenerator:
         def __call__(self, workflow, command, input):

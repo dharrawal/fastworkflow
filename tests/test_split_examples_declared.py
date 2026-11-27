@@ -15,8 +15,9 @@ import dspy
 import pytest
 from dspy.utils import DummyLM
 
-from fastworkflow import command_preview, workflow_agent
-from fastworkflow.planning_commands import PlanningCommandFormatError
+from fastworkflow.planning import command_preview
+from fastworkflow import workflow_agent
+from fastworkflow.planning.planning_commands import PlanningCommandFormatError
 from fastworkflow.utils.chat_adapter import CommandsSystemPreludeAdapter
 from fastworkflow.workflow_agent import SPLIT_GENERIC_EXAMPLES, SPLIT_RULES, SplitExample, SplitIntoSubtasks
 from tests.workflow_settings_file import write_workflow_file

@@ -20,7 +20,8 @@ def _json_safe(value):
 
 
 def _approval(ctx, held) -> dict[str, Any]:
-    from fastworkflow import approval_annotations, approval_grants, review_engine
+    from fastworkflow import approval_annotations
+    from fastworkflow.review import approval_grants, review_engine
 
     store = review_engine.store_for(ctx._app_workflow)
     record = store.get(held.payload["record_id"])
@@ -37,7 +38,7 @@ def _approval(ctx, held) -> dict[str, Any]:
 
 
 def _review(ctx, held) -> dict[str, Any]:
-    from fastworkflow import review_engine, review_proposals
+    from fastworkflow.review import review_engine, review_proposals
 
     record = review_engine.store_for(ctx._app_workflow).get(held.payload["record_id"])
     proposal = review_engine.proposal_of(record)

@@ -1,6 +1,6 @@
 """Approval binding for approval-annotated commands (ADR-EXP-025, sections 6-12 and 15).
 
-A thin ``action``-kind wrapper over the review engine (``fastworkflow.review_engine``). The engine owns
+A thin ``action``-kind wrapper over the review engine (``fastworkflow.review.review_engine``). The engine owns
 the record, the state machine, the cascade, the audit and the redaction rule. This module owns what is
 specific to a gated write:
 
@@ -29,13 +29,13 @@ from enum import Enum
 from typing import Any, Optional
 
 import fastworkflow
-from fastworkflow import approval_grants, review_engine
+from fastworkflow.review import approval_grants, review_engine
 from fastworkflow.session import state_paths
 from fastworkflow.approval_annotations import (APPROVAL_VALUES, REQUIRED_ALWAYS,
                                                REQUIRED_UNTIL_DELEGATED, command_approval)
 from fastworkflow.context_identity import context_identity
 # The engine's public names, re-exported: the approval surface the gate, the hosts and the tests use.
-from fastworkflow.review_engine import (  # noqa: F401
+from fastworkflow.review.review_engine import (  # noqa: F401
     ACTIVE_STATES,
     AWAITING,
     CHANNEL_SURFACE,
@@ -80,7 +80,7 @@ from fastworkflow.review_engine import (  # noqa: F401
     token_matches,
     transition as _transition,
 )
-from fastworkflow.review_engine import ActionReplyPolicy, Verdict
+from fastworkflow.review.review_engine import ActionReplyPolicy, Verdict
 
 logger = logging.getLogger(__name__)
 
@@ -545,7 +545,7 @@ def resolve_reply(chat_session: Any, workflow: Any, message: str) -> Optional[Re
         cap_turn = record.turns_seen >= record.ttl_turns
         review = reply_to_proposal(chat_session, store, record, message, cap_turn=cap_turn)
         if review.done and review.proposal is not None:
-            from fastworkflow.review_proposals import PROPOSAL_KINDS
+            from fastworkflow.review.review_proposals import PROPOSAL_KINDS
 
             if any(cls.spec == record.command for cls in PROPOSAL_KINDS.values()):
                 # A framework round accepted: the review command runs once more under this record, so its typed

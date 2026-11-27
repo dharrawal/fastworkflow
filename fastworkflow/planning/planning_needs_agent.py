@@ -24,8 +24,8 @@ step or fact that causes it, and an author can see what to change.
 from __future__ import annotations
 
 from fastworkflow import planning as planning_api
-from fastworkflow import planning_commands
-from fastworkflow.planning_phases import (PhaseError, _template_kwargs, building_template,
+from fastworkflow.planning import planning_commands
+from fastworkflow.planning.planning_phases import (PhaseError, _template_kwargs, building_template,
                                           tests_noted)
 
 __all__ = [

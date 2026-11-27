@@ -11,7 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from fastworkflow import cli, command_preview, planning_commands
+from fastworkflow import cli
+from fastworkflow.planning import command_preview, planning_commands
 
 EXAMPLES = Path(__file__).resolve().parent.parent / "fastworkflow" / "examples"
 

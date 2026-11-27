@@ -24,10 +24,10 @@ import json
 import dspy
 import pytest
 
-from fastworkflow import approval_binding as ab
+from fastworkflow.review import approval_binding as ab
 from fastworkflow import intent_loop, no_agent_mode, workflow_agent
 from fastworkflow.parameters import parameter_clarification
-from fastworkflow import planning_commands as pc
+from fastworkflow.planning import planning_commands as pc
 from fastworkflow import waiting as waiting_module
 from fastworkflow.chat_session import ChatSession
 from fastworkflow.turn import TurnStatus
@@ -327,7 +327,7 @@ def _approval_beside_the_open_command(session):
     assert ctx.waiting.kind == "parameters" and ctx.waiting.owner == "cme"
     import time
 
-    from fastworkflow.review_engine import AWAITING, ReviewRecord
+    from fastworkflow.review.review_engine import AWAITING, ReviewRecord
 
     record = ReviewRecord(
         id="approval-1", token_hash="", command="add_note", annotation=None, raw_command="add_note", binding={},
@@ -361,7 +361,7 @@ def test_a_question_that_rides_the_agents_suspension_is_not_a_flag_that_can_be_s
 # ======================================================================================================================
 
 def test_the_removed_review_flags_are_gone_from_the_frame_the_state_and_the_context():
-    from fastworkflow.plan_frame import PlanFrame
+    from fastworkflow.planning.plan_frame import PlanFrame
     from fastworkflow.session.session_state_store import SCHEMA_VERSION
 
     frame = PlanFrame.turn()
@@ -499,7 +499,7 @@ def test_an_approval_the_agent_asked_is_a_record_pointing_at_the_store_and_ends_
     assert todo.ctx._awaiting_user is True and todo.store.get(held.payload["record_id"]) is record   # the store keeps it
 
     # The store ends it by itself (here: the time to live ran out): the turn's record ends with it, in one place.
-    from fastworkflow import review_engine
+    from fastworkflow.review import review_engine
 
     assert review_engine.expire_if_due(todo.ctx, todo.store, record, surface=todo.store.surface, now=record.expires_at + 1)
     assert record.state == "expired" and todo.ctx._waiting is None and not todo.ctx._awaiting_user

@@ -18,13 +18,13 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow import review_engine, review_proposals
-from fastworkflow.review_engine import CONFIRMED, REVISED
+from fastworkflow.review import review_engine, review_proposals
+from fastworkflow.review.review_engine import CONFIRMED, REVISED
 from fastworkflow.turn import TurnStatus
-from fastworkflow.typed_phase_facts import _command_qname_from_class
+from fastworkflow.planning.typed_phase_facts import _command_qname_from_class
 from fastworkflow.utils.python_utils import get_module
-from fastworkflow._framework_commands.review_proposal import Signature as ReviewProposal
-from fastworkflow._framework_commands.review_subtasks import Signature as ReviewSubtasks
+from fastworkflow.review.commands.review_proposal import Signature as ReviewProposal
+from fastworkflow.review.commands.review_subtasks import Signature as ReviewSubtasks
 from tests.test_approval_binding import (  # noqa: F401 - the real agent on the annotated library copy, and the guards
     annotated_library, no_live_model, no_model_call_for_parameters, todo)
 from tests.test_round1_gate import (  # noqa: F401 - the gate fixture and the draft's two sub-tasks

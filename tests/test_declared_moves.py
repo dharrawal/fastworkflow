@@ -21,7 +21,7 @@ import uuid
 import pytest
 
 import fastworkflow
-from fastworkflow import command_preview
+from fastworkflow.planning import command_preview
 from fastworkflow import context_navigation
 from fastworkflow.command_directory import CommandLoadError
 from fastworkflow.command_executor import CommandExecutor, call_response_generator

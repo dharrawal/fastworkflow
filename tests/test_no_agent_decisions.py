@@ -528,7 +528,7 @@ def test_a_decision_inside_part_one_resumes_into_the_remaining_parts(library_env
 def test_a_paused_decision_survives_a_save_and_restore_of_the_context(library_env, monkeypatch):
     """The pause is the phase's state plus the awaiting flag and a minimal agent stash, all serialised as an ask_user
     suspension is; the restored phases are rebuilt from the planning command (the same seam the ask_user restore uses)."""
-    from fastworkflow import planning_commands
+    from fastworkflow.planning import planning_commands
 
     command = _build_planning_command(Conditional)
     library_env.planning_command = command
@@ -623,7 +623,7 @@ def test_the_decline_reader_is_whole_reply_only(reply, expected):
 
 
 def test_a_value_is_written_into_a_step_before_its_note():
-    from fastworkflow import planning_phases
+    from fastworkflow.planning import planning_phases
 
     assert planning_phases.step_with_value("add_note", "text", "the cover is torn") == 'add_note text="the cover is torn"'
     assert planning_phases.step_with_value("set_due loan_uid=l1 (for the loan)", "days", "5") == \
@@ -635,7 +635,7 @@ def test_only_a_single_plain_required_value_is_a_decision():
     from typing import Optional
 
     from pydantic import BaseModel
-    from fastworkflow import planning_phases
+    from fastworkflow.planning import planning_phases
     from fastworkflow.observation_offloading import finish_check
 
     class One(BaseModel):
@@ -675,7 +675,7 @@ def test_only_a_single_plain_required_value_is_a_decision():
 def test_an_unverified_host_client_answers_the_question_no_identity_is_needed(library_env, monkeypatch):
     """The question is an ordinary suspended question, not an approval record: ``approval_binding`` reads a reply only
     when an approval record is active, so a client with no verified identity answers it like an ask_user question."""
-    from fastworkflow.approval_binding import Surface
+    from fastworkflow.review.approval_binding import Surface
 
     host = Surface(kind="host", verified=False, uid=None)
     library_env.planning_command = _build_planning_command(Conditional)

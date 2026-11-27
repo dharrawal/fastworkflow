@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import pytest
 
-from fastworkflow import review_engine as re_
-from fastworkflow.review_engine import Change, ProposalReplyPolicy, Verdict
-from fastworkflow.review_proposals import (
+from fastworkflow.review import review_engine as re_
+from fastworkflow.review.review_engine import Change, ProposalReplyPolicy, Verdict
+from fastworkflow.review.review_proposals import (
     EditRefused, Means, ProposedEdit, SubTask, SubTaskProposal, _proposed_edits_to_engine)
 
 from tests.test_approval_binding import annotated_library, no_live_model, todo  # noqa: F401
@@ -157,7 +157,7 @@ def test_a_typed_goal_that_runs_on_into_a_switch_clause_is_refused():
 
 
 def test_the_accept_path_never_reaches_the_clause_reader(monkeypatch):
-    from fastworkflow import review_plan_switch
+    from fastworkflow.review import review_plan_switch
 
     def boom(*args, **kwargs):
         raise AssertionError("read a switch clause")
@@ -169,7 +169,7 @@ def test_the_accept_path_never_reaches_the_clause_reader(monkeypatch):
 
 
 def test_a_reply_with_no_switch_clause_is_read_as_before(monkeypatch):
-    from fastworkflow import review_plan_switch
+    from fastworkflow.review import review_plan_switch
 
     plan = SubTaskProposal(items=[SubTask(goal="a", means=Means()), SubTask(goal="b", means=Means())])
     assert review_plan_switch.split_switch_clauses(plan, "drop 2") is None

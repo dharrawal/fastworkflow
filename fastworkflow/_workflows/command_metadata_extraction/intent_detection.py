@@ -485,7 +485,7 @@ class CommandNamePrediction:
         question "Did you mean the command 'X'?", which the user confirms by its name or ``yes`` (the deterministic
         path's form of the plan path's review). When the command's approval question will be asked anyway, that question
         is the yes and the match stands. The span keeps the decision as the chain made it."""
-        from fastworkflow.approval_binding import current_origin
+        from fastworkflow.review.approval_binding import current_origin
 
         intent, self.trace = traced_decision(self.app_workflow, command, core=True)
         if intent_loop.unconfirmed_pick(self.app_workflow, intent, current_origin()):

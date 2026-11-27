@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 
 import fastworkflow
 from fastworkflow import FieldOptions, UiOptions
-from fastworkflow import planning_commands as pc
+from fastworkflow.planning import planning_commands as pc
 from fastworkflow.parameters.field_options import OPTION_KEYS, ConfirmsOptions, CopiedOptions, RecordNamedOptions, UiOptions
 from fastworkflow.parameters import check as one_guard
 
@@ -515,7 +515,7 @@ def test_a_workflow_with_input_and_output_ui_hints_loads_without_problems_and_se
     import shutil
     from pathlib import Path
 
-    from fastworkflow import command_preview
+    from fastworkflow.planning import command_preview
     from fastworkflow.mcp_server import command_schema_listing
 
     hello = Path(__file__).resolve().parent / "hello_world_workflow"

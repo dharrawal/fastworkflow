@@ -17,9 +17,9 @@ from pathlib import Path
 
 import pytest
 
-from fastworkflow import review_proposals
-from fastworkflow.review_engine import CONFIRMED, REVISED, proposal_of
-from fastworkflow.review_proposals import Means, SubTask, SubTaskProposal
+from fastworkflow.review import review_proposals
+from fastworkflow.review.review_engine import CONFIRMED, REVISED, proposal_of
+from fastworkflow.review.review_proposals import Means, SubTask, SubTaskProposal
 from fastworkflow.turn import TurnStatus
 from tests.test_approval_binding import (  # noqa: F401 - the real agent with a scripted model, and the guards
     _COPY_IGNORE, LIBRARY, _finish, no_live_model, todo)
@@ -229,7 +229,7 @@ def _review_payload(out):
 
 @pytest.mark.parametrize("drafting", ["off", "on"])
 def test_after_look_up_the_part_is_shown_look_up_only_and_the_turn_needs_no_explicit_yes(gated, monkeypatch, drafting):
-    from fastworkflow.review_engine import CHANGES_DATA_SENTENCE
+    from fastworkflow.review.review_engine import CHANGES_DATA_SENTENCE
 
     _split_into(monkeypatch, [NOTE, SHOW])
     gated.ctx.process_turn(f"{NOTE} and {SHOW}")
@@ -253,7 +253,7 @@ def test_after_look_up_the_part_is_shown_look_up_only_and_the_turn_needs_no_expl
 
 
 def test_another_part_that_writes_keeps_the_explicit_yes(gated, monkeypatch):
-    from fastworkflow.review_engine import CHANGES_DATA_SENTENCE
+    from fastworkflow.review.review_engine import CHANGES_DATA_SENTENCE
 
     _split_into(monkeypatch, [NOTE, NOTE_TWO])
     gated.ctx.process_turn(f"{NOTE} and {NOTE_TWO}")
@@ -273,7 +273,7 @@ def _subtask(goal, read_only=False):
 
 
 def test_a_merge_with_a_read_only_item_is_read_only_whichever_comes_first():
-    from fastworkflow.review_engine import Merge, apply_edits
+    from fastworkflow.review.review_engine import Merge, apply_edits
 
     for marks in ((False, True), (True, False)):
         proposal = SubTaskProposal(items=[_subtask("a", marks[0]), _subtask("b", marks[1]), _subtask("c")])
@@ -282,7 +282,7 @@ def test_a_merge_with_a_read_only_item_is_read_only_whichever_comes_first():
 
 
 def test_a_split_of_a_read_only_item_gives_the_mark_to_every_part():
-    from fastworkflow.review_engine import Split, apply_edits
+    from fastworkflow.review.review_engine import Split, apply_edits
 
     proposal = SubTaskProposal(items=[_subtask("a", True), _subtask("b")])
     edited = apply_edits(proposal, [Split(index=1, parts=[{"goal": "a1"}, {"goal": "a2"}])])

@@ -4,7 +4,7 @@ import pytest
 import fastworkflow
 from pydantic import BaseModel, Field, model_validator
 
-from fastworkflow import planning_commands as pc
+from fastworkflow.planning import planning_commands as pc
 from fastworkflow.parameters.signatures import InputForParamExtraction, removed_validate_hook_message
 from tests.test_planning_command_files import _write as write_files
 
@@ -51,7 +51,7 @@ def test_a_planning_command_with_the_removed_hook_fails_the_load_naming_the_vali
     def validate_extracted_parameters(workflow, command, cmd_parameters, command_text=None):
         return None''')
     folder = write_files(tmp_path, {"old": text})
-    from fastworkflow import command_preview
+    from fastworkflow.planning import command_preview
     problems = command_preview.load_problems(str(folder))
     assert problems and "validate_extracted_parameters is removed" in problems[0]
     assert '@model_validator(mode="after") on Input' in problems[0]
@@ -163,7 +163,7 @@ def test_a_placeholder_combination_a_validator_refuses_is_left_out_of_the_templa
 '''
     command = _command(tmp_path, "grid", PLANNING.format(name="grid", body=body).replace(
         'template = ["say the record"]', ''))
-    from fastworkflow import command_preview
+    from fastworkflow.planning import command_preview
     grid = pc._template_grid(command)
     assert all(env["name"] != "x" for env in grid)
     assert command_preview._validated(command, {"name": "x", "note": ""})[0] is False
@@ -194,7 +194,7 @@ def test_an_execution_command_with_the_removed_hook_fails_load_problems_naming_t
     import shutil
     from pathlib import Path
 
-    from fastworkflow import command_preview
+    from fastworkflow.planning import command_preview
 
     source = Path(__file__).resolve().parent.parent / "fastworkflow" / "examples" / "hello_world"
     folder = tmp_path / "hello_world"
@@ -381,7 +381,7 @@ class StoredFacts(BaseModel):
 def test_a_stored_phase_output_holding_a_command_input_is_rebuilt_without_its_validators():
     """Regression (pass 8 benchmark): a phase's stored output was re-validated with no context, so the
     Input's validator read info.context["command_text"] on None and the whole turn failed."""
-    from fastworkflow.typed_phase_facts import validate_phase_output_value
+    from fastworkflow.planning.typed_phase_facts import validate_phase_output_value
 
     stored = {"called_with": {"uid": "u1", "size": "2"}, "count": "3", "earlier": [{"uid": "u0"}]}
     facts = validate_phase_output_value(StoredFacts, stored)

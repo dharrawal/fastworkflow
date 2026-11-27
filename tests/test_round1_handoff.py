@@ -20,11 +20,12 @@ from types import SimpleNamespace
 import pytest
 from dspy.utils import DummyLM
 
-from fastworkflow import review_engine, review_proposals, run_listing, workflow_agent
+from fastworkflow.review import review_engine, review_proposals
+from fastworkflow import run_listing, workflow_agent
 from fastworkflow.observability import tracing
-from fastworkflow import approval_binding as ab
-from fastworkflow.review_engine import AWAITING, EXPIRED, REVISED
-from fastworkflow.review_proposals import SubTaskProposal
+from fastworkflow.review import approval_binding as ab
+from fastworkflow.review.review_engine import AWAITING, EXPIRED, REVISED
+from fastworkflow.review.review_proposals import SubTaskProposal
 from fastworkflow.turn import TurnStatus
 from fastworkflow.workflow_agent import initialize_workflow_tool_agent
 from tests.test_approval_binding import (  # noqa: F401 - the fixtures and the scripted agent
@@ -129,7 +130,7 @@ def test_a_free_text_drop_is_read_and_the_confirmed_edit_applies(gated, monkeypa
 ])
 def test_the_reader_reads_add_merge_and_split_as_typed_edits_the_engine_applies(gated, edit, expected):
     """The reader's output is the typed edit list: each op becomes the engine's edit, and the engine applies it."""
-    from fastworkflow.review_proposals import SubTask
+    from fastworkflow.review.review_proposals import SubTask
 
     proposal = SubTaskProposal(items=[SubTask(goal=EMMA), SubTask(goal=JOKE)])
     read = review_proposals.model_edit_reader(planner_lm=_reply_lm(edit))

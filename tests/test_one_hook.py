@@ -21,8 +21,8 @@ from fastworkflow.workflow import running_command
 from fastworkflow.observability.decision_signals import SLOT_BINDING_SOURCES, SIGNAL_CONTRACT_VERSION
 from fastworkflow.observability.decision_signals import slot_binding_source  # noqa: F401 - the vocabulary
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import slot_binding_uncertainty
-from fastworkflow import planning_commands as pc
-from fastworkflow.planning_commands import PlanningCommandInputError
+from fastworkflow.planning import planning_commands as pc
+from fastworkflow.planning.planning_commands import PlanningCommandInputError
 from fastworkflow.parameters.signatures import InputForParamExtraction
 from fastworkflow import workflow_agent
 

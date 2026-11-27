@@ -6,12 +6,12 @@ import re
 from typing import Any, Optional, Sequence
 
 import fastworkflow
-from fastworkflow.review_proposals import (
+from fastworkflow.review.review_proposals import (
     PendingItemSlot,
     ProposedEdit,
     _proposed_edits_to_engine,
 )
-from fastworkflow.review_engine import EditParseError, EditRefused
+from fastworkflow.review.review_engine import EditParseError, EditRefused
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
 from fastworkflow.workflow import Workflow
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -131,7 +131,7 @@ def _read_edits(workflow: Workflow, reply: str) -> list:
     if not isinstance(rendering, str) or not isinstance(planning_names, Sequence):
         return []
 
-    from fastworkflow.review_proposals import model_edit_reader
+    from fastworkflow.review.review_proposals import model_edit_reader
 
     if proposal is None:
         return []
@@ -151,7 +151,7 @@ class ResponseGenerator:
     ) -> fastworkflow.CommandResponse:
         if isinstance(input, Signature.SlotInput):
             proposal = workflow.context.get("plan_proposal")
-            from fastworkflow.review_proposals import _dedupe_proposed_edits
+            from fastworkflow.review.review_proposals import _dedupe_proposed_edits
 
             raw_edits = _dedupe_proposed_edits(
                 _expand_slot_edits(input.item, input.edits, proposal)

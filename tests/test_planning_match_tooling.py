@@ -30,7 +30,7 @@ from fastworkflow.model_pipeline_training import (
     planning_head_labels,
     trained_command_labels,
 )
-from fastworkflow.planning_commands import resolve_field_sources, visible_planning_commands
+from fastworkflow.planning.planning_commands import resolve_field_sources, visible_planning_commands
 from fastworkflow.train import planning_test_set as pts
 from fastworkflow.train import score_planning_match as spm
 

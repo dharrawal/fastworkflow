@@ -9,7 +9,7 @@ import types
 
 import pytest
 
-from fastworkflow import planning_commands as pc
+from fastworkflow.planning import planning_commands as pc
 from fastworkflow import workflow_agent
 from fastworkflow.parameters.validate import (
     RAISED, REFUSED, Refusal, Validated, ValidatorReturnError, validate)

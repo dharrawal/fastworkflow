@@ -16,7 +16,7 @@ from dotenv import dotenv_values
 from dspy.utils.exceptions import LMTransportError
 
 import fastworkflow
-from fastworkflow import planning_commands as sc
+from fastworkflow.planning import planning_commands as sc
 from fastworkflow import no_agent_mode, workflow_agent
 from fastworkflow.parameters import parameter_clarification as pcl
 from fastworkflow.parameters.parameter_clarification import Extraction, ParameterLoop

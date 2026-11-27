@@ -30,7 +30,8 @@ from dataclasses import dataclass, field
 from typing import Iterable, Mapping, Sequence
 
 import fastworkflow
-from fastworkflow import planning_commands, turn_cache
+from fastworkflow.planning import planning_commands
+from fastworkflow import turn_cache
 from fastworkflow.command_metadata_api import CommandMetadataAPI
 from fastworkflow.context_navigation import (
     collect_descend_edges, display_context_name, exact_name_scopes, live_context_chain,
@@ -365,7 +366,7 @@ def exact_command_name(workflow, sub_task: str) -> str | None:
     planning). A command elsewhere in the workflow is not an exact name here: intent detection routes it by hint.
     Framework planning commands are not app commands and never match. No model is read.
     """
-    from fastworkflow.planning_commands import is_framework_planning_command, planning_command
+    from fastworkflow.planning.planning_commands import is_framework_planning_command, planning_command
 
     text = sub_task.strip()
     token = text.split(None, 1)[0].split("(", 1)[0].lower() if text else ""

@@ -13,12 +13,13 @@ import pytest
 from pydantic import BaseModel, Field, model_validator
 
 import fastworkflow
-from fastworkflow import command_directory, planning_commands, workflow_agent
+from fastworkflow import command_directory, workflow_agent
+from fastworkflow.planning import planning_commands
 from fastworkflow.command_executor import call_response_generator
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 from fastworkflow.planning import (StepFormError, command_inputs_for_steps, count,
                                 count_and_names_read, phase, planned, planning_command_parts, run)
-from fastworkflow.planning_phases import (Placeholder, check_bindings, concatenated_steps,
+from fastworkflow.planning.planning_phases import (Placeholder, check_bindings, concatenated_steps,
                                        phase_steps, runs_now, stops_after)
 from tests.test_planning_commands import HOURS_RECIPE, recipe_env  # noqa: F401 - recipe_env is a fixture
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401 - shared fixture
@@ -118,7 +119,7 @@ def test_filters():
 
 
 def test_a_placeholder_reads_as_where_the_fact_comes_from_and_every_test_on_it_is_true():
-    from fastworkflow.planning_phases import tests_noted
+    from fastworkflow.planning.planning_phases import tests_noted
 
     p = Placeholder("find")
     assert str(p.uids[0]) == "<find.uids[0]>" and str(p.only_uid("A")) == "<find.only_uid()>"
@@ -175,7 +176,7 @@ def test_return_empty_is_decided_when_the_phase_is_reached_calling_the_method_on
 
 
 def test_a_method_that_fails_at_run_time_fails_its_phase():
-    from fastworkflow.planning_phases import PhaseError
+    from fastworkflow.planning.planning_phases import PhaseError
 
     class Broken:
         def find(self, input) -> Found:
@@ -466,7 +467,7 @@ def test_a_subclass_that_adds_phases_writes_call_with_the_order():
                 return []
             return ["list_parts (full list)"]
 
-    from fastworkflow.planning_phases import PhaseError
+    from fastworkflow.planning.planning_phases import PhaseError
 
     with pytest.raises(PhaseError, match=r"Parts adds the phase\(s\) parts to those of "
                        r"test_planning_command_plan.Lookup: write __phases__\(self, input\) returning the phases a call "
@@ -562,7 +563,7 @@ def test_call_cannot_return_a_base_method_the_class_overrides():
         def item(self, input, find):
             return []
 
-    from fastworkflow.planning_phases import PhaseError
+    from fastworkflow.planning.planning_phases import PhaseError
 
     with pytest.raises(PhaseError, match=r"returns a base's item that the class overrides: "
                                          r"return self.item"):
@@ -596,14 +597,14 @@ def test_phases_from_several_bases_need_call():
     class Both(Lookup, Other):
         pass
 
-    from fastworkflow.planning_phases import PhaseError
+    from fastworkflow.planning.planning_phases import PhaseError
 
     with pytest.raises(PhaseError, match=r"Both has phases from test_planning_command_plan.Lookup, test_planning_command_plan.*Other: write __phases__"):
         planned(Both)
 
 
 def test_output_and_a_return_annotation_on_one_phase_is_a_load_error():
-    from fastworkflow.planning_phases import PhaseError
+    from fastworkflow.planning.planning_phases import PhaseError
 
     class Both:
         @phase(output=lambda input: Found)
@@ -616,7 +617,7 @@ def test_output_and_a_return_annotation_on_one_phase_is_a_load_error():
 
 
 def test_a_fixed_output_model_is_a_load_error_that_says_what_output_takes():
-    from fastworkflow.planning_phases import PhaseError
+    from fastworkflow.planning.planning_phases import PhaseError
 
     class Fixed:
         @phase(output=Found)
@@ -629,7 +630,7 @@ def test_a_fixed_output_model_is_a_load_error_that_says_what_output_takes():
 
 
 def test_a_fixed_output_model_is_refused_beside_other_options_too():
-    from fastworkflow.planning_phases import PhaseError
+    from fastworkflow.planning.planning_phases import PhaseError
 
     class Fixed:
         def find(self, input) -> Found:
@@ -655,7 +656,7 @@ def _found_of_kind(kind, input):
                                    lambda input, other: Found,
                                    functools.partial(_found_of_kind)])
 def test_output_that_is_not_a_function_of_input_alone_is_a_load_error(value):
-    from fastworkflow.planning_phases import PhaseError
+    from fastworkflow.planning.planning_phases import PhaseError
 
     class Bad:
         @phase(output=value)

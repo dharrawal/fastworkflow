@@ -10,8 +10,8 @@ import json
 from pydantic import BaseModel, Field
 
 from fastworkflow.planning import run
-from fastworkflow._framework_commands.review_proposal import Signature as ReviewProposal
-from fastworkflow.review_proposals import SubTask
+from fastworkflow.review.commands.review_proposal import Signature as ReviewProposal
+from fastworkflow.review.review_proposals import SubTask
 
 
 class Signature:

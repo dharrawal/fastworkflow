@@ -31,7 +31,7 @@ from typing import Optional
 import pytest
 from pydantic import BaseModel, Field
 
-from fastworkflow import planning_commands as pc
+from fastworkflow.planning import planning_commands as pc
 from fastworkflow.parameters import check, rules
 from fastworkflow.parameters import workflow_vocabulary as wv
 from tests.test_argument_checks import _command

@@ -561,7 +561,7 @@ def test_a_saved_state_that_nothing_can_rebuild_pins_and_names_the_missing_hook(
 
 
 def test_a_half_locator_pair_or_a_lone_from_state_is_a_load_problem(initialized_fastworkflow, tmp_path):
-    from fastworkflow.command_preview import load_problems
+    from fastworkflow.planning.command_preview import load_problems
 
     folder = _library_copy(tmp_path, {
         "Member": "\n    @classmethod\n    def get_locator(cls, record):\n        return record.uid\n",

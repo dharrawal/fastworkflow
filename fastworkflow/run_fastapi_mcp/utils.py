@@ -17,7 +17,7 @@ from jwt.exceptions import PyJWTError as JWTError
 from pydantic import BaseModel, Field, field_validator
 
 import fastworkflow
-from fastworkflow import approval_binding, approval_grants
+from fastworkflow.review import approval_binding, approval_grants
 from fastworkflow.session.session_state_store import (
     IncompatibleSessionState,
     PendingReapOutcome,

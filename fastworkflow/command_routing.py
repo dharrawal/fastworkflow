@@ -230,7 +230,7 @@ class RoutingDefinition(BaseModel):
 
         if module_type == ModuleType.INPUT_FOR_PARAM_EXTRACTION_CLASS:
             # a load error for a check option on a field of a type it does not apply to (design 2.46)
-            from fastworkflow.planning_commands import option_params
+            from fastworkflow.planning.planning_commands import option_params
             input_model = getattr(cls_obj, "Input", None)
             if isinstance(input_model, type) and issubclass(input_model, BaseModel):
                 option_params(input_model, f"{module_file_path}: {command_name}",
@@ -259,7 +259,7 @@ class RoutingDefinition(BaseModel):
         declare ``total: int``. A paged command is one whose Input has an int ``start``
         (``facts.PAGING_PARAMETERS``); the message also says to rename the field when it is not a page."""
         from fastworkflow.observation_offloading.facts import paging_parameters
-        from fastworkflow.planning_commands import PlanningCommandFormatError
+        from fastworkflow.planning.planning_commands import PlanningCommandFormatError
 
         paging = paging_parameters(input_model)
         if not paging:
@@ -577,6 +577,6 @@ class RoutingRegistry:
 
         # Clear the field-source resolution cache (and per-command Signature cache;
         # inline import avoids circular import: planning_commands -> command_context_model -> command_directory)
-        import fastworkflow.planning_commands  # circular import: planning_commands -> command_context_model
-        if hasattr(fastworkflow.planning_commands.resolve_field_sources, 'cache_clear'):
-            fastworkflow.planning_commands.resolve_field_sources.cache_clear() 
+        import fastworkflow.planning.planning_commands  # circular import: planning_commands -> command_context_model
+        if hasattr(fastworkflow.planning.planning_commands.resolve_field_sources, 'cache_clear'):
+            fastworkflow.planning.planning_commands.resolve_field_sources.cache_clear() 

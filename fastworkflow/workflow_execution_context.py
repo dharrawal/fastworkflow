@@ -37,15 +37,17 @@ import dspy
 
 import fastworkflow
 import fastworkflow.turn
-from fastworkflow import active_workflow, planning_commands
+from fastworkflow import active_workflow
+from fastworkflow.planning import planning_commands
 from fastworkflow.observability import metrics, tracing
-from fastworkflow import approval_binding, intent_loop, no_agent_mode, turn_cache
+from fastworkflow.review import approval_binding
+from fastworkflow import intent_loop, no_agent_mode, turn_cache
 from fastworkflow import waiting as waiting_module
 from fastworkflow.parameters import check as one_guard, reply as replies
 from fastworkflow.observation_offloading.state import current_execute_alias
 from fastworkflow.session.session_state_store import SCHEMA_VERSION, IncompatibleSessionState
 from fastworkflow.session.state_serialization import validate_state
-from fastworkflow.plan_frame import PlanFrame, runs_outside_ranges, turn_max_steps
+from fastworkflow.planning.plan_frame import PlanFrame, runs_outside_ranges, turn_max_steps
 from fastworkflow.observability import store as observability_store
 from fastworkflow.observability.execution_recorder import ExecutionRecorder, record_execution
 from fastworkflow.turn import TurnResult, TurnStatus, mint_turn_key
@@ -1819,7 +1821,7 @@ class WorkflowExecutionContext:
         turn.subtask_exhausted = bool(state.get("subtask_exhausted"))
         plan = state.get("subtask_plan")
         if plan:
-            from fastworkflow.review_proposals import SubTaskProposal
+            from fastworkflow.review.review_proposals import SubTaskProposal
 
             turn.subtask_plan = SubTaskProposal.model_validate(plan)
         else:
@@ -2641,7 +2643,7 @@ class WorkflowExecutionContext:
 
     def _review_record_for_span(self):
         """The approval store's record of the turn's review (the one out, else the last one), or None."""
-        from fastworkflow import review_engine
+        from fastworkflow.review import review_engine
 
         store = review_engine.store_for(self._app_workflow) if self._app_workflow is not None else None
         records = [record for record in (getattr(store, "records", None) or [])
@@ -3228,7 +3230,7 @@ class WorkflowExecutionContext:
             self._record_planned_parts(plan, reviewed=self._turn_subtask_review == "reviewed")
         if planned and any(item.parts for item in plan.items):
             # A joined item (a split over the cap) that the review left as drafted runs its parts as jobs of their own.
-            from fastworkflow import review_proposals
+            from fastworkflow.review import review_proposals
             subtasks, plan = review_proposals.expand_joined_parts(
                 self._app_workflow, subtasks, plan, planner_lm=getattr(self, "_current_planner_lm", None))
             self._turn_subtask_plan = plan
@@ -3266,7 +3268,7 @@ class WorkflowExecutionContext:
         each question suspending the turn; then ONE review of the whole turn, or the run when there is none
         (``_after_resolution``). Returns the suspended prediction of a question or of the review, or the turn's result.
         """
-        from fastworkflow import review_proposals
+        from fastworkflow.review import review_proposals
         from fastworkflow._workflows.plan_metadata_extraction import resolution
 
         tracing.enter_stage(self, tracing.SPAN_RESOLVE)
@@ -3399,7 +3401,8 @@ class WorkflowExecutionContext:
         No review when the client pinned the plan (its parameter question was the review), when the turn is one part
         whose command the user chose by answering which one, when nothing would run (no agent model, every part ad
         hoc) and when nobody can answer. Returns the suspended review or the turn's result."""
-        from fastworkflow import review_proposals, turn_progress
+        from fastworkflow.review import review_proposals
+        from fastworkflow import turn_progress
         from fastworkflow._workflows.plan_metadata_extraction import resolution
 
         record = self._plan_resolution
@@ -3455,7 +3458,7 @@ class WorkflowExecutionContext:
     def _note_dropped_parts(self, record) -> None:
         """No agent model: each part cancelled while the turn was resolved is not run, and a client that drives the work
         reads it among the turn's stops (``fw_not_run``)."""
-        from fastworkflow import review_proposals
+        from fastworkflow.review import review_proposals
         from fastworkflow._workflows.plan_metadata_extraction import resolution
 
         if not self.no_agent_mode:
@@ -3471,7 +3474,7 @@ class WorkflowExecutionContext:
 
     def _open_review(self, draft):
         """Open the review of *draft* (the whole turn): the suspended review."""
-        from fastworkflow import review_proposals
+        from fastworkflow.review import review_proposals
 
         tracing.enter_stage(self, tracing.SPAN_REVIEW)
         if self.no_agent_mode:
@@ -3527,7 +3530,8 @@ class WorkflowExecutionContext:
     def _give_review_reader(self) -> None:
         """The free-text reader of this turn's sub-task review (fix-3rsq.plan-review.2.7): one model call on the
         planner's role, with the planner's LM when the turn has one. Set on the session's review store."""
-        from fastworkflow import planning_commands, review_engine, review_proposals
+        from fastworkflow.planning import planning_commands
+        from fastworkflow.review import review_engine, review_proposals
 
         store = review_engine.store_for(self._app_workflow)
         if store is None:
@@ -3543,7 +3547,7 @@ class WorkflowExecutionContext:
         """The gate's review was accepted: its frame finishes with the accepted proposal, which is stored for the
         hand-off (fix-3rsq.plan-review.2.9 reads ``_turn_subtask_plan``), and the turn runs the accepted goals as today.
         Its inputs and means are not used until 2.9."""
-        from fastworkflow import review_proposals
+        from fastworkflow.review import review_proposals
 
         self._finish_framework_call(agent_result)
         accepted = review_proposals.accepted_subtask_proposal(self._app_workflow)
@@ -3557,7 +3561,7 @@ class WorkflowExecutionContext:
 
     def _end_subtask_review_unrun(self, state: str):
         """The gate's review was declined or expired: its frame is dropped, nothing runs, and the turn says so."""
-        from fastworkflow import review_engine
+        from fastworkflow.review import review_engine
 
         self._pop_frame(self._top_frame())
         declined = state == review_engine.DECLINED
@@ -3745,7 +3749,7 @@ class WorkflowExecutionContext:
                 values=values)
             if item_binding is None or iters_left < finish_check.MIN_ITERS_LEFT:
                 return note
-            from fastworkflow import planning_phases
+            from fastworkflow.planning import planning_phases
 
             try:
                 runs = self._archived_command_runs(from_step=int(floor or 0))
@@ -3760,7 +3764,7 @@ class WorkflowExecutionContext:
         agent.finish_reviewer = review
 
     # ------------------------------------------------------------------
-    # Phased planning command calls (fastworkflow.planning_phases)
+    # Phased planning command calls (fastworkflow.planning.planning_phases)
     # ------------------------------------------------------------------
 
     def _start_planning_command_phases(self, query: str, command, call, *, first_step: int,
@@ -3769,13 +3773,13 @@ class WorkflowExecutionContext:
 
         ``call`` is the planning command call (``planning_commands.PlanningCommandCallPlan``) whose ``phases``
         run. ``reextracted``: this call is the restart after a failed first phase (``_restart_after_empty_first_phase``),
-        which a call restarts at most once. See ``fastworkflow.planning_phases`` for what the runner does and decides.
+        which a call restarts at most once. See ``fastworkflow.planning.planning_phases`` for what the runner does and decides.
         Extra command steps after the planning command's own that would land in an answer-only last
         phase run in a phase of their own just before it (``planning_phases.extra_steps_phase``).
         The extra steps before the planning command's own run first, in a phase of their own
         (``planning_phases.steps_before_phase``).
         """
-        from fastworkflow import planning_phases
+        from fastworkflow.planning import planning_phases
         from fastworkflow.observation_offloading.facts import fact_sources
 
         names = self._phase_command_names()
@@ -3833,8 +3837,8 @@ class WorkflowExecutionContext:
         """``(command, phases)`` of the call in progress; rebuilt from the planning command after a restore."""
         if self._phase_live is not None:
             return self._phase_live
-        from fastworkflow.planning_commands import call_phases
-        from fastworkflow.planning_phases import PhaseError
+        from fastworkflow.planning.planning_commands import call_phases
+        from fastworkflow.planning.planning_phases import PhaseError
         from fastworkflow.workflow_agent import load_planning_command_map
 
         state = self._phase_run
@@ -3848,12 +3852,12 @@ class WorkflowExecutionContext:
         # A flat call (no plan(), or no phases for these arguments) is one phase.
         phases = call_phases(command, state["args"])
         if state.get("extra_phase"):
-            from fastworkflow.planning_phases import Phase, with_phase_before
+            from fastworkflow.planning.planning_phases import Phase, with_phase_before
 
             moved = list(state.get("extra_steps") or [])
             phases = with_phase_before(phases, Phase(state["extra_phase"], lambda: list(moved)))
         if state.get("before_phase"):
-            from fastworkflow.planning_phases import Phase, with_phase_before
+            from fastworkflow.planning.planning_phases import Phase, with_phase_before
 
             first = list(state.get("steps_before") or [])
             phases = with_phase_before(phases, Phase(state["before_phase"], lambda: list(first)), 0)
@@ -3888,7 +3892,7 @@ class WorkflowExecutionContext:
         ``when`` is decided when it is reached (``planning_phases.runs_now``); a skipped one
         runs nothing and keeps the answers of the phase before it.
         """
-        from fastworkflow import planning_phases
+        from fastworkflow.planning import planning_phases
 
         state = self._phase_run
         try:
@@ -3991,7 +3995,7 @@ class WorkflowExecutionContext:
         response = None
         result_failed = False
         if uses_result and command.plan_cls is not None:
-            from fastworkflow.planning_commands import _phase_names_for_command, input_instance
+            from fastworkflow.planning.planning_commands import _phase_names_for_command, input_instance
 
             typed = planning_phases.typed_phase_outputs(state["outputs"], phases)
             input_obj = input_instance(command, state["args"])
@@ -4088,7 +4092,7 @@ class WorkflowExecutionContext:
         key = value["deferred"]
         if key not in settled:
             import dspy
-            from fastworkflow import planning_phases
+            from fastworkflow.planning import planning_phases
 
             deferred = self._phase_run["deferred"][key]
             phase = phases[deferred["index"]]
@@ -4143,7 +4147,8 @@ class WorkflowExecutionContext:
                 or not state.get("missing_fact") or getattr(phase, "optional", False)
                 or self._phase_call is None):
             return None
-        from fastworkflow import command_writes, planning_commands
+        from fastworkflow import command_writes
+        from fastworkflow.planning import planning_commands
 
         # Read before _phase_run is cleared: the steps of the phase that failed, as its runs were planned.
         planned = command_writes.phase_planned_commands(self)
@@ -4204,7 +4209,7 @@ class WorkflowExecutionContext:
 
         Only facts filled in code are shown (``planning_phases.found_facts``), never text a
         phase's run wrote: the failed phase's own answer may report what it never read."""
-        from fastworkflow.planning_phases import failure_text, found_facts
+        from fastworkflow.planning.planning_phases import failure_text, found_facts
 
         state = self._phase_run
         names = state["phases"]
@@ -4347,7 +4352,7 @@ class WorkflowExecutionContext:
         their steps as the template has them (no model call; ``planning_phases.placeholder_steps``), so a client
         can carry them out after the stop. A fact an earlier phase has not found yet reads ``<phase.field>``; a phase
         that fans out over an earlier phase's results gives its steps once, marked ``for each <item>``; a phase whose steps cannot be rendered says they are written when it runs."""
-        from fastworkflow import planning_phases
+        from fastworkflow.planning import planning_phases
 
         try:
             phases = list(self._live_planning_command_phases()[1])
@@ -4424,7 +4429,7 @@ class WorkflowExecutionContext:
         out one plain required value takes that value. Either way the decision is the turn's waiting record (kind
         ``decision``; the phase's own state stays in ``_phase_run``), the question is the turn's pending prompt
         (``question_kind`` "phase_step"), and the reply is read by ``_read_decision_reply`` when the phase resumes."""
-        from fastworkflow import planning_phases
+        from fastworkflow.planning import planning_phases
 
         open_step = stop["open_step"]
         if (open_step["kind"] not in no_agent_mode.DECISION_KINDS or stop.get("nested") or code is None
@@ -4498,7 +4503,7 @@ class WorkflowExecutionContext:
         "you misunderstood" and a different request. A step of a running plan has no which-command question to return
         to and a reply answers its question and nothing else, so cancel, abort, "you misunderstood" and a different
         request all end the command at this step as declined, each naming why; none is run as a new request."""
-        from fastworkflow import planning_phases
+        from fastworkflow.planning import planning_phases
 
         agent = self._workflow_tool_agent
         reply = " ".join(str(reply or "").split())
@@ -4614,7 +4619,7 @@ class WorkflowExecutionContext:
         part ends as not run naming what is missing (``_refusal_stop_reason``).
         """
         from fastworkflow.parameters import parameter_clarification as loops
-        from fastworkflow import planning_commands
+        from fastworkflow.planning import planning_commands
 
         if self._turn_subtask_review != "not_applicable":
             # The turn's parts were resolved at the gate: a value refused while it runs is not asked again (no agent
@@ -4642,7 +4647,7 @@ class WorkflowExecutionContext:
 
     def _resume_parameter_loop_unlistened(self, reply: str) -> fastworkflow.CommandOutput:
         from fastworkflow.parameters import parameter_clarification as loops
-        from fastworkflow import planning_commands
+        from fastworkflow.planning import planning_commands
         from fastworkflow._workflows.plan_metadata_extraction.resolution import DIFFERENT_REQUEST_REASON
 
         loop = loops.ParameterLoop.from_state(self._waiting.payload["loop"])
@@ -4656,7 +4661,7 @@ class WorkflowExecutionContext:
 
     def _rerun_part_with_reply(self, loop, reply: str, waited: int = 0) -> fastworkflow.CommandOutput:
         from fastworkflow.parameters import parameter_clarification as loops
-        from fastworkflow import planning_commands
+        from fastworkflow.planning import planning_commands
         from fastworkflow._workflows.plan_metadata_extraction.resolution import DIFFERENT_REQUEST_REASON
 
         message = self._suspended_message()
@@ -5117,8 +5122,8 @@ class WorkflowExecutionContext:
         answer-only phase (``planning_phases.is_answer_only``) is not an executor run: one
         model call with no tools writes its answer (``planning_phases.write_answer``).
         """
-        from fastworkflow import planning_phases
-        from fastworkflow.planning_commands import number
+        from fastworkflow.planning import planning_phases
+        from fastworkflow.planning.planning_commands import number
         from fastworkflow.observation_offloading.facts import FactsError, MissingFactError, fact_sources
         from fastworkflow.workflow_agent import _what_can_i_do
 
@@ -5416,7 +5421,7 @@ class WorkflowExecutionContext:
                 state["outputs"][phase.name] = facts
         if phase.fans_out and phase.until is not None:
             # The stop condition reads the items' outputs so far (typed) and earlier outputs.
-            from fastworkflow.typed_phase_facts import validate_phase_output_value
+            from fastworkflow.planning.typed_phase_facts import validate_phase_output_value
 
             so_far = ([validate_phase_output_value(phase.output, v)
                        for v in state["outputs"][phase.name]]
@@ -5451,7 +5456,7 @@ class WorkflowExecutionContext:
         """The steps code runs at the start of this phase run (``planning_phases.CodeSteps``),
         or None: the run has no steps of its own (planner-written steps only), or nothing
         could be read (never a reason to fail the phase; the agent then runs every step)."""
-        from fastworkflow import planning_phases
+        from fastworkflow.planning import planning_phases
 
         if not own_steps or self._app_workflow is None:
             return None
@@ -5556,7 +5561,7 @@ class WorkflowExecutionContext:
         means narrows the executor's listing to its command, and the plan of the run names that command, so the
         finish check holds the goal to it. Nothing here marks a goal complete: the finish check does (arch 19.0 inv. 3).
         """
-        from fastworkflow import review_proposals
+        from fastworkflow.review import review_proposals
 
         item = self._bound_item(origin)
         if item is None:
@@ -5588,7 +5593,7 @@ class WorkflowExecutionContext:
     @staticmethod
     def _continued_text(text: str, item, resolved) -> str:
         """A hand-off continuation's text with the sub-task's inputs and outcome in its first line."""
-        from fastworkflow import review_proposals
+        from fastworkflow.review import review_proposals
 
         head, separator, tail = text.partition("\n")
         full = review_proposals.run_text(item, resolved)
@@ -5601,7 +5606,9 @@ class WorkflowExecutionContext:
         a refusal, or no command, falls back to the agent with the refusal as a note and the bound command's listing.
         With drafting on (fix-48np.1) the reviewed inputs are the arguments (review_proposals.reviewed_arguments), and
         the run records whether they ran as shown; a refusal still falls back to the agent, recorded as a deviation."""
-        from fastworkflow import planning_commands, review_proposals, run_listing
+        from fastworkflow.planning import planning_commands
+        from fastworkflow.review import review_proposals
+        from fastworkflow import run_listing
 
         folder = self._app_workflow.folderpath
         name = item.means.name
@@ -5668,7 +5675,8 @@ class WorkflowExecutionContext:
         When a required input is unbound (review_proposals.reviewed_values), the agent handles the sub-task as before
         (F2). When the CME refuses the values, or code cannot run the step, the agent takes over with the refusal in its
         trajectory (F2). Either is recorded as a deviation (review_proposals.binding_record)."""
-        from fastworkflow import ModuleType, review_proposals, run_listing
+        from fastworkflow import ModuleType, run_listing
+        from fastworkflow.review import review_proposals
         from fastworkflow.planning import run as run_step
 
         name = item.means.name
@@ -5760,7 +5768,7 @@ class WorkflowExecutionContext:
         so a count or "none found" in the answer is not taken for the whole list. A part that did not run out of
         steps, or a read with no total, adds nothing."""
         from fastworkflow.observation_offloading.facts import PAGING_PARAMETERS
-        from fastworkflow.planning_phases import _page_read
+        from fastworkflow.planning.planning_phases import _page_read
 
         try:
             floor = (getattr(self, "_evidence_floors", None) or {}).get(origin, 0)
@@ -5979,7 +5987,7 @@ class WorkflowExecutionContext:
         )
         if "[[" in result_text:
             # A DSPy field marker ("[[ ## completed ## ]]") a reply carried into its text.
-            from fastworkflow.planning_phases import clean_answer
+            from fastworkflow.planning.planning_phases import clean_answer
             result_text = clean_answer(result_text)
 
         command_response = fastworkflow.CommandResponse(response=result_text)

@@ -16,11 +16,12 @@ from dotenv import dotenv_values
 from pydantic import create_model
 
 import fastworkflow
-from fastworkflow import ModuleType, command_preview
-from fastworkflow import planning_commands as pc
+from fastworkflow import ModuleType
+from fastworkflow.planning import command_preview
+from fastworkflow.planning import planning_commands as pc
 from fastworkflow.command_executor import frame_command_result, paging_line
 from fastworkflow.observation_offloading.facts import output_page
-from fastworkflow.planning_phases import _fitting_uid_column
+from fastworkflow.planning.planning_phases import _fitting_uid_column
 from tests.test_field_sources import RETAIL, ROOT
 
 U, O, P, L = "get_user_details", "get_order_details", "get_product_details", "list_all_product_types"

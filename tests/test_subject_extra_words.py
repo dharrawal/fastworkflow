@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 from pydantic import BaseModel, Field
 
-from fastworkflow import planning_commands as pc
+from fastworkflow.planning import planning_commands as pc
 
 DRAFTS = json.loads((Path(__file__).parent / "fixtures" / "recorded_subject_drafts.json").read_text())
 

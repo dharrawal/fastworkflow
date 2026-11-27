@@ -95,7 +95,7 @@ from fastworkflow.parameters.field_options import (ConfirmsOptions, CopiedOption
                                         RecordNamedOptions, UiOptions)
 from fastworkflow.command_declarations import (UserApproval, descends_to,  # noqa: F401
                                                user_approval_for_execution)
-from fastworkflow.planning_phases import (Phase, PhaseError, Placeholder, _template_kwargs,
+from fastworkflow.planning.planning_phases import (Phase, PhaseError, Placeholder, _template_kwargs,
                                        concatenated_steps, is_building_template,
                                        is_placeholder, tests_noted)
 
@@ -201,7 +201,7 @@ def row_id_field(input_model: Any) -> Optional[str]:
     """The Input field a row is opened by (``run(command, named=...)``), by the rule the runtime applies
     (``planning_phases._uid_parameter``): the one field that declares a producer (``from_command_output`` or
     ``available_from``), else the one required field named like an id (``..._uid``, ``..._id``), else None."""
-    from fastworkflow.planning_phases import _is_uid_field, _producer_sources
+    from fastworkflow.planning.planning_phases import _is_uid_field, _producer_sources
 
     fields = getattr(input_model, "model_fields", None) or {}
     declared = [name for name in fields if _producer_sources([input_model], name)]
@@ -533,7 +533,7 @@ def _parameters(fn: Callable) -> list[str]:
 
 
 def _output(cls: type, fn: Callable, options: dict, input: Any) -> Any:
-    from fastworkflow.typed_phase_facts import union_members
+    from fastworkflow.planning.typed_phase_facts import union_members
 
     if "output" in options:
         return _decided(options["output"], input)
@@ -836,12 +836,12 @@ def planning_command_parts(cls: type) -> tuple[Callable, Optional[Callable]]:
 def run_code(workflow_folder: str, command: str, input: Optional[dict] = None,
              start_with: tuple[str, ...] = ()):
     """One call of *command* on the workflow at *workflow_folder*, run with no model, as ``fastworkflow command
-    run-code`` runs it (``fastworkflow.planning_code_run``): a planning command phase by phase, stopping at its
+    run-code`` runs it (``fastworkflow.planning.planning_code_run``): a planning command phase by phase, stopping at its
     first open step, or an execution command's CommandOutput. Returns a ``CodeRun`` (``text``, ``answer``,
     ``output``, ``facts``, ``open_step``); raises ``RunCodeError`` when the command does not load, a step fails
     or a hook raises. *start_with* are steps run by code first. Its steps are real commands on a real session:
     use it on a development instance, and in tests on a copy of the workflow.
     """
-    from fastworkflow.planning_code_run import run_code as _run_code
+    from fastworkflow.planning.planning_code_run import run_code as _run_code
 
     return _run_code(workflow_folder, command, input, start_with)

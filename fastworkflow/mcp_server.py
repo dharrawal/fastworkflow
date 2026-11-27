@@ -57,7 +57,7 @@ def _json_schema(model: Optional[type], qualified_name: str, side: str) -> Optio
 
 
 def is_listed_command(metadata, workflow_folderpath: str) -> bool:
-    """False for the commands no client listing shows: framework commands (``fastworkflow/_framework_commands``)
+    """False for the commands no client listing shows: framework commands (``fastworkflow/review/commands``)
     and the internal command metadata extraction workflow's commands, unless that workflow is the subject."""
     if metadata.framework:
         return False

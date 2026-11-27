@@ -15,8 +15,9 @@ import dspy
 import pytest
 
 import fastworkflow
-from fastworkflow import planning_commands as pc
-from fastworkflow import prompt_payloads, review_engine, review_proposals, workflow_agent
+from fastworkflow.planning import planning_commands as pc
+from fastworkflow import prompt_payloads, workflow_agent
+from fastworkflow.review import review_engine, review_proposals
 from fastworkflow.turn import TurnStatus
 from tests.test_approval_binding import (  # noqa: F401 - the real agent on the annotated library copy, and the guards
     _added, _ask, _finish, annotated_library, grant_root, no_live_model, no_model_call_for_parameters, todo)
@@ -288,7 +289,7 @@ def test_only_the_prompt_description_keys_are_withheld_from_the_final_answer(tod
 
 
 def test_can_always_is_false_when_the_surface_names_no_grant_identity(todo, annotated_library, grant_root):
-    from fastworkflow.approval_binding import Surface
+    from fastworkflow.review.approval_binding import Surface
 
     host = Surface("host", verified=True, uid="alice")
     out = _ask(todo, "show_notes", steps=_finish(), approval_surface=host)   # delegatable: fix-qjne.11

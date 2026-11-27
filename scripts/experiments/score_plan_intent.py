@@ -147,7 +147,8 @@ def _decision(kind: str, name: str | None = None, *, asked: bool = False, altern
 def before(answers: Answers, workflow, context: str, text: str, mode: str) -> dict:
     """What the code before the change gave one part standing alone as a turn's only sub-task (``mode``
     ``no_agent`` or ``agent``), or as one of several (``no_agent_part`` / ``agent_part``: no fast path)."""
-    from fastworkflow import planning_commands, run_listing, workflow_agent
+    from fastworkflow.planning import planning_commands
+    from fastworkflow import run_listing, workflow_agent
 
     planning = set(planning_commands.resolve_field_sources(workflow.folderpath).planning_commands)
     core = workflow_agent.core_command_names()

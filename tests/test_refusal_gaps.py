@@ -11,8 +11,9 @@ import socket
 
 import pytest
 
-from fastworkflow import approval_binding, no_agent_mode
-from fastworkflow.approval_binding import Surface
+from fastworkflow.review import approval_binding
+from fastworkflow import no_agent_mode
+from fastworkflow.review.approval_binding import Surface
 from fastworkflow.turn import TurnStatus
 from fastworkflow.workflow_agent import load_planning_command_map
 from fastworkflow.workflow_execution_context import NOT_RUN_ARTIFACT, WorkflowExecutionContext
@@ -229,7 +230,7 @@ def test_a_matched_part_is_asked_the_same_way(gated, monkeypatch):
 
 
 def test_the_gaps_of_a_call_are_worked_out_without_a_model(gated):
-    from fastworkflow import planning_commands
+    from fastworkflow.planning import planning_commands
 
     command = load_planning_command_map(gated.wf.folderpath)[PLAN]
     gaps = planning_commands.argument_gaps(command, {"member": None, "text": None}, REQUEST)

@@ -23,13 +23,14 @@ import json
 import pytest
 
 import fastworkflow
-from fastworkflow import review_engine as re_
-from fastworkflow import intent_detector, review_proposals, run_listing
+from fastworkflow.review import review_engine as re_
+from fastworkflow import intent_detector, run_listing
+from fastworkflow.review import review_proposals
 from fastworkflow.observability import tracing
 from fastworkflow._workflows.plan_metadata_extraction import resolution
-from fastworkflow.review_engine import (
+from fastworkflow.review.review_engine import (
     Change, ProposalReplyPolicy, Verdict, prompt_for, reply_forms)
-from fastworkflow.review_proposals import (
+from fastworkflow.review.review_proposals import (
     MAX_PLAN_ALTERNATIVES, Means, SubTask, SubTaskProposal)
 
 from tests.test_approval_binding import (  # noqa: F401 - the real agent on the annotated library copy, and the guards

@@ -16,7 +16,7 @@ import pytest
 from dotenv import dotenv_values
 from pydantic import BaseModel, Field
 
-from fastworkflow import planning_commands as pc
+from fastworkflow.planning import planning_commands as pc
 from fastworkflow.parameters.signatures import InputForParamExtraction
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -107,7 +107,7 @@ def test_a_plain_verify_field_keeps_the_planner_filled_value_until_a_sure_verdic
 
 
 def test_the_preview_marks_a_verify_alone_field():
-    from fastworkflow import command_preview
+    from fastworkflow.planning import command_preview
     rows = command_preview._inputs_section(_command())
     assert any(r.startswith("| `leave_out_author` |") and "| decides |" in r for r in rows), rows
     assert any(r.startswith("| `loans` |") and "| yes |" in r for r in rows), rows

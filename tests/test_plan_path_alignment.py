@@ -155,7 +155,7 @@ def test_a_review_edit_re_drafts_an_enclosing_command_on_the_enclosing_record(no
     """The review engine's own re-draft after an edit (a step switched to another command, ``SubTaskProposal.revised``)
     checks the new command's arguments on the record the command will run on, as the gate's draft does: standing on a
     Member, switching a step to a Library command re-drafts it with ``workflow.record`` the Library."""
-    from fastworkflow import review_engine
+    from fastworkflow.review import review_engine
 
     from tests.test_parameter_loop import ABOUT_DUNE, ABOUT_EMMA, MEMBER, NOTE, _reply
 

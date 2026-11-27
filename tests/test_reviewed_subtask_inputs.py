@@ -19,8 +19,8 @@ import pytest
 from dspy.utils import DummyLM
 
 import fastworkflow
-from fastworkflow import review_proposals
-from fastworkflow.review_proposals import Means, SubTask, SubTaskInput
+from fastworkflow.review import review_proposals
+from fastworkflow.review.review_proposals import Means, SubTask, SubTaskInput
 from fastworkflow.turn import TurnStatus
 from fastworkflow.parameters import signatures
 from tests.conftest import script_matcher
@@ -111,7 +111,7 @@ def _planning_line(record, number: int) -> str:
 
 
 def _subtask(record, number: int) -> SubTask:
-    from fastworkflow import review_engine
+    from fastworkflow.review import review_engine
 
     return review_engine.proposal_of(record).items[number - 1]
 
@@ -224,7 +224,7 @@ def test_a_from_sub_task_input_runs_with_that_sub_tasks_output(gated, monkeypatc
 
 @pytest.mark.parametrize("how", ["unattended", "host"])
 def test_a_turn_with_no_one_to_answer_runs_the_draft_unreviewed_with_its_values(gated, monkeypatch, scripted, how):
-    from fastworkflow.approval_binding import Surface
+    from fastworkflow.review.approval_binding import Surface
 
     lm = scripted(EMMA_ANSWER, JOKE_ANSWER)
     _split_into(monkeypatch, [EMMA, JOKE])
@@ -358,7 +358,7 @@ def test_cancel_at_a_value_question_drops_that_part_and_the_review_shows_the_res
     assert asked.command_outputs[-1].command_response.artifacts["parameter_request"]["missing"] == ["title"]
     gated.ctx.process_turn("cancel")
     record = _open_review(gated)
-    proposal = __import__("fastworkflow.review_engine", fromlist=["x"]).proposal_of(record)
+    proposal = __import__("fastworkflow.review.review_engine", fromlist=["x"]).proposal_of(record)
     assert len(proposal.items) == 1                              # EMMA (part 1) is gone: JOKE is now item 1
     assert proposal.items[0].means.name == MEMBER_REPORT
     assert [(each.name, each.value) for each in proposal.items[0].inputs] == [("member", "Ann")]
@@ -463,7 +463,7 @@ TITLE_AS_UID = {"reasoning": "the book", "book_uid": "Dune Messiah", "title": "D
 def test_a_drafted_title_is_not_accepted_as_a_uid(gated, scripted):
     """open_book declares its uid's format (``pattern``, the workflow's own ids): the extractor's title for book_uid
     breaks it, so the draft binds nothing and says why, instead of showing a title the run would not use."""
-    from fastworkflow.review_proposals import draft_inputs
+    from fastworkflow.review.review_proposals import draft_inputs
 
     scripted(*[TITLE_AS_UID] * 4)
     item = SubTask(goal=OPEN_DUNE_MESSIAH, means=Means(kind="plain", name="Library/open_book"))
@@ -501,7 +501,7 @@ def test_an_id_the_review_left_unbound_is_found_at_run_time_and_recorded(gated, 
 
 
 def test_drafted_means_is_neither_shown_nor_editable(gated, monkeypatch, scripted):
-    from fastworkflow.review_engine import Change, EditRefused, apply_edits
+    from fastworkflow.review.review_engine import Change, EditRefused, apply_edits
 
     scripted(EMMA_ANSWER, JOKE_ANSWER)
     record = _review(gated, monkeypatch, [EMMA, JOKE])
@@ -546,7 +546,7 @@ def test_the_draft_runs_the_typed_fill_fallback_and_the_run_uses_its_value(gated
 
 
 def test_a_draft_the_typed_fill_cannot_fix_shows_the_refusal(gated, monkeypatch, scripted):
-    from fastworkflow.review_proposals import draft_inputs
+    from fastworkflow.review.review_proposals import draft_inputs
 
     scripted({"reasoning": "no author", "author": "NOT_FOUND"}, {"reasoning": "still none", "author": "NOT_FOUND"})
     planner = _ScriptedLM([{"reasoning": "a guess", "author": "Tolstoy",

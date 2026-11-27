@@ -89,7 +89,7 @@ def test_a_split_file_with_its_own_examples_is_the_built_in_and_workflow_prompt(
                          ids=["instructions", "field_description", "with_examples"])
 def test_a_signature_in_the_split_file_fails_the_load_naming_split_examples(tmp_path, split_file):
     """The replacement prompt is retired: a ``Signature`` (instructions or a field description) is a load error."""
-    from fastworkflow.planning_commands import PlanningCommandFormatError
+    from fastworkflow.planning.planning_commands import PlanningCommandFormatError
 
     folder = _workflow(tmp_path / "sig", split_file)
     with pytest.raises(PlanningCommandFormatError, match=r"_workflow\.py: a Signature .* is removed: write split_examples"):

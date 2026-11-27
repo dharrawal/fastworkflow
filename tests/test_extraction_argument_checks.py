@@ -249,7 +249,7 @@ def _check(request: str, **values):
 def _guarded(request: str, **values):
     """The one guard of ``_Fields``' marked fields (``check_plan`` through ``option_command``, bd fix-ftdl.6.3): the
     refused names (``invalid``) and the guarded values (``values``) of every gap, as ``argument_gaps`` works them out."""
-    from fastworkflow import planning_commands as pc
+    from fastworkflow.planning import planning_commands as pc
 
     defaults = {"name": None, "kind": None, "count": 5}
     command = pc.option_command(_Fields, "app/find")
@@ -351,7 +351,7 @@ def test_the_one_guard_does_not_read_the_agents_command_word_as_the_request():
     """The validation stage's guard of a marked field reads the request as the check stage does: without the command
     word an agent's text starts with (``fill.without_own_command_word``), so 'find', spelled only inside
     ``find_member``, is not written in it (whole words: "find" is bounded by the "_" of the command word)."""
-    from fastworkflow import planning_commands as pc
+    from fastworkflow.planning import planning_commands as pc
     from fastworkflow.parameters.signatures import InputForParamExtraction
 
     class Query(BaseModel):

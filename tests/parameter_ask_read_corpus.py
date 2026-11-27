@@ -27,7 +27,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 import fastworkflow
 from fastworkflow.parameters import parameter_clarification as pcl
-from fastworkflow import planning_commands as pc
+from fastworkflow.planning import planning_commands as pc
 from fastworkflow.parameters.parameter_clarification import Extraction
 from fastworkflow.parameters import check as one_guard
 from fastworkflow.parameters.read import Slot

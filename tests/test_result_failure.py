@@ -22,7 +22,7 @@ import pytest
 import fastworkflow
 from fastworkflow.observability import tracing
 from fastworkflow.planning import run, run_code
-from fastworkflow.planning_code_run import RunCodeError
+from fastworkflow.planning.planning_code_run import RunCodeError
 from tests.test_answer_hook import (  # noqa: F401 - fixtures and helpers of the answer hook's tests
     Declared, Other, _command_with_declared_output, _fresh_command_caches, _outputs, _run, answered)
 from tests.test_nested_planning_commands import (  # noqa: F401
@@ -418,7 +418,7 @@ def test_one_rule_for_an_empty_or_unsupported_result_on_run_code_and_the_preview
     """``planning_phases.judge_result`` is the one judge of a ``__result__`` return: the runtime (the agent-path test
     above), run-code and the preview all fail None, an empty or whitespace-only str and an unsupported value, with
     the same message (bd fix-ftdl.9.4 item 11)."""
-    from fastworkflow import command_preview
+    from fastworkflow.planning import command_preview
 
     _edit_library(library, "book_loans.py", "    def __result__(self, input, book, loans):\n",
                   "    def __result__(self, input, book, loans):\n" + body)
@@ -465,7 +465,7 @@ def test_run_code_a_bare_output_from_result_is_the_answer_and_the_output(library
 # ----------------------------------------------------------------------
 
 def test_a_result_annotated_str_for_a_declared_output_does_not_load():
-    from fastworkflow.planning_commands import PlanningCommandFormatError
+    from fastworkflow.planning.planning_commands import PlanningCommandFormatError
 
     class Plan:
         def find(self, input) -> FoundBooks:
@@ -494,7 +494,7 @@ def test_a_result_annotated_with_the_declared_output_or_a_response_or_not_at_all
 
 
 def test_a_result_annotated_with_another_model_for_a_declared_output_does_not_load():
-    from fastworkflow.planning_commands import PlanningCommandFormatError
+    from fastworkflow.planning.planning_commands import PlanningCommandFormatError
 
     class Plan:
         def find(self, input) -> FoundBooks:

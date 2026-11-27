@@ -25,10 +25,11 @@ import pytest
 from dspy.utils import DummyLM
 
 import fastworkflow
-from fastworkflow import planning_commands, review_engine as re_
-from fastworkflow import review_proposals as rp
-from fastworkflow.review_engine import CONFIRMED, REVISED, open_review, proposal_of, reply_to_proposal
-from fastworkflow.review_proposals import Means, SubTask, SubTaskInput, SubTaskProposal
+from fastworkflow.planning import planning_commands
+from fastworkflow.review import review_engine as re_
+from fastworkflow.review import review_proposals as rp
+from fastworkflow.review.review_engine import CONFIRMED, REVISED, open_review, proposal_of, reply_to_proposal
+from fastworkflow.review.review_proposals import Means, SubTask, SubTaskInput, SubTaskProposal
 
 from tests.test_approval_binding import annotated_library, no_live_model, todo  # noqa: F401
 from tests.test_plan_reply_policy import (  # noqa: F401

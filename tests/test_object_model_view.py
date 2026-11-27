@@ -3,7 +3,8 @@ command's ``@descends_to``, written by ``fastworkflow command preview`` beside t
 import os
 import re
 
-from fastworkflow import command_preview, object_model_view
+from fastworkflow.planning import command_preview
+from fastworkflow import object_model_view
 from fastworkflow.command_context_model import CommandContextModel, context_folders
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

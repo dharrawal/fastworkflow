@@ -26,12 +26,12 @@ from dspy.experimental import Choice, TypeSafe
 
 import fastworkflow
 from fastworkflow.observability import tracing
-from fastworkflow import approval_binding
+from fastworkflow.review import approval_binding
 from fastworkflow import intent_loop
 from fastworkflow import turn_progress
 from fastworkflow.utils import subtask_pool
-from fastworkflow import planning_commands
-from fastworkflow.planning_commands import (
+from fastworkflow.planning import planning_commands
+from fastworkflow.planning.planning_commands import (
     PlanningCommandCommand, PlanningCommandFormatError, PlanningCommandInputError, typed_planning_call, refusal_question,
     refusal_names_an_input)
 from fastworkflow.split_merge import (
@@ -1594,7 +1594,7 @@ def load_planning_commands(workflow_folderpath: str) -> tuple[tuple[str, str, tu
 
     A planning command is defined by the file ``_commands/<name>.py`` at the root or
     ``_commands/<Context>/<name>.py`` in a context subfolder (format:
-    ``fastworkflow.planning_commands``; which files are planning commands: ``_planning_command_files``); its name is
+    ``fastworkflow.planning.planning_commands``; which files are planning commands: ``_planning_command_files``); its name is
     the file stem (or ``"<Context>/<stem>"`` in a context) and the ``Signature`` docstring
     its description. A
     planning command's template text is its steps (its ``steps()`` on placeholder inputs; for a planning command

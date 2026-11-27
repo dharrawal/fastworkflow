@@ -13,7 +13,7 @@ import json
 
 import pytest
 
-from fastworkflow import approval_binding as ab
+from fastworkflow.review import approval_binding as ab
 from fastworkflow import waiting as wm
 from fastworkflow.turn import TurnStatus
 from tests.test_approval_binding import _ask, _finish, annotated_library, todo  # noqa: F401 - fixtures

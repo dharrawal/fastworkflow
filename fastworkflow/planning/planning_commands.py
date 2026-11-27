@@ -171,7 +171,7 @@ A planning command file::
   ``Input``): a ``PlanGenerator`` method that reads an earlier phase's
   facts, or fills its own (its return annotation), makes the call run as phases: each its
   own bounded sub-plan, passing its filled facts model to later phases by parameter name
-  (``fastworkflow.planning_phases``; the loader builds its ``Phase`` list,
+  (``fastworkflow.planning.planning_phases``; the loader builds its ``Phase`` list,
   ``planning.planned``). At load the phases are built on the placeholder inputs: their
   parameters must bind (``_checked_plan``), and each method's template call must succeed (``PlanningCommandFormatError`` otherwise); every command step
   must name a workflow command and only parameters of its ``Signature.Input``
@@ -243,7 +243,7 @@ from fastworkflow.parameters.field_options import (
     CLASSIFIER_CONFIRMS, CLASSIFIER_DECIDES, COMMAND_TEXT_AFTER_COMMAND_NAME,
     COPIED_FROM_COMMAND_TEXT, EXAMPLES_BY, FROM_COMMAND_OUTPUT, OPTION_KEYS, RECORD_NAMED_IN_COMMAND_TEXT, UI)
 from fastworkflow.parameters.parameter_clarification import Extraction
-from fastworkflow.planning_command_json_schema_internal import (
+from fastworkflow.planning.planning_command_json_schema_internal import (
     HAND_WRITTEN_AVAILABLE_FROM_KEY as _HAND_WRITTEN_AVAILABLE_FROM_KEY,
     PLANNING_COMMAND_JSON_SCHEMA_EXTRA_INTERNAL_KEYS as _PLANNING_COMMAND_JSON_SCHEMA_EXTRA_INTERNAL_KEYS,
 )
@@ -265,7 +265,7 @@ _NOTE_CONDITION_RE = re.compile(
     r"\b(?:if|only\s+(?:if|when)|when|whenever|unless|otherwise|optional(?:ly)?|in case|as needed|"
     r"where (?:needed|applicable)|else)\b", re.IGNORECASE)
 from fastworkflow import planning as planning_api
-from fastworkflow.planning_phases import (
+from fastworkflow.planning.planning_phases import (
     FULL_LIST_PHRASES,
     PhaseError,
     _PICK_NAMED_RE,
@@ -587,7 +587,7 @@ class PlanningCommandCommand:
     template: tuple[str, ...] = field(default=(), compare=False)
     #: ``Signature.plain_utterances``: example requests for the planning command.
     plain_utterances: tuple[str, ...] = field(default=(), compare=False)
-    #: The planning command file's ``plan(input) -> list[Phase]`` (``fastworkflow.planning_phases``), or None.
+    #: The planning command file's ``plan(input) -> list[Phase]`` (``fastworkflow.planning.planning_phases``), or None.
     plan_fn: Callable | None = field(default=None, compare=False)
     #: The phases' ``output`` models seen when ``plan()`` ran on the placeholder inputs at load.
     phase_outputs: tuple[type, ...] = field(default=(), compare=False)
@@ -775,7 +775,7 @@ def _facts_field_key_problem(model: type, name: str, extra, *, typed: bool) -> O
     is refused. ``from_command_output`` has its own message; so does the retired copy key ``"from"`` (what the removed
     ``fact_from`` wrote) on a field that is not *typed* (``typed_phase_facts``, whose message says copies are not
     read), and on a *typed* field it is refused here."""
-    from fastworkflow.typed_phase_facts import COPIES_NOT_READ
+    from fastworkflow.planning.typed_phase_facts import COPIES_NOT_READ
 
     where = f"{model.__name__}"
     if extra is None:
@@ -2098,7 +2098,7 @@ def command_from_module(name: str, module, path: str) -> PlanningCommandFile:
     if not description:
         raise PlanningCommandFormatError(f"{path}: Signature needs a docstring (the planning command's description)")
     from fastworkflow import planning as planning_api
-    from fastworkflow.planning_phases import PhaseError
+    from fastworkflow.planning.planning_phases import PhaseError
 
     plan_cls = getattr(module, "PlanGenerator", None)
     if not inspect.isclass(plan_cls) or not planning_api.phase_methods(plan_cls):
@@ -2236,7 +2236,7 @@ def _public_base_helper_hint(command: PlanningCommandCommand, error: Exception) 
 
 def _concatenated_steps_fn(plan_fn: Callable) -> Callable:
     """``steps(input)`` of a planning command file that defines only ``plan()``: the phases joined."""
-    from fastworkflow.planning_phases import concatenated_steps
+    from fastworkflow.planning.planning_phases import concatenated_steps
 
     def steps(input):
         return concatenated_steps(plan_fn(input))
@@ -2247,7 +2247,7 @@ def _concatenated_steps_fn(plan_fn: Callable) -> Callable:
 def _refuse_flat_say_that(path: str, name: str, lines) -> None:
     """A flat call whose answer is only 'say that' lines is refused as a last phase of them is (3.16):
     the answer is ``__result__``'s, and the load check can see the steps the call runs flat."""
-    from fastworkflow import planning_phases
+    from fastworkflow.planning import planning_phases
 
     if lines and planning_phases.answer_by_code("\n".join(lines)):
         raise PlanningCommandFormatError(planning_phases.say_that_last_message(path, name))
@@ -2263,7 +2263,7 @@ def _checked_plan(command: PlanningCommandCommand, own_steps: bool = True) -> tu
     earlier phase with an output) in at least one of the results. Returns the output models seen.
     Raises PlanningCommandFormatError.
     """
-    from fastworkflow.planning_phases import PhaseError, active_phases, check_bindings, is_flat_plan
+    from fastworkflow.planning.planning_phases import PhaseError, active_phases, check_bindings, is_flat_plan
 
     models: list[type] = []
     binds: dict[tuple[str, str, str], bool] = {}
@@ -2560,7 +2560,7 @@ def resolve_signature_field_sources(
                         for message in (*check_table_groups(output_cls), *check_ui_value_options(output_cls)))
 
     # 2. Check facts models in phase_outputs for from_command_output (distinct from fact_from)
-    from fastworkflow.typed_phase_facts import _strip_optional as _typed_facts_strip
+    from fastworkflow.planning.typed_phase_facts import _strip_optional as _typed_facts_strip
 
     for model in phase_outputs:
         if not (inspect.isclass(model) and issubclass(model, BaseModel)):
@@ -2819,7 +2819,7 @@ def _typed_phase_output_problems(
     resolution: FieldSourceResolution,
 ) -> list[FieldSourceProblem]:
     """Load errors for typed phase outputs and step coverage (3.12)."""
-    from fastworkflow import typed_phase_facts as tpf
+    from fastworkflow.planning import typed_phase_facts as tpf
 
     problems: list[FieldSourceProblem] = []
     signatures = resolution.signatures
@@ -3209,7 +3209,7 @@ def _resolve_field_sources_cached(folder: str, _source_fingerprint: str) -> Fiel
 
 
 def is_framework_planning_command(command: "PlanningCommandCommand") -> bool:
-    """True for a framework-provided planning command (fastworkflow/_framework_commands): system machinery, not
+    """True for a framework-provided planning command (fastworkflow/review/commands): system machinery, not
     trained, not inventoried, not listed. It stays loadable and callable by name (``planning_command``)."""
     import fastworkflow.command_directory as command_directory
 
@@ -3563,7 +3563,7 @@ def phases_for(command: PlanningCommandCommand, args: dict) -> list | None:
     this call runs flat, from ``steps()``. Raises PlanningCommandCallError when ``plan()`` fails,
     returns something else than a list of ``Phase``, or leaves every phase out.
     """
-    from fastworkflow.planning_phases import PhaseError, active_phases, is_flat_plan
+    from fastworkflow.planning.planning_phases import PhaseError, active_phases, is_flat_plan
 
     instance = input_instance(command, args)
     try:
@@ -3585,7 +3585,7 @@ def call_phases(command: PlanningCommandCommand, args: dict) -> list:
     call (no ``plan()``, or ``plan()`` gives no phases), one phase named after the planning command whose
     steps are ``expand(command, args)``. A planning command without phases runs as one phase.
     Raises PlanningCommandCallError as ``phases_for`` and ``expand`` do."""
-    from fastworkflow.planning_phases import Phase
+    from fastworkflow.planning.planning_phases import Phase
 
     phases = phases_for(command, args) if command.plan_fn is not None else None
     if phases is not None:

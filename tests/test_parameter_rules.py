@@ -3,7 +3,7 @@ and a check that the old names in the two guard modules are the very same object
 import pytest
 from pydantic import BaseModel, Field
 
-from fastworkflow import planning_commands
+from fastworkflow.planning import planning_commands
 from fastworkflow.parameters import rules
 from fastworkflow.parameters import argument_checks
 

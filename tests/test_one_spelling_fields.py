@@ -13,7 +13,7 @@ from typing import Literal
 import pytest
 from pydantic import BaseModel, Field
 
-from fastworkflow import planning_commands as pc
+from fastworkflow.planning import planning_commands as pc
 from fastworkflow.parameters import check as one_guard, pipeline, rules
 from fastworkflow.parameters.validate import validate
 from tests.test_extraction_argument_checks import RETAIL, _calls, _framework, extract  # noqa: F401 - fixtures
