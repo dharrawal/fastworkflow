@@ -53,7 +53,7 @@ from fastworkflow.observation_offloading.state import (
     reset_observation_state,
     scope_for_host,
 )
-from fastworkflow.agent.react import AskUserSuspend
+from fastworkflow.engine.suspension import AskUserSuspend
 from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 REDACTION_ENV = archive_module.REDACTION_ENV

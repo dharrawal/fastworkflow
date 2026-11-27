@@ -17,7 +17,7 @@ import pytest
 import fastworkflow
 from fastworkflow.intent import intent_loop
 from tests.test_turn_result_capture import no_review_gate  # noqa: F401 - the review gate is off for these turns
-from fastworkflow.agent.react import NoSuspendedAgentStateError
+from fastworkflow.engine.suspension import NoSuspendedAgentStateError
 from fastworkflow.agent.workflow_agent import _ask_user_tool
 from fastworkflow.engine.workflow_execution_context import (
     CommandCancelledError,

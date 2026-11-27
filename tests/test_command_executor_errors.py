@@ -611,7 +611,7 @@ def test_a_hostile_getattr_cannot_mask_the_real_exception():
 
 
 def _control_signals():
-    from fastworkflow.agent.react import AskUserSuspend
+    from fastworkflow.engine.suspension import AskUserSuspend
     from fastworkflow.engine.workflow_execution_context import CommandCancelledError
 
     return [
@@ -665,7 +665,7 @@ def test_the_status_mapping_is_a_single_shared_function():
     Pinned as a unit test on the helper so the intent survives even if a call
     site is rewritten: control signals are not failures, everything else is.
     """
-    from fastworkflow.agent.react import AskUserSuspend
+    from fastworkflow.engine.suspension import AskUserSuspend
     from fastworkflow.engine.workflow_execution_context import CommandCancelledError
 
     assert tracing.status_for_dispatch_exception(AskUserSuspend("q")) == (
@@ -688,7 +688,7 @@ def test_a_span_status_of_awaiting_user_is_never_produced_for_a_dispatch():
     status, and the only thing the SPA tests for (it reads `turn.status`, never
     `span.status`). A span status describes that span's own outcome.
     """
-    from fastworkflow.agent.react import AskUserSuspend
+    from fastworkflow.engine.suspension import AskUserSuspend
 
     assert tracing.status_for_dispatch_exception(AskUserSuspend("q")) != (
         tracing.STATUS_AWAITING_USER

@@ -51,7 +51,7 @@ from fastworkflow.core.context_navigation import (
     command_on_path, enters_current_context, lookup_scopes, render_already_in_context,
     scope_command_names, unavailable_command_message)
 from fastworkflow.core.context_navigation import home_contexts as context_homes
-from fastworkflow.agent.react import AskUserSuspend
+from fastworkflow.engine.suspension import AskUserSuspend
 from fastworkflow.agent.chat_adapter import CommandsSystemPreludeAdapter
 from fastworkflow.utils.dspy_logger import watch_cut_off_replies
 from fastworkflow.observation_offloading.agent import build_tool_agent

@@ -55,7 +55,7 @@ from fastworkflow.core.turn import TurnResult, TurnStatus, mint_turn_key
 from fastworkflow.utils.logging import logger
 from fastworkflow.utils import dspy_logger, dspy_utils
 from fastworkflow.parameters.input_validation import plain_facts, stored_value, tagged_facts
-from fastworkflow.agent.react import AskUserSuspend, NoSuspendedAgentStateError
+from fastworkflow.engine.suspension import AskUserSuspend, NoSuspendedAgentStateError
 
 #: A sub-task that hits the ReAct step cap is continued by a fresh executor at most this many times.
 MAX_HANDOFFS = 2
@@ -4810,7 +4810,7 @@ class WorkflowExecutionContext:
         caller to settle, not the awaiting output (fix-3rsq.plan-review.2.8). Without it the call begins a turn of its
         own, with *unattended* (attended by default, as the review always was).
         """
-        from fastworkflow.agent.react import AskUserSuspend
+        from fastworkflow.engine.suspension import AskUserSuspend
 
         from fastworkflow.agent.workflow_agent import framework_call_scope
 

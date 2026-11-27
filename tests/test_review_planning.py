@@ -80,7 +80,7 @@ def test_an_app_command_of_the_same_name_overrides_the_framework_one(tmp_path):
 
 def test_review_subtasks_runs_end_to_end_with_scripted_replies_and_returns_the_accepted_proposal(todo):
     # The framework calls the planning command directly (not the agent's name resolution, which refuses it).
-    from fastworkflow.agent.react import AskUserSuspend
+    from fastworkflow.engine.suspension import AskUserSuspend
 
     todo.wf.record = todo.library
     awaiting = todo.ctx.run_framework_planning_command(

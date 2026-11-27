@@ -2333,7 +2333,7 @@ def open_review(host: Any, store: ReviewStore, proposal: Proposal, *, surface: S
     if (put := getattr(question_owner(store, host), "_put_review_record", None)) is not None:
         put(record)      # the review is the turn's waiting record, pointing at this one (``waiting``)
     if suspend:
-        from fastworkflow.agent.react import AskUserSuspend
+        from fastworkflow.engine.suspension import AskUserSuspend
 
         raise AskUserSuspend(text)
     return record

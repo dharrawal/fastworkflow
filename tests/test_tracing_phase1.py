@@ -23,7 +23,8 @@ from fastworkflow.agent import workflow_agent
 from fastworkflow.observability import metrics, tracing
 from fastworkflow.engine.command_executor import CommandExecutor
 from fastworkflow.observability import store as obs
-from fastworkflow.agent.react import AskUserSuspend, fastWorkflowReAct
+from fastworkflow.engine.suspension import AskUserSuspend
+from fastworkflow.agent.react import fastWorkflowReAct
 from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 from tests.test_turn_result_capture import no_review_gate  # noqa: F401 - the review gate is off for these turns
 from tests import span_tree
