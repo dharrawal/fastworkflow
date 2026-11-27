@@ -104,6 +104,34 @@ Run `fastworkflow --help` for the full command list (`examples`, `train`, `run_c
   and automatically chooses selective or full retraining. `--regenerate-utterances` is the
   only training-policy override.
 
+## Where things live
+
+Only `fastworkflow/__init__.py` (the public API) and `cli.py` sit at the package root; every other module is in the
+folder of what it does (bd fix-bl97):
+
+| Folder | What goes there |
+|---|---|
+| `core/` | What a workflow is: `Workflow`, contexts, the command directory and routing, the declarations, the turn and waiting records |
+| `engine/` | Running one turn: `WorkflowExecutionContext`, the command executor, `ChatSession`, the suspension signals |
+| `intent/` | Which command a request means: the intent loop and detector, the which-command question, learning, the run-time router |
+| `parameters/` | Getting and asking for a command's values: extraction, checks, the parameter question and its reply |
+| `planning/` | Planning commands (`fastworkflow.planning` is the authoring API), their phases and previews |
+| `review/` | The turn's review and approvals; the framework's own review commands are in `review/commands/` |
+| `agent/` | The model-driven agent: `workflow_agent`, the splitter, the ReAct loop and its tool agent |
+| `policy/` | The agent's runtime policy table |
+| `session/` | What survives a process: session stores, checkpoints, serialization, state paths |
+| `observability/`, `observation_offloading/` | Spans, metrics and the run store; observation compaction and search |
+| `evaluation/`, `experiment/`, `benchmark/` | Offline comparison and scoring of runs |
+| `train/`, `build/`, `refine/` | The trainer and the build tools |
+| `run_cli/`, `run_chatbot/`, `run_fastapi_mcp/` | The three ways to serve a workflow |
+| `utils/` | Generic helpers with no fastWorkflow concept in them |
+| `_workflows/`, `examples/` | The framework's own workflows and the shipped examples |
+
+A module-level import never reaches a higher layer: `utils` < `session` < `core` < `intent`, `parameters`, `policy`,
+`observability`, `observation_offloading` < `planning` < `review` < `engine` < `agent` < `evaluation` < `train`, `build`,
+the `run_*` folders and `cli` (`tests/test_import_layers.py`; an import inside a function is how a cycle is broken and is
+not checked). One exception is left: `parameters/signatures.py` imports `planning/planning_commands.py` (fix-ld76).
+
 ## Architecture: Three Phases
 
 ```
