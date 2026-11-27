@@ -3284,13 +3284,16 @@ def main():
     # launcher (SIGHUP / SIGKILL / crash) cannot leave this process orphaned.
     start_parent_liveness_watch(getattr(ARGS, "parent_pid", None))
     
-    # Read LOG_LEVEL from env file to configure uvicorn's logger
-    # (env file isn't loaded until lifespan, but uvicorn needs log_level at startup)
+    # uvicorn's log level, read before lifespan loads the env files: LOG_LEVEL under the one precedence rule (the
+    # process, then the env file) and the one reader (`parse_log_level`, any case; a bad value keeps uvicorn's default).
+    from fastworkflow.utils.logging import parse_log_level
+
     log_level = "info"  # uvicorn default
-    if hasattr(ARGS, 'env_file_path') and ARGS.env_file_path:
-        env_vars = dotenv_values(ARGS.env_file_path)
-        if "LOG_LEVEL" in env_vars:
-            log_level = env_vars["LOG_LEVEL"].lower()
+    text = os.environ.get("LOG_LEVEL")
+    if text is None and getattr(ARGS, "env_file_path", None):
+        text = dotenv_values(ARGS.env_file_path).get("LOG_LEVEL")
+    if text and (level := parse_log_level(text)) is not None:
+        log_level = logging.getLevelName(level).lower()
     
     # Add filter to suppress successful probe requests from uvicorn's access logger
     # This preserves access logs for other endpoints while eliminating probe spam

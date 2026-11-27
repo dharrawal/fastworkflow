@@ -290,8 +290,6 @@ class Environment:
         fastworkflow._env_vars["FW_JEV_FIELD_GIVEN"] = "off"
         fastworkflow._env_vars["FW_EXTRACTION_ARGUMENT_CHECKS"] = "on"
         getattr(workflow_agent._jev_lm, "cache_clear", lambda: None)()
-        saved_lm_name = signatures.LLM_PARAM_EXTRACTION
-        signatures.LLM_PARAM_EXTRACTION = "scripted/extractor"
         saved_get_lm = signatures.dspy_utils.get_lm
         env = self
 
@@ -325,7 +323,6 @@ class Environment:
         self._undo = [
             lambda: setattr(signatures, "fields_not_given", saved_fields_not_given),
             lambda: setattr(signatures.dspy_utils, "get_lm", saved_get_lm),
-            lambda: setattr(signatures, "LLM_PARAM_EXTRACTION", saved_lm_name),
             lambda: [fastworkflow._env_vars.__setitem__(n, v) if v is not None else fastworkflow._env_vars.pop(n, None)
                      for n, v in saved_env.items()],
             lambda: os.environ.__setitem__("JEV_API_KEY", saved_os) if saved_os is not None else None,

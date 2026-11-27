@@ -378,7 +378,6 @@ def no_agent(gated, no_agent_model, no_planner_key, monkeypatch):  # noqa: F811
     original = signatures.dspy_utils.get_lm
     monkeypatch.setattr(signatures.dspy_utils, "get_lm",
                         lambda name, *a, **k: lm if name == "LLM_PARAM_EXTRACTION" else original(name, *a, **k))
-    monkeypatch.setattr(signatures, "LLM_PARAM_EXTRACTION", "scripted/extractor")
     gated.splits, gated.matched, gated.parts = [], [], [ABOUT_EMMA, A_NOTE, ABOUT_DUNE]
 
     def split(user_query, **kwargs):

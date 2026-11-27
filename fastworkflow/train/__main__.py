@@ -7,14 +7,15 @@ import shutil
 import sys
 import time
 from datetime import datetime, timezone
-from dotenv import dotenv_values
+from typing import Optional
 import importlib.util
 
 from colorama import Fore, Style
 
 import fastworkflow
+from fastworkflow.utils.env import read_env_files
 from fastworkflow.utils.logging import logger
-from fastworkflow.utils import python_utils, workflow_vocabulary
+from fastworkflow.utils import dspy_utils, python_utils, workflow_vocabulary
 from fastworkflow import ModuleType
 from fastworkflow import model_pipeline_training
 from fastworkflow.model_pipeline_training import (
@@ -676,7 +677,9 @@ def _generate_dspy_examples_helper(workflow):
             field_annotations=fields.model_fields,
             command_name=command_name,
             num_examples=PARAM_EXAMPLE_COUNT,
-            validation_threshold=PARAM_VALIDATION_THRESHOLD  # You can adjust this threshold as needed
+            validation_threshold=PARAM_VALIDATION_THRESHOLD,  # You can adjust this threshold as needed
+            # LLM_SYNDATA_GEN, else the base model, with the key that follows it (dspy_utils.resolve_role).
+            completion_fn=dspy_utils.role_completion("LLM_SYNDATA_GEN"),
             )
             # Appended after generation so the example cache is unchanged, and only
             # beside real examples: alone it would teach "every field is missing".
@@ -876,6 +879,29 @@ def is_fast_workflow_trained(fastworkflow_folderpath: str):
     return all(_internal_workflow_trained(fastworkflow_folderpath, name) for name in FRAMEWORK_WORKFLOWS)
 
 
+#: ``fastworkflow train`` with no model to generate utterances with.
+NO_SYNDATA_MODEL = ("no model to generate training utterances with: set LLM_SYNDATA_GEN, or LLM_AGENT or LLM_PLANNER "
+                    "(it falls back to them), in the workflow's env file.")
+
+
+def syndata_model_problem() -> Optional[str]:
+    """``NO_SYNDATA_MODEL`` when ``LLM_SYNDATA_GEN`` resolves to no model (``dspy_utils.resolve_role``), else None."""
+    return None if dspy_utils.resolve_role("LLM_SYNDATA_GEN").model else NO_SYNDATA_MODEL
+
+
+def syndata_key_notice(passwords_file_path) -> Optional[str]:
+    """One line when the utterance generator's model needs a key and none follows it, naming the setting it reads."""
+    from fastworkflow.utils.model_roles import key_var_of
+
+    role = dspy_utils.resolve_role("LLM_SYNDATA_GEN")
+    if not role.needs_key or role.key:
+        return None
+    key_var = key_var_of(role.inherited_from or role.role)
+    return (f"No key for the utterance generator's model {role.model} "
+            f"({key_var}{', or LITELLM_API_KEY_SYNDATA_GEN' if role.inherited_from else ''}): is the passwords file "
+            f"missing or its path wrong? Path: {passwords_file_path}")
+
+
 def train_main(args):
     """Main function to train the workflow."""
     # Resolve the workflow path to absolute path to handle relative paths correctly
@@ -904,19 +930,21 @@ def train_main(args):
             print(f"  {problem}", file=sys.stderr)
         exit(1)
 
-    env_vars = {
-        **dotenv_values(args.env_file_path),
-        **dotenv_values(args.passwords_file_path)
-    }
+    env_vars = read_env_files(args.env_file_path, args.passwords_file_path)
     if not os.path.isfile(args.env_file_path):
         raise ValueError(f"Env file not found: {args.env_file_path}")
     if not env_vars:
         print(f'Env file path: {args.env_file_path}')
         raise ValueError("Env file loaded no variables! Is the env file missing? or path is incorrect?")
-    if not env_vars.get("LITELLM_API_KEY_SYNDATA_GEN"):
-        print(f"LITELLM_API_KEY_SYNDATA_GEN password env var not found! OK if this is Bedrock. Otherwise, is the password env file missing or incorrect path? Path: {args.passwords_file_path}")
 
     fastworkflow.init(env_vars=env_vars)
+
+    # The utterance generator's model: LLM_SYNDATA_GEN, else the base model (LLM_AGENT, else LLM_PLANNER).
+    if problem := syndata_model_problem():
+        print(f"{Fore.RED}Error: {problem}{Style.RESET_ALL}", file=sys.stderr)
+        exit(1)
+    if notice := syndata_key_notice(args.passwords_file_path):
+        print(notice)
 
     regenerate_utterances = getattr(args, "regenerate_utterances", False)
     # Check if the framework's own workflows have been trained, and train them if not. The

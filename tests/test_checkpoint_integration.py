@@ -72,7 +72,7 @@ TODO_LIST_JSON = TESTS_DIR / "todo_list_workflow" / "application" / "todo_list.j
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
-def speedict_folder(tmp_path):
+def speedict_folder(tmp_path, monkeypatch):
     """Point fastWorkflow's durable root at a private temp directory.
 
     Every checkpoint namespace these tests read is derived from
@@ -90,6 +90,9 @@ def speedict_folder(tmp_path):
     previous_env = fastworkflow._env_vars
     speedict = tmp_path / "speedict"
     fastworkflow.init({"FASTWORKFLOW_STATE_ROOT": str(speedict)})
+    # The process environment wins over the env-file dict (`fastworkflow.get_env_var`), and conftest's
+    # `isolate_state_root` sets it there, so the root is set in the process too.
+    monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(speedict))
     fastworkflow.RoutingRegistry.clear_registry()
     # Pin warnings are throttled per (workflow, reason) for the life of the
     # process, so a test that asserts on one has to start from a clean slate.

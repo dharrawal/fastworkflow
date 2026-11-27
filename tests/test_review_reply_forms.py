@@ -17,6 +17,7 @@ from tests.test_approval_binding import (  # noqa: F401
     annotated_library, grant_root, no_live_model, no_model_call_for_parameters, todo)
 from tests.test_pending_prompt_description import (  # noqa: F401
     EMMA, JOKE, _last_artifacts, gated, no_draft_extraction)
+from tests.test_round1_gate import remote_decides_emma_and_joke  # noqa: F401
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401
 
 
@@ -49,7 +50,7 @@ def test_a_text_with_no_hint_falls_back_to_the_hint_the_proposal_would_show():
     assert [f.get("pattern") for f in reply_forms("x", None)] == [None, None, "change N: field=value", "drop N"]
 
 
-def test_a_subtask_review_carries_its_reply_forms_and_an_edit_refreshes_them(gated, monkeypatch):
+def test_a_subtask_review_carries_its_reply_forms_and_an_edit_refreshes_them(gated, monkeypatch, remote_decides_emma_and_joke):
     monkeypatch.setattr("fastworkflow.workflow_agent.split_into_subtasks",
                         lambda user_query, **kwargs: [EMMA, JOKE])
     # A workflow with no command that changes data: the ad hoc part (JOKE) then carries no "may change data" badge and

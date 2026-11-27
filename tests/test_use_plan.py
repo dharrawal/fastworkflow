@@ -117,7 +117,6 @@ def extractor_finds_title_only_in_a_reply(monkeypatch) -> ScriptedExtractor:
     original = signatures.dspy_utils.get_lm
     monkeypatch.setattr(signatures.dspy_utils, "get_lm",
                         lambda name, *a, **k: lm if name == "LLM_PARAM_EXTRACTION" else original(name, *a, **k))
-    monkeypatch.setattr(signatures, "LLM_PARAM_EXTRACTION", "scripted/extractor")
     return lm
 
 

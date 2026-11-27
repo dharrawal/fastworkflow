@@ -40,7 +40,7 @@ from tests.test_no_agent_mode import _plan
 from tests.test_parameter_form_reply_contract import PARTIAL, session  # noqa: F401 - the CME on plain_required_workflow
 from tests.test_parameter_loop import (  # noqa: F401 - fixtures and helpers
     A_NOTE, ABOUT_DUNE, ABOUT_EMMA, BOOK_PLAN, HOST, NOTE_PLAN, _TextPlanner, no_agent)
-from tests.test_round1_gate import EMMA, JOKE, _open_review, _split_into, gated  # noqa: F401
+from tests.test_round1_gate import EMMA, JOKE, _open_review, _split_into, gated, remote_decides_emma_and_joke  # noqa: F401
 from tests.test_step_helpers import _build_planning_command, library_env  # noqa: F401
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401
 
@@ -214,7 +214,7 @@ def no_param_model(monkeypatch):
     monkeypatch.setenv("FW_DRAFT_ARGUMENTS", "off")
 
 
-def test_a_sub_task_review_is_cancelled_by_no(gated, no_param_model, monkeypatch):
+def test_a_sub_task_review_is_cancelled_by_no(gated, no_param_model, monkeypatch, remote_decides_emma_and_joke):
     _split_into(monkeypatch, [EMMA, JOKE])
     asked = gated.ctx.process_turn(f"{EMMA} and {JOKE}")
     assert asked.status is TurnStatus.AWAITING_USER
@@ -369,7 +369,7 @@ def test_the_removed_review_flags_are_gone_from_the_frame_the_state_and_the_cont
     assert SCHEMA_VERSION == 8
 
 
-def test_a_sub_task_review_is_the_turns_record_pointing_at_the_stores_record(gated, no_param_model, monkeypatch):
+def test_a_sub_task_review_is_the_turns_record_pointing_at_the_stores_record(gated, no_param_model, monkeypatch, remote_decides_emma_and_joke):
     _split_into(monkeypatch, [EMMA, JOKE])
     gated.ctx.process_turn(f"{EMMA} and {JOKE}")
     store_record = _open_review(gated)
@@ -409,7 +409,7 @@ def test_a_stand_alone_framework_review_is_a_record_that_is_not_the_gate_and_end
     assert done.status is TurnStatus.COMPLETED and todo.ctx._waiting is None and todo.ctx.waiting is None
 
 
-def test_the_review_slot_question_is_saved_and_restored_inside_the_review_record(gated, no_param_model, monkeypatch):
+def test_the_review_slot_question_is_saved_and_restored_inside_the_review_record(gated, no_param_model, monkeypatch, remote_decides_emma_and_joke):
     _split_into(monkeypatch, [EMMA, JOKE])
     gated.ctx.process_turn(f"{EMMA} and {JOKE}")
     _open_review(gated)

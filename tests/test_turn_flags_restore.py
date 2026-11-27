@@ -16,7 +16,8 @@ from fastworkflow.turn import TurnStatus
 from tests.test_approval_binding import (  # noqa: F401 - fixtures
     annotated_library, no_live_model, no_model_call_for_parameters, todo)
 from tests.test_planning_command_phases import RecordingSink  # noqa: F401
-from tests.test_round1_gate import EMMA, JOKE, _marker, _open_review, _split_into, gated  # noqa: F401
+from tests.conftest import script_matcher
+from tests.test_round1_gate import REMOTE_ANSWERS, EMMA, JOKE, _marker, _open_review, _split_into, gated  # noqa: F401
 from tests.test_round1_handoff import _planner_stub, _scripted_context  # noqa: F401
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401
 
@@ -36,6 +37,7 @@ def _suspended_in_an_accepted_review(annotated_library, monkeypatch):
     """A reviewed turn: the review was accepted and the first goal's agent then asked the user a question."""
     _planner_stub(monkeypatch, [])
     _split_into(monkeypatch, [EMMA, JOKE])
+    script_matcher(monkeypatch, REMOTE_ANSWERS)   # the remote decision model binds EMMA and leaves JOKE ad hoc
     first = _scripted_context(annotated_library, monkeypatch)
     first.ctx.process_turn(f"{EMMA} and {JOKE}")
     _open_review(type("S", (), {"store": __import__("fastworkflow.approval_binding", fromlist=["x"]).store_for(first.wf)}))

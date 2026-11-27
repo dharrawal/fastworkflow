@@ -20,12 +20,13 @@ Steps::
 
 How LLM calls are blocked
 -------------------------
-fastworkflow reads LLM settings through ``fastworkflow.get_env_var``, which takes the values
-handed to ``fastworkflow.init`` before the process environment. The driver passes the
+fastworkflow reads LLM settings through ``fastworkflow.get_env_var``, where the process
+environment wins over the values handed to ``fastworkflow.init``. The driver passes the
 workflow's own env files plus overrides that replace every ``LITELLM_API_KEY_*`` with an
-invalid key, and point ``LITELLM_PROXY_API_BASE`` (when set) at a closed local port. The
-model strings are deliberately NOT changed: the utterance-cache key includes the model
-string (``utterance_cache.py``), so changing it would miss the cache. Every real generation
+invalid key, and point ``LITELLM_PROXY_API_BASE`` (when set) at a closed local port, and
+writes the same overrides over any process value of those names (``init_blocked``). The
+model strings are deliberately NOT changed (the training signature reads the model
+settings). Every real generation
 site passes its key explicitly, so the invalid key is what the provider sees. Generation
 retries a few times, then falls back to seeds and records ``fell_back`` in
 ``training_provenance.json``. Step 4 turns any fallback into a failure, so a blocked call
@@ -238,7 +239,6 @@ def cache_report(folder: str) -> dict:
     """
     import math
 
-    import fastworkflow
     from fastworkflow.model_pipeline_training import get_route_layer_filepath_model
     from fastworkflow.train import generate_synthetic as gs
     from fastworkflow.train import param_example_cache as pc
@@ -250,11 +250,11 @@ def cache_report(folder: str) -> dict:
         parameter_model_of,
     )
     from fastworkflow.train.determinism import get_training_seed
+    from fastworkflow.utils import dspy_utils
     from fastworkflow.utils.generate_param_examples import extract_field_details, param_example_fingerprint
 
     cmd_dir = prepare_registry(folder)
     seed = get_training_seed()
-    model = fastworkflow.get_env_var("LLM_SYNDATA_GEN")
     personas = gs._resolve_generation_count(None, "SYNTHETIC_UTTERANCE_GEN_NUMOF_PERSONAS")
     per_persona = gs._resolve_generation_count(None, "SYNTHETIC_UTTERANCE_GEN_UTTERANCES_PER_PERSONA")
     per_batch = gs._resolve_generation_count(None, "SYNTHETIC_UTTERANCE_GEN_PERSONAS_PER_BATCH")
@@ -264,7 +264,7 @@ def cache_report(folder: str) -> dict:
     utterance = {"commands": 0, "hits": 0, "misses": [], "uncacheable": []}
     for name in utterance_command_names(cmd_dir):
         seeds = list(cmd_dir.get_utterance_metadata(name).plain_utterances)
-        fingerprint = gs.utterance_fingerprint(seeds, name, personas, per_persona, per_batch, model)
+        fingerprint = gs.utterance_fingerprint(seeds, name, personas, per_persona, per_batch)
         utterance["commands"] += 1
         if utterance_cache.lookup(fingerprint, seed) is not None:
             utterance["hits"] += 1
@@ -285,7 +285,7 @@ def cache_report(folder: str) -> dict:
             continue
         annotations = fields.model_fields
         fingerprint = param_example_fingerprint(
-            annotations, name, PARAM_EXAMPLE_COUNT, PARAM_VALIDATION_THRESHOLD, model,
+            annotations, name, PARAM_EXAMPLE_COUNT, PARAM_VALIDATION_THRESHOLD,
             field_details=extract_field_details(annotations), completion_fn=None)
         param["commands"] += 1
         if fingerprint is None:
@@ -305,7 +305,8 @@ def cache_report(folder: str) -> dict:
     param["estimated_llm_calls"] = sum(m["estimated_llm_calls"] for m in param["misses"])
     return {
         "seed": seed,
-        "model": model,
+        # The generator model (LLM_SYNDATA_GEN or its fallback), for the reader: it is no cache-key input.
+        "model": dspy_utils.resolve_role("LLM_SYNDATA_GEN").model,
         "utterance_settings": {"personas": personas, "utterances_per_persona": per_persona,
                                "personas_per_batch": per_batch},
         "utterance_cache": utterance,
@@ -454,6 +455,19 @@ def blocked_env(env: dict[str, str]) -> dict[str, str]:
         blocked["LITELLM_PROXY_API_BASE"] = CLOSED_PROXY_BASE
     blocked["LLM_CALLS_BLOCKED_BY_PILOT"] = "1"
     return blocked
+
+
+def init_blocked(env: dict[str, str]) -> None:
+    """``fastworkflow.init`` with ``blocked_env(env)``, and the same blocked values written over any process value of
+    those names: the process environment wins over the env files (``fastworkflow.get_env_var``), so a key exported in
+    the shell would otherwise reach the provider."""
+    import fastworkflow
+
+    blocked = blocked_env(env)
+    fastworkflow.init(env_vars=blocked)
+    for key, value in blocked.items():
+        if key in os.environ and value != env.get(key):
+            os.environ[key] = value
 
 
 def read_env(workflow_copy: str, env_file: str, passwords_file: Optional[str]) -> dict[str, str]:
@@ -624,13 +638,13 @@ def _run(args: argparse.Namespace, scratch: str, workflow_copy: str) -> int:
         fastworkflow.init(env_vars=env)  # the only run that is allowed to reach the LLM
         counters = fill_cache(workflow_copy)
         print(counters)
-        fastworkflow.init(env_vars=blocked_env(env))
+        init_blocked(env)
         report = cache_report(workflow_copy)
         _dump(report_path, report)
         print(format_cache_report(report))
         return 0
 
-    fastworkflow.init(env_vars=blocked_env(env))
+    init_blocked(env)
     if args.cache_report:
         report = cache_report(workflow_copy)
         _dump(report_path, report)

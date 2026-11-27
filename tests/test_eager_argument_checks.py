@@ -55,7 +55,6 @@ def wf(tmp_path, monkeypatch):
     fastworkflow.init({"FASTWORKFLOW_STATE_ROOT": str(tmp_path / "workflow_contexts")})
     fastworkflow.RoutingRegistry.clear_registry()
     monkeypatch.setitem(fastworkflow._env_vars, "FW_JEV_FIELD_GIVEN", "off")
-    monkeypatch.setattr(signatures, "LLM_PARAM_EXTRACTION", "scripted/extractor")
     folder = tmp_path / "tutorial"
     shutil.copytree(TUTORIAL, folder, ignore=shutil.ignore_patterns("__pycache__"), symlinks=True)
     for name in ("book_loans", "find_member"):

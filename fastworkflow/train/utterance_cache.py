@@ -42,9 +42,12 @@ Two-part key
 An entry is addressed by **(variant key, seed)**:
 
 * the **variant key** hashes everything that is not the seed — the exact seed
-  utterance list, the command name, the three generation counts, the model string, a
-  digest of the API base, the persona source, the completion backend, and a digest
-  of the source text of the function that builds the prompt;
+  utterance list, the command name, the three generation counts, a digest of the API
+  base, the persona source, the completion backend, and a digest of the source text of
+  the function that builds the prompt. The generator MODEL is not in it (bd fix-ygxo):
+  utterances written by one model are reused under another, so changing the model, or
+  the model ``LLM_SYNDATA_GEN`` falls back to, never regenerates. To regenerate, run
+  ``fastworkflow train --regenerate-utterances``;
 * the **seed** selects one entry inside that variant's file.
 
 Historical note: this cache once exposed cross-seed aggregation, but that mode was
@@ -54,8 +57,8 @@ another seed's generated data.
 
 Retention: how many variants per command survive
 ------------------------------------------------
-Every edit to a command's seed utterances, to the model string, or to the
-prompt-building code produces a NEW variant key and therefore a new file, leaving the
+Every edit to a command's seed utterances or to the prompt-building code produces a
+NEW variant key and therefore a new file, leaving the
 previous one on disk forever. `_prune_stale_artifacts` deliberately skips this
 directory (see above), so on an actively-tuned 160-command workflow the orphans
 accumulated without bound.
@@ -116,8 +119,8 @@ CACHE_DIRNAME: str = "utterance_cache"
 CACHE_README_FILENAME: str = "README.md"
 
 # How many variants of ONE command survive a write. See "Retention" above. Three rather
-# than one so that a developer flipping a prompt edit back and forth, or training the
-# same workflow under two model strings, keeps paying for regeneration only once.
+# than one so that a developer flipping a prompt edit back and forth keeps paying for
+# regeneration only once.
 MAX_VARIANTS_PER_COMMAND: int = 3
 
 # `compute_fingerprint` truncates a sha256 hexdigest to this many characters. Used to
@@ -166,8 +169,9 @@ command.
 * Inside, `entries` is keyed by the training seed, so generating at several seeds
   accumulates rather than overwrites.
 * An entry is reused only when every fingerprint input matches — the seed utterance
-  list, the command name, the persona/utterance counts, the model, and the text of
-  the prompt-building code. Edit any of them and the command regenerates.
+  list, the command name, the persona/utterance counts, and the text of the
+  prompt-building code. Edit any of them and the command regenerates. The generator
+  model is not an input: changing it reuses these files.
 * Degraded runs (rate-limited, `datasets` missing) are never written here.
 
 Force regeneration with `fastworkflow train ... --regenerate-utterances`.
@@ -474,7 +478,6 @@ def compute_fingerprint(
     num_personas: Optional[int],
     utterances_per_persona: Optional[int],
     personas_per_batch: Optional[int],
-    model: Optional[str],
     api_base: Optional[str] = None,
     persona_source: str = PRODUCTION_PERSONA_SOURCE,
     completion_backend: str = PRODUCTION_COMPLETION_BACKEND,
@@ -493,8 +496,8 @@ def compute_fingerprint(
     * the three counts — how many utterances are asked for, and how personas are
       grouped into completions (a batch is jointly sampled, so regrouping changes the
       text).
-    * `model` / `api_base` — a different model, or the same model name pointed at a
-      different proxy, is a different generator.
+    * `api_base` — the same model name pointed at a different proxy is a different
+      generator. The model itself is deliberately NOT an input (bd fix-ygxo).
     * `persona_source` / `completion_backend` — see `callable_identity`.
     * `generator_source_digest` — the prompt template itself.
 
@@ -513,17 +516,22 @@ def compute_fingerprint(
         "num_personas": num_personas,
         "utterances_per_persona": utterances_per_persona,
         "personas_per_batch": personas_per_batch,
-        "model": model,
         "api_base_digest": api_base_digest,
         "persona_source": persona_source,
         "completion_backend": completion_backend,
         "generator_source_digest": generator_source_digest,
     }
-    canonical = json.dumps(inputs, sort_keys=True, separators=(",", ":"))
-    variant_key = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:24]
     return Fingerprint(
-        command_name=str(command_name), variant_key=variant_key, inputs=inputs
+        command_name=str(command_name), variant_key=variant_key_of(inputs), inputs=inputs
     )
+
+
+def variant_key_of(inputs: dict) -> str:
+    """The variant key of a set of fingerprint inputs: the first ``VARIANT_KEY_LENGTH`` hex characters of the
+    sha256 of their canonical JSON. The one derivation of both generated-data caches (and of
+    ``scripts/rekey_generation_caches.py``, which re-keys stored files from their stored inputs)."""
+    canonical = json.dumps(inputs, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:VARIANT_KEY_LENGTH]
 
 
 class UtteranceCacheEntry(BaseModel):

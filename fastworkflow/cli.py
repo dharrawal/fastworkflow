@@ -192,6 +192,13 @@ def find_default_env_files(workflow_path):
     workflow_path = Path(workflow_path).resolve()        
     return workflow_path / "fastworkflow.env", workflow_path / "fastworkflow.passwords.env"
 
+def _add_build_env_file_arguments(parser) -> None:
+    """``build`` and ``refine`` load the workflow's env files as ``train`` does (``utils.env``)."""
+    from .utils.env import add_env_file_arguments
+
+    add_env_file_arguments(parser)
+
+
 def add_build_parser(subparsers):
     """Add subparser for the 'build' command."""
     parser_build = subparsers.add_parser(
@@ -204,6 +211,7 @@ def add_build_parser(subparsers):
     parser_build.add_argument('--overwrite', action='store_true', help='Overwrite files in output directory if present')
     parser_build.add_argument('--stub-commands', help='Comma-separated list of command names to generate stubs for')
     parser_build.add_argument('--no-startup', action='store_true', help='Skip generating the startup.py file')
+    _add_build_env_file_arguments(parser_build)
 
     # Lazy-import build_main only if the user actually invokes the command
     def _build_main_wrapper(args):
@@ -220,6 +228,7 @@ def add_refine_parser(subparsers):
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser_refine.add_argument('--workflow-folderpath', '-w', required=True, help='Path to the workflow folder to refine')
+    _add_build_env_file_arguments(parser_refine)
 
     # Lazy-import refine_main only if the user actually invokes the command
     def _refine_main_wrapper(args):

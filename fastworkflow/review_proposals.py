@@ -1271,7 +1271,7 @@ def _typed_fallback_values(workflow, item: SubTask, sub_task: str, values: dict,
 
     raw = {p.name: planning_commands._given_or_none(values.get(p.name)) for p in command.params}
     try:
-        lm = planner_lm if planner_lm is not None else dspy_utils.get_lm("LLM_PLANNER", "LITELLM_API_KEY_PLANNER")
+        lm = planner_lm if planner_lm is not None else dspy_utils.get_lm("LLM_PLANNER")
         with dspy_utils.role_context("LLM_PLANNER", lm, adapter=CommandsSystemPreludeAdapter()):
             args, notes = planning_commands.typed_fallback_arguments(
                 command, sub_task, typed_planner_commands_text(workflow), raw,
@@ -2744,7 +2744,7 @@ def model_edit_reader(planner_lm=None, planning_names: tuple[str, ...] = ()):
         # A callable that is not an LM (dspy.BaseLM is callable too) is asked for the LM now.
         lm = planner_lm() if callable(planner_lm) and not isinstance(planner_lm, dspy.BaseLM) else planner_lm
         if lm is None:
-            lm = dspy_utils.get_lm("LLM_PLANNER", "LITELLM_API_KEY_PLANNER")
+            lm = dspy_utils.get_lm("LLM_PLANNER")
         inputs = {"proposal": proposal.model_rendering() if isinstance(proposal, SubTaskProposal) else proposal.rendering(),
                   "planning_commands": "\n".join(f"planning:{name}" for name in planning_names) or "none",
                   "reply": text}

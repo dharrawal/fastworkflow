@@ -223,7 +223,6 @@ def _preseed_fixed_utterance_cache(workflow_path: str) -> dict[str, list[str]]:
             num_personas,
             utterances_per_persona,
             personas_per_batch,
-            model,
         )
         attribution = {
             utterance: _FIXTURE_PERSONA_IDS[index // 5]

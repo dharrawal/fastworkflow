@@ -22,7 +22,7 @@ from tests.test_no_agent_mode import _plan
 from tests.test_parameter_form_reply_contract import PARTIAL, session  # noqa: F401 - the CME on plain_required_workflow
 from tests.test_parameter_loop import (  # noqa: F401 - fixtures and helpers
     A_NOTE, ABOUT_DUNE, ABOUT_EMMA, HOST, no_agent)
-from tests.test_round1_gate import EMMA, JOKE, _open_review, _split_into, gated  # noqa: F401
+from tests.test_round1_gate import EMMA, JOKE, _open_review, _split_into, gated, remote_decides_emma_and_joke  # noqa: F401
 from tests.test_step_helpers import _build_planning_command, library_env  # noqa: F401
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401
 from tests.test_waiting_kinds import _no_agent_joke_decisions, no_param_model  # noqa: F401
@@ -172,6 +172,7 @@ def _reach_approval(request):
 def _reach_review(request):
     gated = request.getfixturevalue("gated")
     request.getfixturevalue("no_param_model")
+    request.getfixturevalue("remote_decides_emma_and_joke")   # the remote model binds EMMA, leaves JOKE ad hoc
     _split_into(request.getfixturevalue("monkeypatch"), [EMMA, JOKE])
     assert gated.ctx.process_turn(f"{EMMA} and {JOKE}").status is TurnStatus.AWAITING_USER
     _open_review(gated)

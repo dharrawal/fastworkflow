@@ -10,8 +10,12 @@ import threading
 import time
 from pathlib import Path
 
-import litellm
-import pytest
+# `import fastworkflow` stops litellm loading a `.env` (`fastworkflow._stop_litellm_loading_a_dotenv_file`); it is set
+# here too, before any test module is collected, because a test module may import litellm before fastworkflow.
+os.environ.setdefault("LITELLM_MODE", "PRODUCTION")
+
+import litellm  # noqa: E402
+import pytest  # noqa: E402
 
 import fastworkflow
 from fastworkflow import context_budget
@@ -44,8 +48,8 @@ def isolate_state_root(tmp_path_factory):
     caches) is rooted at FASTWORKFLOW_STATE_ROOT, defaulting to
     ~/.local/state/fastworkflow. Without this fixture a test that touches disk
     state would write into the developer's real home directory and could observe
-    another test's records. Tests that need a specific root still override it via
-    their own init dict (the dict wins over the OS environment).
+    another test's records. A test that needs a specific root sets the process
+    variable (which wins over an init dict) or deletes it and passes its own.
     """
     previous = os.environ.get("FASTWORKFLOW_STATE_ROOT")
     root = tmp_path_factory.mktemp("fw_state_root")
@@ -288,8 +292,8 @@ def reference_agent_window(monkeypatch):
     machine (or the repo-root ``.env`` litellm loads) names. This pins it to
     ``context_budget``'s calibration model, whose window is the reference.
     """
-    # ``context_budget.env_value`` reads the loaded env files before the process
-    # environment, and a developer's ``LLM_AGENT``, window or budget override
+    # ``context_budget.env_value`` reads the process environment and then the loaded
+    # env files, and a developer's ``LLM_AGENT``, window or budget override
     # (``FW_TRAJECTORY_MAX_BYTES`` ...) may sit in either, so none of them may
     # reach a test that asserts the reference values.
     pinned_names = {context_budget.MODEL_CONTEXT_TOKENS_ENV, context_budget.AGENT_MODEL_ENV,
@@ -310,8 +314,8 @@ def split_gate_off():
     unless the test turns it on: with a remote decision model key in the developer's env files, the gate would ask the
     LIVE remote model before every split, and a test that scripts the splitter's answer would then see the request kept
     whole whenever the live model calls it one job. The gate's own tests (``tests/test_split_one_job_gate.py``) clear
-    the setting and script the remote answer. Set in the process environment, which ``get_env_var`` reads after the env
-    files; a test that loads env files of its own sees the gate only if those files set it.
+    the setting and script the remote answer. Set in the process environment, which ``get_env_var`` reads before the env
+    files, so it holds even for a test that loads env files of its own; a test that wants the gate deletes it.
 
     The patch has its own ``MonkeyPatch`` (not the test's): an autouse fixture that requests ``monkeypatch`` sets it up
     before every other fixture, so a test's own patches would then be undone only after those fixtures' teardowns ran
@@ -330,8 +334,8 @@ def split_gate_off():
 def no_planner_key(monkeypatch):
     """A process with no optional planner (Jev) key, for tests that assert behaviour without one.
 
-    ``fastworkflow.get_env_var`` reads the loaded env files before the process environment, so the key is removed
-    from both; the planner LM is ``lru_cache``d, so its cache is dropped
+    ``fastworkflow.get_env_var`` reads the process environment and then the loaded env files, so the key is removed
+    from both (deleting the process value alone would leave the env file's); the planner LM is ``lru_cache``d, so its cache is dropped
     before the test (an earlier test that had a key may have filled them) and after it (so this test leaks nothing).
     When the planner becomes mandatory, the tests that use this fixture are retired.
     """
@@ -424,8 +428,8 @@ def scripted_matcher(monkeypatch):
 def no_agent_model(monkeypatch):
     """A process with no ReAct agent model (``LLM_AGENT``), for tests that assert no-agent mode.
 
-    ``fastworkflow.get_env_var`` reads the loaded env files before the process environment, so ``LLM_AGENT`` is removed
-    from both; and the execution contexts these tests build do not ask for the mode (an embedder that scripts its own
+    ``fastworkflow.get_env_var`` reads the process environment and then the loaded env files, so ``LLM_AGENT`` is
+    removed from both; and the execution contexts these tests build do not ask for the mode (an embedder that scripts its own
     agent LM must not be switched into it), so the class default that asks for it is switched on for the test. Nothing
     is cached, so nothing is dropped. With the agent model set, this fixture is not used: the rest of the suite is
     that proof.

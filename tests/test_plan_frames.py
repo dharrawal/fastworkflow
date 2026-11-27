@@ -300,11 +300,12 @@ def test_a_positive_integer_overrides_the_turn_budget(monkeypatch, no_turn_budge
     assert turn_max_steps() == 50
 
 
-def test_the_workflow_env_file_wins_over_the_process_environment(monkeypatch, no_turn_budget_env):
-    monkeypatch.setenv(TURN_MAX_STEPS_ENV, "75")
-    assert turn_max_steps() == 75
+def test_the_process_environment_wins_over_the_workflow_env_file(monkeypatch, no_turn_budget_env):
+    # The one precedence rule (bd fix-ygxo): a shell export beats the env file, which beats the default.
     monkeypatch.setitem(fastworkflow._env_vars, TURN_MAX_STEPS_ENV, "50")
     assert turn_max_steps() == 50
+    monkeypatch.setenv(TURN_MAX_STEPS_ENV, "75")
+    assert turn_max_steps() == 75
 
 
 @pytest.mark.parametrize("raw", ["0", "-3", "abc"])

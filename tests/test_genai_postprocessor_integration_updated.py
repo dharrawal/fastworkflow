@@ -11,7 +11,8 @@ from fastworkflow.build.class_analysis_structures import ClassInfo, MethodInfo
 
 
 def _fake_env_var(name, *args, **kwargs):
-    """get_env_var stub: numeric for the LLM timeout get_lm() float()s, 'test_value' otherwise."""
+    """raw_env_var stub (every setting is read through it, the role's model included): numeric for the LLM
+    timeout get_lm() float()s, 'test_value' otherwise."""
     return '120' if name == 'LLM_TIMEOUT_SECONDS' else 'test_value'
 
 
@@ -81,7 +82,7 @@ class ResponseGenerator:
         class_info.methods.append(method_info)
         return class_info
     
-    @patch('fastworkflow.get_env_var')
+    @patch('fastworkflow.raw_env_var')
     def test_end_to_end_processing(self, mock_get_env):
         """Test end-to-end processing of a workflow."""
         mock_get_env.side_effect = _fake_env_var
@@ -127,7 +128,7 @@ class ResponseGenerator:
             desc_file = os.path.join(self.workflow_path, "workflow_description.txt")
             self.assertTrue(os.path.exists(desc_file))
     
-    @patch('fastworkflow.get_env_var')
+    @patch('fastworkflow.raw_env_var')
     def test_run_genai_postprocessor_function(self, mock_get_env):
         """Test the run_genai_postprocessor function."""
         mock_get_env.side_effect = _fake_env_var
@@ -156,7 +157,7 @@ class ResponseGenerator:
             self.assertTrue(result)
             self.assertTrue(mock_process.called)
     
-    @patch('fastworkflow.get_env_var')
+    @patch('fastworkflow.raw_env_var')
     def test_skip_genai_flag(self, mock_get_env):
         """Test that the skip_genai flag works."""
         mock_get_env.side_effect = _fake_env_var
@@ -185,7 +186,7 @@ class ResponseGenerator:
             # The function doesn't check skip_genai, so process_workflow is called
             self.assertTrue(mock_process.called)
     
-    @patch('fastworkflow.get_env_var')
+    @patch('fastworkflow.raw_env_var')
     def test_error_handling(self, mock_get_env):
         """Test error handling in the processor."""
         mock_get_env.side_effect = _fake_env_var
@@ -241,6 +242,8 @@ class TestPostProcessorCLIIntegrationUpdated(unittest.TestCase):
         args.skip_genai = False
         args.stub_commands = None
         args.no_startup = True
+        args.env_file_path = None  # build loads the workflow's env files (bd fix-ygxo); none here
+        args.passwords_file_path = None
         
         with patch('fastworkflow.build.__main__.validate_directories'), \
              patch('fastworkflow.build.__main__.run_command_generation', return_value=({}, {})), \

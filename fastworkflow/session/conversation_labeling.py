@@ -8,7 +8,6 @@ label is written, and which topic wins a collision, are the store's business
 """
 
 import json
-import os
 from typing import Any
 
 import litellm  # noqa: F401  (must precede dspy; see fastworkflow/utils/dspy_utils.py)
@@ -49,23 +48,16 @@ TOPIC_GENERATION_MAX_RETRIES = 1
 
 
 def resolve_topic_generation_timeout() -> tuple[float, str]:
-    """Resolve the per-attempt deadline with the process environment taking precedence.
-
-    OS first, for the same reason resolve_max_live_sessions does it (utils.py):
-    ``get_env_var`` reads the workflow env file *before* ``os.environ``, so
-    resolving through it alone would let the env file outrank the container
-    variable. This is an operator control on a server — the person who needs
-    to raise it against a slow provider, or lower it under a tighter termination
-    grace period, sets it on the deployment, not in the workflow's env file.
+    """Resolve the per-attempt deadline under the one precedence rule (``fastworkflow.get_env_var``: the process
+    environment, then the workflow env file, then the default); unset or empty is the default. An operator
+    control on a server: the person who needs to raise it against a slow provider, or lower it under a tighter
+    termination grace period, sets it on the deployment, and that beats the workflow's env file.
 
     Returns the value and where it came from, because an operator has to be able
     to see whether their override actually took effect.
     """
-    raw = os.environ.get(TOPIC_GENERATION_TIMEOUT_ENV_VAR)
-    source = "process environment"
-    if raw is None or raw == "":
-        raw = fastworkflow.get_env_var(TOPIC_GENERATION_TIMEOUT_ENV_VAR, default=None)
-        source = "workflow env file"
+    raw = fastworkflow.raw_env_var(TOPIC_GENERATION_TIMEOUT_ENV_VAR)
+    source = fastworkflow.env_source(TOPIC_GENERATION_TIMEOUT_ENV_VAR)
     if raw is None or raw == "":
         return DEFAULT_TOPIC_GENERATION_TIMEOUT_SECONDS, "default"
 
@@ -122,7 +114,6 @@ def generate_topic_and_summary(turns: list[dict[str, Any]]) -> tuple[str, str]:
     # Configure DSPy with the conversation store LM using context manager
     lm = get_lm(
         "LLM_CONVERSATION_STORE",
-        "LITELLM_API_KEY_CONVERSATION_STORE",
         timeout=topic_generation_timeout_seconds(),
         num_retries=TOPIC_GENERATION_MAX_RETRIES,
     )

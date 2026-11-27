@@ -3,7 +3,9 @@ import os
 import sys
 
 import fastworkflow
+from fastworkflow.utils.env import add_env_file_arguments
 from fastworkflow.utils.logging import logger
+from fastworkflow.build.__main__ import init_env
 from fastworkflow.build.genai_postprocessor import run_genai_postprocessor
 
 
@@ -12,6 +14,7 @@ def parse_args():
         description="Refine a FastWorkflow by enhancing command metadata."
     )
     parser.add_argument('--workflow-folderpath', '-w', required=True, help='Path to the workflow folder to refine')
+    add_env_file_arguments(parser)
     return parser.parse_args()
 
 
@@ -28,11 +31,11 @@ def _validate_workflow_folder(workflow_folderpath: str) -> None:
 def refine_main(args):
     """Entry point for the CLI refine command (invoked from fastworkflow.cli)."""
     try:
-        # Initialize environment
-        fastworkflow.init(env_vars={})
-
         workflow_folderpath = args.workflow_folderpath
         _validate_workflow_folder(workflow_folderpath)
+        # The workflow's env files, as `train` loads them: the metadata model (LLM_COMMAND_METADATA_GEN, or the base
+        # model it falls back to) and its key are read from them.
+        init_env(args)
 
         # Prepare args-like object for post-processor when needed
         class _Dummy:

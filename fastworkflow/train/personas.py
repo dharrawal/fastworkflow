@@ -97,11 +97,9 @@ PERSONA_FILENAME: str = "personas.json"
 #: Escape hatch for a persona file that lives outside the workflow folder, and the only
 #: route that works with no integration at all (see ``default_persona_source``).
 #:
-#: Read with an empty-string code default, which follows the house convention: settable
-#: from ``fastworkflow.env``, NOT from a shell ``export``, because a non-None code default
-#: short-circuits the ``os.environ`` lookup in ``fastworkflow.get_env_var``. The empty
-#: default also suppresses the "does not exist" warning that a ``None`` default logs on
-#: every command of every run.
+#: Read with an empty-string code default, which suppresses the "does not exist" warning that a
+#: ``None`` default logs on every command of every run. Settable from ``fastworkflow.env`` or a
+#: shell ``export`` (which wins, ``fastworkflow.get_env_var``).
 PERSONA_FILE_ENV_VAR: str = "SYNTHETIC_UTTERANCE_GEN_PERSONA_FILE"
 
 PERSONA_SCHEMA_VERSION: int = 1

@@ -82,6 +82,11 @@ def test_process_message_agent_mode_mocked_agent(
         "fastworkflow.workflow_agent._what_can_i_do",
         lambda session: "commands",
     )
+    # The planner's split (the model-backed seam before the parts are resolved): one part. With no planner model
+    # the splitter raises; before, a developer's .env that litellm loaded into the process supplied one.
+    monkeypatch.setattr(
+        "fastworkflow.workflow_agent.split_into_subtasks", lambda user_query, **kwargs: [user_query]
+    )
     monkeypatch.setattr(ctx, "_ensure_agent_initialized", lambda: None)
     monkeypatch.setattr(
         ctx,
@@ -147,6 +152,11 @@ def test_process_message_converts_ask_user_cancel_to_output(
         "fastworkflow.workflow_agent._what_can_i_do",
         lambda session: "commands",
     )
+    # The planner's split (the model-backed seam before the parts are resolved): one part. With no planner model
+    # the splitter raises; before, a developer's .env that litellm loaded into the process supplied one.
+    monkeypatch.setattr(
+        "fastworkflow.workflow_agent.split_into_subtasks", lambda user_query, **kwargs: [user_query]
+    )
     monkeypatch.setattr(ctx, "_ensure_agent_initialized", lambda: None)
     _set_agents(ctx, failing_agent)
 
@@ -171,6 +181,11 @@ def _make_agent_ctx(initialized_fastworkflow, todo_workflow_path, monkeypatch):
     monkeypatch.setattr(
         "fastworkflow.workflow_agent._what_can_i_do",
         lambda session: "commands",
+    )
+    # The planner's split (the model-backed seam before the parts are resolved): one part. With no planner model
+    # the splitter raises; before, a developer's .env that litellm loaded into the process supplied one.
+    monkeypatch.setattr(
+        "fastworkflow.workflow_agent.split_into_subtasks", lambda user_query, **kwargs: [user_query]
     )
     monkeypatch.setattr(ctx, "_ensure_agent_initialized", lambda: None)
     monkeypatch.setattr(

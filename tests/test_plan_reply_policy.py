@@ -16,7 +16,8 @@ from fastworkflow.review_proposals import Means, ProposedEdit, SubTask, SubTaskI
 from fastworkflow.turn import TurnStatus
 
 from tests.test_approval_binding import _finish, annotated_library, no_live_model, todo  # noqa: F401
-from tests.test_round1_gate import EMMA, JOKE, gated, _open_review, _split_into  # noqa: F401
+from tests.conftest import script_matcher
+from tests.test_round1_gate import REMOTE_ANSWERS, EMMA, JOKE, gated, _open_review, _split_into  # noqa: F401
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401
 
 PLAN_WORKFLOW = fastworkflow.get_internal_workflow_path("plan_metadata_extraction")
@@ -38,9 +39,7 @@ def no_draft_extraction(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def script_param_extraction(monkeypatch):
-    from fastworkflow.utils import signatures
 
-    monkeypatch.setattr(signatures, "LLM_PARAM_EXTRACTION", "scripted/extractor")
     param_lm = DummyLM(
         [{"reasoning": "n", "item": "2"}, {"reasoning": "n", "item": "1"}] * 12,
         adapter=dspy.JSONAdapter(),
@@ -106,6 +105,7 @@ def _wire_plan(gated) -> None:
 
 def _open_review_two_step(gated, monkeypatch) -> re_.ReviewRecord:
     _split_into(monkeypatch, [EMMA, JOKE])
+    script_matcher(monkeypatch, REMOTE_ANSWERS)   # the remote decision model binds EMMA and leaves JOKE ad hoc
     out = gated.ctx.process_turn(f"{EMMA} and {JOKE}")
     assert out.status is TurnStatus.AWAITING_USER
     record = _open_review(gated)

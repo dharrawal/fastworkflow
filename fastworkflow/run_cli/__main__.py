@@ -6,7 +6,7 @@ from typing import Optional
 import contextlib
 import time
 
-from dotenv import dotenv_values
+from fastworkflow.utils.env import read_env_files
 
 # Instantiate a global console for consistent styling
 console = None
@@ -115,19 +115,11 @@ def run_main(args):
         logger.info(f"No _commands directory found at {args.workflow_path}, existing...")
         return
 
-    env_vars = {
-        **dotenv_values(args.env_file_path),
-        **dotenv_values(args.passwords_file_path)
-    }
+    env_vars = read_env_files(args.env_file_path, args.passwords_file_path)
     if not os.path.isfile(args.env_file_path):
         raise ValueError(f"Env file not found: {args.env_file_path}")
     if not env_vars:
         raise ValueError(f"Env file {args.env_file_path} loaded no variables; path may be incorrect")
-    if not env_vars.get("LITELLM_API_KEY_SYNDATA_GEN"):
-        print(
-            "LITELLM_API_KEY_SYNDATA_GEN not found. OK if this is Bedrock/proxy. "
-            f"Otherwise check the passwords file: {args.passwords_file_path}"
-        )
 
     if args.startup_command and args.startup_action:
         raise ValueError("Cannot provide both startup_command and startup_action")

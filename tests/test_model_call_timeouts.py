@@ -95,8 +95,8 @@ def test_zero_retries_is_a_valid_setting(env):
 def test_the_extraction_lm_carries_the_role_limits_and_the_others_the_global_one(env):
     env["LLM_PARAM_EXTRACTION"] = "openai/extractor"
     env["LLM_AGENT"] = "openai/agent"
-    extraction = dspy_utils.get_lm("LLM_PARAM_EXTRACTION", "LITELLM_API_KEY_PARAM_EXTRACTION")
-    agent = dspy_utils.get_lm("LLM_AGENT", "LITELLM_API_KEY_AGENT")
+    extraction = dspy_utils.get_lm("LLM_PARAM_EXTRACTION")
+    agent = dspy_utils.get_lm("LLM_AGENT")
     assert extraction.kwargs["timeout"] == 20.0
     assert extraction.num_retries == 2
     assert agent.kwargs["timeout"] == 120.0
@@ -183,7 +183,7 @@ def test_a_stalled_extraction_call_fails_in_about_two_timeouts_and_the_span_says
     if route == "openai":
         env["LLM_PARAM_EXTRACTION"] = "openai/stalled-model"
         env.pop("LITELLM_PROXY_API_BASE")  # an openai/ model has no proxy: its base is the api_base below
-    lm = dspy_utils.get_lm("LLM_PARAM_EXTRACTION", "LITELLM_API_KEY_PARAM_EXTRACTION",
+    lm = dspy_utils.get_lm("LLM_PARAM_EXTRACTION",
                            **({"api_base": f"http://127.0.0.1:{stalled_endpoint.server_address[1]}/v1"}
                               if route == "openai" else {}))
 
@@ -222,7 +222,6 @@ def test_extraction_that_times_out_after_its_retries_is_not_given_and_is_not_rep
     (so a required one is asked for, as when the model answers with nothing). The sampling retries of
     FirstAttemptGreedy do not repeat the wait: the server sees 1 + retries requests, not 3 x that."""
     monkeypatch.setattr(signatures, "_field_given_enabled", lambda: False)
-    monkeypatch.setattr(signatures, "LLM_PARAM_EXTRACTION", "litellm_proxy/stalled-model")
     _point_extraction_at(env, stalled_endpoint, "litellm_proxy")
 
     started = time.monotonic()

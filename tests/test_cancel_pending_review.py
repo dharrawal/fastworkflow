@@ -12,7 +12,7 @@ from fastworkflow import approval_binding as ab
 from fastworkflow.turn import TurnStatus
 from tests.test_approval_binding import (  # noqa: F401 - fixtures
     _finish, annotated_library, no_live_model, no_model_call_for_parameters, todo)
-from tests.test_round1_gate import EMMA, FIND, JOKE, _open_review, _split_into, gated  # noqa: F401
+from tests.test_round1_gate import EMMA, FIND, JOKE, _open_review, _split_into, gated, remote_decides_emma_and_joke  # noqa: F401
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401
 
 pytestmark = pytest.mark.usefixtures("initialized_fastworkflow")
@@ -31,7 +31,7 @@ def _cancel_via_reset(ctx):
 
 
 @pytest.mark.parametrize("route", [_cancel_via_cancel_pending, _cancel_via_approvals, _cancel_via_reset])
-def test_cancelling_an_open_review_leaves_nothing_pending(gated, monkeypatch, route):
+def test_cancelling_an_open_review_leaves_nothing_pending(gated, monkeypatch, route, remote_decides_emma_and_joke):
     _split_into(monkeypatch, [EMMA, JOKE])
     asked = gated.ctx.process_turn(f"{EMMA} and {JOKE}")
     assert asked.status is TurnStatus.AWAITING_USER

@@ -139,6 +139,11 @@ def _make_agent_ctx(todo_workflow_path, monkeypatch, sink=None):
     monkeypatch.setattr(
         "fastworkflow.workflow_agent._what_can_i_do", lambda session: "commands"
     )
+    # The planner's split, the model-backed seam before the parts are resolved: these requests are one part. (With
+    # no planner model here, the splitter would raise; before, the repo-root .env that litellm loaded supplied one.)
+    monkeypatch.setattr(
+        "fastworkflow.workflow_agent.split_into_subtasks", lambda user_query, **kwargs: [user_query]
+    )
     monkeypatch.setattr(ctx, "_ensure_agent_initialized", lambda: None)
     monkeypatch.setattr(
         ctx,

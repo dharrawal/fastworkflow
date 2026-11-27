@@ -521,7 +521,6 @@ def _variant_key(source):
         2,
         2,
         1,
-        MODEL,
         persona_dataset_loader=_loader,
     ).variant_key
 
@@ -639,7 +638,6 @@ def test_the_default_draws_fingerprint_input_carries_no_pool_digest():
         2,
         2,
         1,
-        MODEL,
         persona_dataset_loader=_loader,
     ).inputs["persona_source"]
 

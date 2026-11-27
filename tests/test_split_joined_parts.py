@@ -10,6 +10,7 @@ from fastworkflow.split_merge import JoinedSubtask, reduce_to_cap
 from fastworkflow.turn import TurnStatus
 from fastworkflow.workflow_agent import MAX_SUBTASKS
 from tests.test_approval_binding import _finish  # noqa: F401
+from tests.conftest import script_matcher
 from tests.test_round1_gate import (  # noqa: F401 - the gated library context and the guards its fixtures need
     _open_review, _split_into, annotated_library, gated, initialized_fastworkflow, no_draft_extraction,
     no_live_model, no_model_call_for_parameters, todo)
@@ -40,6 +41,11 @@ def test_joining_keeps_the_parts_of_each_joined_item_in_order():
 def test_the_review_shows_the_cap_and_the_run_takes_every_part_as_a_job(gated, monkeypatch):
     query, joined = _joined_split()
     _split_into(monkeypatch, joined)
+    # The remote decision model's answer for each item, scripted (``script_matcher``): every item asks to find members,
+    # so it names find_member. These tests used to get it from a live call through a developer's .env (its
+    # JEV_API_KEY); without an answer an item the local model is unsure of is asked about instead of reviewed.
+    script_matcher(monkeypatch, lambda text: {"Library/find_member": 0.95, "none": 0.05}
+                   if text.startswith("find member") else None)
     out = gated.ctx.process_turn(query)
     assert out.status is TurnStatus.AWAITING_USER
     record = _open_review(gated)

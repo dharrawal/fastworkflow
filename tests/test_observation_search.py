@@ -161,15 +161,20 @@ class SearchModelRole(unittest.TestCase):
                              text_sha256=hashlib.sha256(text.encode()).hexdigest())
 
     def selected_role(self, env):
-        """The (model_env, key_env) pair ``search_memory`` asks ``get_lm`` for."""
+        """The role ``search_memory`` asks ``get_lm`` for, and what that role resolves to (``dspy_utils.resolve_role``,
+        the one fallback rule), with the agent model and its key set beside *env*."""
+        from fastworkflow.utils import dspy_utils
+
         asked: dict = {}
 
-        def get_lm(model_env, key_env, **_kwargs):
+        def get_lm(model_env, **_kwargs):
             asked['model_env'] = model_env
-            asked['key_env'] = key_env
+            asked['resolved'] = dspy_utils.resolve_role(model_env)
             raise RuntimeError('no provider in this test')
 
-        with patch.dict(os.environ, env), \
+        settings = {context_budget.AGENT_MODEL_ENV: 'vendor/agent-model', 'LITELLM_API_KEY_AGENT': 'agent-key',
+                    'LITELLM_API_KEY_OBSERVATION_SEARCH': '', **env}
+        with patch.dict(os.environ, settings), \
                 patch.dict('fastworkflow._env_vars', {}, clear=True), \
                 patch('fastworkflow.observation_offloading.search.get_lm', get_lm):
             result = search_memory('Who?', 'O0', scope=self.scope,
@@ -179,19 +184,21 @@ class SearchModelRole(unittest.TestCase):
 
     def test_an_undeclared_search_role_falls_back_to_the_agents_model(self):
         asked = self.selected_role({SEARCH_MODEL_ENV: ''})
-        self.assertEqual(asked['model_env'], context_budget.AGENT_MODEL_ENV)
-        self.assertEqual(asked['key_env'], 'LITELLM_API_KEY_AGENT')
-        # And the diagnostic names the role that actually failed, not one the
-        # deployment never set.
-        self.assertIn('Check LLM_AGENT and LITELLM_API_KEY_AGENT', asked['result'])
+        self.assertEqual(asked['model_env'], SEARCH_MODEL_ENV)
+        resolved = asked['resolved']
+        self.assertEqual((resolved.model, resolved.inherited_from), ('vendor/agent-model', 'LLM_AGENT'))
+        self.assertEqual((resolved.key, resolved.key_var), ('agent-key', 'LITELLM_API_KEY_AGENT'))
+        # The diagnostic names the search role and says it may have fallen back.
+        self.assertIn('Check LLM_OBSERVATION_SEARCH (or the base model it falls back to)', asked['result'])
 
     def test_a_declared_search_role_is_used_unchanged(self):
-        asked = self.selected_role({SEARCH_MODEL_ENV: 'vendor/search-model'})
+        asked = self.selected_role({SEARCH_MODEL_ENV: 'vendor/search-model',
+                                    'LITELLM_API_KEY_OBSERVATION_SEARCH': 'search-key'})
         self.assertEqual(asked['model_env'], SEARCH_MODEL_ENV)
-        self.assertEqual(asked['key_env'], 'LITELLM_API_KEY_OBSERVATION_SEARCH')
-        self.assertIn(
-            'Check LLM_OBSERVATION_SEARCH and LITELLM_API_KEY_OBSERVATION_SEARCH',
-            asked['result'])
+        resolved = asked['resolved']
+        self.assertEqual((resolved.model, resolved.inherited_from), ('vendor/search-model', None))
+        self.assertEqual(resolved.key_var, 'LITELLM_API_KEY_OBSERVATION_SEARCH')
+        self.assertIn('Check LLM_OBSERVATION_SEARCH', asked['result'])
 
     def test_the_recorded_subject_reaches_the_search_model(self):
         seen: dict = {}

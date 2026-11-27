@@ -26,6 +26,7 @@ from fastworkflow.run_listing import check_planned_arguments
 from fastworkflow.turn import TurnStatus
 from tests.test_approval_binding import (  # noqa: F401 - the real agent on the annotated library copy, and the guards
     _finish, annotated_library, no_live_model, no_model_call_for_parameters, todo)
+from tests.conftest import script_matcher
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401
 
 pytestmark = pytest.mark.usefixtures("initialized_fastworkflow")
@@ -42,6 +43,21 @@ LIBRARY = Path(fastworkflow.__file__).resolve().parent / "examples" / "library"
 EMMA = "who wrote Emma and how many copies do we have"    # heads: a planning command in the top-k (book_by_title)
 JOKE = "tell Ann a joke about cats"                        # heads: unsure, no command fits
 FIND = "find member Ann Lee"                               # heads: one confident label (find_member)
+
+
+#: The remote decision model's answer for the two parts the local model is unsure of (it gives each a list of
+#: candidates): EMMA is the planning command ``book_by_title``, and no command fits JOKE, so JOKE is an ad hoc part.
+#: Scripted (``script_matcher``), with no model call: these tests used to get it from a live call, because litellm
+#: loaded a developer's .env with a ``JEV_API_KEY`` into the process. Without an answer the turn asks which command
+#: is meant (the ambiguity question) instead of opening the review.
+REMOTE_ANSWERS = {EMMA: {"Library/book_by_title": 0.95, "none": 0.05}, JOKE: {"none": 0.95}}
+
+
+@pytest.fixture
+def remote_decides_emma_and_joke(monkeypatch):
+    """The remote decision model answers EMMA and JOKE as ``REMOTE_ANSWERS`` says; any other text gets no answer, so
+    the local model's decision stands for it."""
+    return script_matcher(monkeypatch, REMOTE_ANSWERS)
 
 
 @pytest.fixture
@@ -129,7 +145,7 @@ def test_an_unsure_single_sub_task_is_not_on_the_fast_path(gated, monkeypatch):
 # ----------------------------------------------------------------------
 
 
-def test_a_multi_sub_task_request_opens_the_review_with_the_proposed_means(gated, monkeypatch):
+def test_a_multi_sub_task_request_opens_the_review_with_the_proposed_means(gated, monkeypatch, remote_decides_emma_and_joke):
     _split_into(monkeypatch, [EMMA, JOKE])
     out = gated.ctx.process_turn(f"{EMMA} and {JOKE}")
     assert out.status is TurnStatus.AWAITING_USER
@@ -144,7 +160,7 @@ def test_a_multi_sub_task_request_opens_the_review_with_the_proposed_means(gated
     assert _marker(gated) == "open"
 
 
-def test_an_unsure_single_sub_task_opens_the_review(gated, monkeypatch):
+def test_an_unsure_single_sub_task_opens_the_review(gated, monkeypatch, remote_decides_emma_and_joke):
     _split_into(monkeypatch, [JOKE])
     out = gated.ctx.process_turn(JOKE)
     assert out.status is TurnStatus.AWAITING_USER
@@ -152,7 +168,7 @@ def test_an_unsure_single_sub_task_opens_the_review(gated, monkeypatch):
     assert len(record.binding["items"]) == 1 and record.binding["items"][0]["goal"] == JOKE
 
 
-def test_a_refused_planning_argument_is_shown_on_its_line(gated, monkeypatch):
+def test_a_refused_planning_argument_is_shown_on_its_line(gated, monkeypatch, remote_decides_emma_and_joke):
     _split_into(monkeypatch, [EMMA, JOKE])
     gated.ctx.process_turn(f"{EMMA} and {JOKE}")
     record = _open_review(gated)
@@ -163,7 +179,7 @@ def test_a_refused_planning_argument_is_shown_on_its_line(gated, monkeypatch):
     assert f"[check: {refusal}]" in model_line
 
 
-def test_the_draft_round_trips_through_the_review_as_json(gated, monkeypatch):
+def test_the_draft_round_trips_through_the_review_as_json(gated, monkeypatch, remote_decides_emma_and_joke):
     """The draft is passed to review_subtasks as JSON, read back as the same items, and stored as the record's binding."""
     _split_into(monkeypatch, [EMMA, JOKE])
     gated.ctx.process_turn(f"{EMMA} and {JOKE}")
@@ -178,7 +194,7 @@ def test_the_draft_round_trips_through_the_review_as_json(gated, monkeypatch):
 # ----------------------------------------------------------------------
 
 
-def test_a_declined_review_runs_nothing(gated, monkeypatch):
+def test_a_declined_review_runs_nothing(gated, monkeypatch, remote_decides_emma_and_joke):
     _split_into(monkeypatch, [EMMA, JOKE])
     gated.ctx.process_turn(f"{EMMA} and {JOKE}")
     record = _open_review(gated)
@@ -191,7 +207,7 @@ def test_a_declined_review_runs_nothing(gated, monkeypatch):
     assert _marker(gated) == "declined"
 
 
-def test_an_expired_review_runs_nothing(gated, monkeypatch):
+def test_an_expired_review_runs_nothing(gated, monkeypatch, remote_decides_emma_and_joke):
     _split_into(monkeypatch, [EMMA, JOKE])
     gated.ctx.process_turn(f"{EMMA} and {JOKE}")
     record = _open_review(gated)
@@ -204,7 +220,7 @@ def test_an_expired_review_runs_nothing(gated, monkeypatch):
     assert _marker(gated) == "expired"
 
 
-def test_an_accepted_review_is_stored_for_the_hand_off_and_the_turn_runs_its_goals(gated, monkeypatch):
+def test_an_accepted_review_is_stored_for_the_hand_off_and_the_turn_runs_its_goals(gated, monkeypatch, remote_decides_emma_and_joke):
     _split_into(monkeypatch, [EMMA, JOKE])
     gated.ctx.process_turn(f"{EMMA} and {JOKE}")
     gated.ctx.process_turn("change 2: inputs=Ann Lee")
@@ -241,7 +257,7 @@ def test_an_unattended_turn_runs_the_draft_unreviewed(gated, monkeypatch):
     _assert_ran_unreviewed(gated, out)
 
 
-def test_a_host_surface_turn_runs_the_draft_unreviewed(gated, monkeypatch):
+def test_a_host_surface_turn_runs_the_draft_unreviewed(gated, monkeypatch, remote_decides_emma_and_joke):
     _split_into(monkeypatch, [EMMA, JOKE])
     gated.script.steps = _finish() + _finish()
     surface = Surface(kind="host", verified=True, uid="user-1")

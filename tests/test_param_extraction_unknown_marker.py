@@ -58,7 +58,6 @@ class _BedrockLikeLM(DummyLM):
 @pytest.fixture
 def extraction(monkeypatch):
     """Route extract_parameters to a scripted LM; no provider, no env, no Jev call."""
-    monkeypatch.setattr(signatures, "LLM_PARAM_EXTRACTION", "bedrock/test-model")
     monkeypatch.setattr(signatures, "_field_given_enabled", lambda: False)
 
     def run(answer):

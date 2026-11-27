@@ -53,6 +53,15 @@ def no_review_gate(monkeypatch):
     monkeypatch.setattr(WorkflowExecutionContext, "_subtask_gate", lambda self, subtasks: None)
 
 
+@pytest.fixture(autouse=True)
+def one_part_split(monkeypatch):
+    """The planner's split (the model-backed seam before the parts are resolved): every request here is one part.
+    With no planner model the splitter raises; before, a developer's .env that litellm loaded into the process supplied
+    one. A module fixture, not part of ``_make_agent_ctx``: the modules that import that helper script their own split
+    before building the context, and a patch inside the helper would replace it."""
+    monkeypatch.setattr("fastworkflow.workflow_agent.split_into_subtasks", lambda user_query, **kwargs: [user_query])
+
+
 @pytest.fixture
 def todo_workflow_path() -> str:
     return str(

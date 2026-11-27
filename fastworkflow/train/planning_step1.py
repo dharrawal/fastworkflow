@@ -403,7 +403,7 @@ def worker(args: argparse.Namespace) -> int:
     pilot.copy_caches(args.cache_from, workflow_copy)
     passwords = args.passwords_file or pilot.default_passwords(args.cache_from)
     env = pilot.read_env(workflow_copy, args.env_file, passwords)
-    fastworkflow.init(env_vars=pilot.blocked_env(env))
+    pilot.init_blocked(env)
 
     planning_heads = spm.REQUIRED_PLANNING_HEADS[args.arm]
     determinism.set_train_seed(args.train_seed)

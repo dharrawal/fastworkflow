@@ -629,9 +629,7 @@ class DistillationSession:
         self,
         message: str,
         agent_lm_role: str,
-        agent_api_key_role: str,
         planner_lm_role: str,
-        planner_api_key_role: str,
         pass_id: Optional[str] = None,
     ) -> tuple[fastworkflow.CommandOutput, dict, list[dict], list[PlanningStep]]:
         """
@@ -650,9 +648,7 @@ class DistillationSession:
             return self._run_agent_pass_body(
                 message,
                 agent_lm_role=agent_lm_role,
-                agent_api_key_role=agent_api_key_role,
                 planner_lm_role=planner_lm_role,
-                planner_api_key_role=planner_api_key_role,
                 pass_content=pass_content,
             )
 
@@ -661,9 +657,7 @@ class DistillationSession:
         message: str,
         *,
         agent_lm_role: str,
-        agent_api_key_role: str,
         planner_lm_role: str,
-        planner_api_key_role: str,
         pass_content: dict,
     ) -> tuple[fastworkflow.CommandOutput, dict, list[dict], list[PlanningStep]]:
         """The pass itself, writing what it produced into ``pass_content``.
@@ -707,7 +701,7 @@ class DistillationSession:
             )
 
             # Set up planner LM for this pass
-            planner_lm = dspy_utils.get_lm(planner_lm_role, planner_api_key_role)
+            planner_lm = dspy_utils.get_lm(planner_lm_role)
 
             # Store planner_lm on the session so it can be used for replanning
             self.chat_session._current_planner_lm = planner_lm
@@ -730,7 +724,7 @@ class DistillationSession:
 
             # Run the agent with the specified AGENT LLM, reusing the WEC's shared
             # agent-invocation contract (dspy.context + AdapterParseError retry).
-            agent_lm = dspy_utils.get_lm(agent_lm_role, agent_api_key_role)
+            agent_lm = dspy_utils.get_lm(agent_lm_role)
             agent_result = self.chat_session._call_agent_with_retry(
                 lambda: agent(
                     user_query=command_info,
@@ -871,7 +865,7 @@ class DistillationSession:
         teacher_formatted = self._format_trajectory_for_llm(teacher_traj)
         student_formatted = self._format_trajectory_for_llm(student_traj)
 
-        lm = dspy_utils.get_lm("LLM_DISTILLATION", "LITELLM_API_KEY_DISTILLATION")
+        lm = dspy_utils.get_lm("LLM_DISTILLATION")
 
         with dspy.context(lm=lm):
             extractor = dspy.ChainOfThought(InsightExtractionSignature)
@@ -1006,7 +1000,7 @@ class DistillationSession:
             self._format_action(a) for a in student_actions
         ) or "(no actions executed)"
 
-        lm = dspy_utils.get_lm("LLM_DISTILLATION", "LITELLM_API_KEY_DISTILLATION")
+        lm = dspy_utils.get_lm("LLM_DISTILLATION")
 
         with dspy.context(lm=lm):
             extractor = dspy.ChainOfThought(PlanningInsightExtractionSignature)
@@ -1097,9 +1091,7 @@ def distill_message(
     teacher_output, teacher_traj, teacher_actions, teacher_plans = ds._run_agent_pass(
         message,
         agent_lm_role="LLM_TEACHER_AGENT",
-        agent_api_key_role="LITELLM_API_KEY_TEACHER_AGENT",
         planner_lm_role="LLM_TEACHER_PLANNER",
-        planner_api_key_role="LITELLM_API_KEY_TEACHER_PLANNER",
         pass_id=tracing.PASS_TEACHER,
     )
 
@@ -1120,9 +1112,7 @@ def distill_message(
             student_output, student_traj, student_actions, student_plans = ds._run_agent_pass(
                 message,
                 agent_lm_role="LLM_STUDENT_AGENT",
-                agent_api_key_role="LITELLM_API_KEY_STUDENT_AGENT",
                 planner_lm_role="LLM_STUDENT_PLANNER",
-                planner_api_key_role="LITELLM_API_KEY_STUDENT_PLANNER",
                 pass_id=tracing.PASS_STUDENT,
             )
     except Exception as e:

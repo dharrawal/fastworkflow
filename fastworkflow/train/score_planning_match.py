@@ -812,7 +812,7 @@ def run_listing_live(workflows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         user_query: str = dspy.InputField()
         next_steps: str = dspy.OutputField(desc="task descriptions as a numbered list of short sentences separated by line breaks")
 
-    lm = dspy_utils.get_lm("LLM_PLANNER", "LITELLM_API_KEY_PLANNER")
+    lm = dspy_utils.get_lm("LLM_PLANNER")
     predictor = dspy.ChainOfThought(TaskPlannerTextSignature)
     out_workflows = []
     with dspy.context(lm=lm, adapter=CommandsSystemPreludeAdapter()):
@@ -1016,7 +1016,7 @@ def _agent_plans(rows: Sequence[Mapping[str, Any]], workflow_folderpath: str,
     workflow = fastworkflow.Workflow.create(workflow_folderpath, workflow_id_str="planning-match-scoring")
     listing = planner_commands_text(workflow)
     names, core = _plan_names(workflow_folderpath)
-    lm = dspy_utils.get_lm("LLM_PLANNER", "LITELLM_API_KEY_PLANNER")
+    lm = dspy_utils.get_lm("LLM_PLANNER")
     predictor = dspy.ChainOfThought(TaskPlannerTextSignature)
     plans = []
     with dspy.context(lm=lm, adapter=CommandsSystemPreludeAdapter()):

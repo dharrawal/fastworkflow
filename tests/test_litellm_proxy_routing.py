@@ -33,8 +33,8 @@ class TestLiteLLMProxyRouting:
         fastworkflow._env_vars["LITELLM_PROXY_API_BASE"] = "http://127.0.0.1:4000"
         fastworkflow._env_vars["LITELLM_PROXY_API_KEY"] = "test-proxy-key"
         
-        # Create LM (api_key_env_var is ignored for proxy models)
-        lm = get_lm("LLM_TEST", "SOME_IGNORED_KEY_VAR")
+        # Create LM (a proxy model takes LITELLM_PROXY_API_KEY, never a role key)
+        lm = get_lm("LLM_TEST")
         
         # Verify the LM was created with proxy settings
         assert lm.model == "litellm_proxy/bedrock_mistral_large_2407"
@@ -92,7 +92,7 @@ class TestLiteLLMProxyRouting:
         fastworkflow._env_vars["LITELLM_API_KEY_AGENT"] = "direct-api-key"
         
         # Create LM with role-specific key
-        lm = get_lm("LLM_AGENT", "LITELLM_API_KEY_AGENT")
+        lm = get_lm("LLM_AGENT")
         
         # Verify direct provider settings
         assert lm.model == "mistral/mistral-small-latest"
@@ -160,7 +160,7 @@ class TestLiteLLMProxyRouting:
         fastworkflow._env_vars["LITELLM_API_KEY_TEST"] = "openai-key"
         
         # Create LM with additional kwargs
-        lm = get_lm("LLM_TEST", "LITELLM_API_KEY_TEST", temperature=0.5)
+        lm = get_lm("LLM_TEST", temperature=0.5)
         
         # Verify kwargs are preserved
         assert lm.kwargs.get("api_key") == "openai-key"
@@ -194,8 +194,8 @@ class TestMixedModelConfiguration:
         fastworkflow._env_vars["LITELLM_API_KEY_PARAM_EXTRACTION"] = "mistral-key"
         
         # Create both LMs
-        agent_lm = get_lm("LLM_AGENT", "LITELLM_API_KEY_AGENT")  # key ignored for proxy
-        param_lm = get_lm("LLM_PARAM_EXTRACTION", "LITELLM_API_KEY_PARAM_EXTRACTION")
+        agent_lm = get_lm("LLM_AGENT")  # key ignored for proxy
+        param_lm = get_lm("LLM_PARAM_EXTRACTION")
         
         # Verify agent uses proxy
         assert agent_lm.model == "litellm_proxy/bedrock_model"

@@ -28,6 +28,8 @@ from tests.test_approval_binding import (  # noqa: F401 - the real agent on the 
 from tests.test_round1_gate import (  # noqa: F401 - the gated context and the gate's helpers
     EMMA, FIND, JOKE, _open_review, _split_into, gated, no_draft_extraction)
 from tests.test_round1_handoff import FIND_TEXT, _planner_stub, _scripted_context  # noqa: F401
+from tests.conftest import script_matcher
+from tests.test_round1_gate import REMOTE_ANSWERS
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401
 
 pytestmark = pytest.mark.usefixtures("initialized_fastworkflow", "recorded_review_router")
@@ -37,6 +39,12 @@ COUNT = ("execute_workflow_query", {"command": "count_books <query>Dune</query>"
 COUNT_NO_QUERY = ("execute_workflow_query", {"command": "count_books"})
 ASK = ("ask_user", {"clarification_request": "Which one?"})
 CATS, OWLS, DOGS = "tell Ann a joke about cats", "tell Lee a joke about owls", "tell Raj a joke about dogs"
+
+
+def _remote_decides(monkeypatch):
+    """The remote decision model's answers for the reviewed turns (``REMOTE_ANSWERS``; DOGS, a joke too, as JOKE),
+    scripted with no model call. These tests used to get them from a live call through a developer's .env."""
+    script_matcher(monkeypatch, {**REMOTE_ANSWERS, DOGS: REMOTE_ANSWERS[JOKE]})
 THREE = [CATS, OWLS, DOGS]
 
 
@@ -173,6 +181,7 @@ def test_the_review_commands_have_no_part_and_the_reply_turn_numbers_the_parts(g
     queries: list = []
     _planner_stub(monkeypatch, queries)
     _split_into(monkeypatch, [FIND, JOKE])
+    _remote_decides(monkeypatch)
     opened = gated.ctx.process_turn(f"{FIND} and {JOKE}")
     assert opened.status is TurnStatus.AWAITING_USER
     _open_review(gated)
@@ -193,6 +202,7 @@ def test_dropping_an_item_in_the_review_renumbers_the_parts_as_the_answer_does(g
     queries: list = []
     _planner_stub(monkeypatch, queries)
     _split_into(monkeypatch, [FIND, JOKE, DOGS])
+    _remote_decides(monkeypatch)
     gated.ctx.process_turn(f"{FIND}, {JOKE} and {DOGS}")
     _open_review(gated)
     gated.ctx.process_turn("drop 2")
@@ -211,6 +221,7 @@ def test_a_review_saved_and_restored_before_the_accept_numbers_the_parts(annotat
     queries: list = []
     _planner_stub(monkeypatch, queries)
     _split_into(monkeypatch, [EMMA, JOKE])
+    _remote_decides(monkeypatch)
     first = _scripted_context(annotated_library, monkeypatch)
     first.ctx.process_turn(f"{EMMA} and {JOKE}")
     first.ctx.process_turn("change 2: inputs=Ann Lee")

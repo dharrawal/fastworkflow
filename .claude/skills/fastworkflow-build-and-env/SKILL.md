@@ -191,9 +191,9 @@ by activity, with the model var each key pairs with:
 
 | Activity | Required key(s) | Notes |
 |---|---|---|
-| `fastworkflow train` | `LITELLM_API_KEY_SYNDATA_GEN` | Missing key = warning then failed/empty synthetic generation; train also hard-fails without `SPEEDDICT_FOLDERNAME` in the env file |
-| `fastworkflow run_cli` (agent mode) | `LITELLM_API_KEY_AGENT`, `LITELLM_API_KEY_PARAM_EXTRACTION`, `LITELLM_API_KEY_PLANNER` | run also probes `LITELLM_API_KEY_SYNDATA_GEN` presence at startup (run_cli/__main__.py:129-132) — keep it set |
-| `fastworkflow refine` | `LLM_COMMAND_METADATA_GEN` + `LITELLM_API_KEY_COMMANDMETADATA_GEN` **exported in the OS shell** | refine/build load NO env files (`fastworkflow.init(env_vars={})`); note the spelling: no underscore in `COMMANDMETADATA`; this var pair is absent from the bundled template |
+| `fastworkflow train` | the key of the model `LLM_SYNDATA_GEN` resolves to (its own, else `LLM_AGENT`'s or `LLM_PLANNER`'s) | Train stops at start with no model at all; a missing key prints one notice. Bedrock needs none |
+| `fastworkflow run_cli` (agent mode) | `LITELLM_API_KEY_AGENT` (every role falls back to `LLM_AGENT` and its key on the same provider) | No-agent mode: `LLM_PLANNER`, its key, and `JEV_API_KEY` |
+| `fastworkflow refine` | `LLM_COMMAND_METADATA_GEN` (else the base model) and the key that follows it | refine/build load the workflow's env files (`--env-file-path`, `--passwords-file-path`); note the spelling: no underscore in `COMMANDMETADATA` |
 | FastAPI conversation summaries | `LITELLM_API_KEY_CONVERSATION_STORE` | |
 
 Placeholder hygiene: the bundled `fastworkflow/examples/fastworkflow.passwords.env` ships

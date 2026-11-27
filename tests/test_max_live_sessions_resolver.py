@@ -1,10 +1,9 @@
 """Integration tests for the live-session cap and checkpoint retention (Release C).
 
 `MAX_LIVE_SESSIONS` is an operator control, and an operator control whose
-documented default outranks the container override is not one. `get_env_var`
-reads the workflow env file *before* `os.environ`, so a resolver built on it alone
-would let the env file outrank the container variable — the value would
-silently be whatever the workflow env file said.
+documented default outranks the container override is not one. The one
+precedence rule (`fastworkflow.get_env_var`) has the process environment win
+over the workflow env file, so the container variable is the one that counts.
 
 Lowering the cap is also what makes eviction routine, which is what makes
 checkpoint retention necessary: a unique-channel workload writes a snapshot per
@@ -84,11 +83,7 @@ def test_the_default_is_the_lowered_cap():
 
 
 def test_the_process_environment_wins(monkeypatch):
-    """The container variable must be reachable, which is the reason for the resolver.
-
-    get_env_var reads the workflow env file before os.environ, so a resolver
-    written the obvious way would let the file outrank this.
-    """
+    """The container variable must be reachable: the process environment wins over the env file."""
     monkeypatch.setenv("MAX_LIVE_SESSIONS", "137")
 
     value, source = resolve_max_live_sessions()

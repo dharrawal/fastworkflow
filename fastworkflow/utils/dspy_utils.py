@@ -12,6 +12,7 @@ from typing import Type, Optional, Dict, Any, Union, get_args, get_origin, Tuple
 
 import fastworkflow
 from fastworkflow.parameters.rules import is_union
+from fastworkflow.utils import model_roles
 from fastworkflow.utils.logging import logger
 
 
@@ -119,12 +120,60 @@ def role_context(role: str, lm, **settings):
         yield
 
 
-def get_lm(model_env_var: str, api_key_env_var: Optional[str] = None, **kwargs):
+_ANNOUNCED_FALLBACKS: set[tuple[str, str]] = set()
+
+
+def resolve_role(model_var: str) -> model_roles.RoleModel:
+    """The model and key of the role whose model setting is *model_var*: THE fallback rule
+    (``fastworkflow.utils.model_roles``), read with the one precedence rule (``fastworkflow.raw_env_var``).
+
+    The base model is ``LLM_AGENT``, else ``LLM_PLANNER``; ``LLM_PLANNER`` falls back to ``LLM_AGENT``; every role
+    of ``model_roles.FALLBACK_ROLES`` falls back to the base; ``LLM_RESPONSE_GEN`` and the distillation roles do not.
+    The key follows the model and never crosses a provider. A model taken from another role is said once per role
+    per process, at INFO, naming the role it came from.
+    """
+    resolved = model_roles.resolve(model_var, fastworkflow.raw_env_var)
+    if resolved.inherited_from and (model_var, resolved.inherited_from) not in _ANNOUNCED_FALLBACKS:
+        _ANNOUNCED_FALLBACKS.add((model_var, resolved.inherited_from))
+        logger.info(f"{model_var} is not set: using {resolved.inherited_from}'s model ({resolved.model})"
+                    + (f" and key ({resolved.key_var})" if resolved.key_var else ""))
+    return resolved
+
+
+def role_completion(model_var: str):
+    """``litellm.completion`` for the role whose model setting is *model_var*, for the code that calls litellm directly
+    (the two training-data generators): each call gets ``resolve_role``'s model and key (and the proxy base for a
+    ``litellm_proxy/`` model) as arguments, whatever model or key the caller passed, and never through the global
+    ``litellm.api_key``. ``litellm.completion`` is looked up at each call. The function carries
+    ``ROLE_COMPLETION_MARK``, so a cache fingerprint can name it as the production backend."""
+
+    def completion(**kwargs):
+        resolved = resolve_role(model_var)
+        if not resolved.model:
+            raise ValueError(f"DSPy Language Model not provided. Set {model_var} environment variable.")
+        kwargs["model"] = resolved.model
+        kwargs.pop("api_key", None)
+        if resolved.key:
+            kwargs["api_key"] = resolved.key
+        if resolved.provider == model_roles.PROXY_PROVIDER:
+            if proxy_api_base := fastworkflow.get_env_var("LITELLM_PROXY_API_BASE", default=""):
+                kwargs["api_base"] = proxy_api_base
+        return litellm.completion(**kwargs)
+
+    setattr(completion, ROLE_COMPLETION_MARK, model_var)
+    return completion
+
+
+#: The attribute ``role_completion`` marks its function with (the role's model setting).
+ROLE_COMPLETION_MARK = "fastworkflow_role_completion"
+
+
+def get_lm(model_env_var: str, **kwargs):
     """The role's LM, tagged with the role (``fastworkflow_role``) so a model-call span can say whose it is.
 
-    ``_build_lm`` builds it; see there for the arguments and the routing.
+    ``_build_lm`` builds it; see there for the routing.
     """
-    lm = _build_lm(model_env_var, api_key_env_var, **kwargs)
+    lm = _build_lm(model_env_var, **kwargs)
     try:
         lm.fastworkflow_role = model_env_var
     except Exception:  # noqa: BLE001 - a tag is an extra: an LM that refuses it is still the role's LM
@@ -132,51 +181,21 @@ def get_lm(model_env_var: str, api_key_env_var: Optional[str] = None, **kwargs):
     return lm
 
 
-def _build_lm(model_env_var: str, api_key_env_var: Optional[str] = None, **kwargs):
-    """
-    Get the dspy LM object.
-    
-    Supports LiteLLM Proxy routing: if the model string starts with 'litellm_proxy/',
-    the call is routed through the LiteLLM Proxy using LITELLM_PROXY_API_BASE and
-    LITELLM_PROXY_API_KEY environment variables.
-    
-    Args:
-        model_env_var: Name of the environment variable containing the model string
-                       (e.g., 'LLM_AGENT', 'LLM_PARAM_EXTRACTION').
-        api_key_env_var: Name of the environment variable containing the API key
-                         for direct provider calls. Ignored for litellm_proxy/ models.
-        **kwargs: Additional keyword arguments passed to dspy.LM().
-    
-    Returns:
-        dspy.LM: Configured language model instance.
-    
-    Raises:
-        ValueError: If model is not set, or if using litellm_proxy/ without
-                    LITELLM_PROXY_API_BASE configured.
-    
-    Example:
-        # Direct provider call (existing behavior):
-        # LLM_AGENT=mistral/mistral-small-latest
-        # LITELLM_API_KEY_AGENT=sk-...
-        lm = get_lm("LLM_AGENT", "LITELLM_API_KEY_AGENT")
-        
-        # LiteLLM Proxy call:
-        # LLM_AGENT=litellm_proxy/bedrock_mistral_large_2407
-        # LITELLM_PROXY_API_BASE=http://127.0.0.1:4000
-        # LITELLM_PROXY_API_KEY=proxy-key-...
-        lm = get_lm("LLM_AGENT", "LITELLM_API_KEY_AGENT")  # api_key_env_var is ignored for proxy
+def _build_lm(model_env_var: str, **kwargs):
+    """The dspy LM of the role whose model setting is *model_env_var* (``LLM_AGENT``, ``LLM_PARAM_EXTRACTION``, ...).
+
+    The model and key are ``resolve_role``'s: the role's own model, else the one it falls back to, and the key that
+    follows it. A ``litellm_proxy/`` model is routed through the LiteLLM Proxy at ``LITELLM_PROXY_API_BASE``, with
+    ``LITELLM_PROXY_API_KEY`` when set (a no-auth proxy needs none). ``**kwargs`` go to ``dspy.LM``.
+
+    Raises ValueError when the role has no model (its own or a fallback), or when a ``litellm_proxy/`` model has no
+    ``LITELLM_PROXY_API_BASE``.
     """
     # `FW_LM_CACHE=0` defeats the DSPy response cache process-wide
     # (`fix-bn1` `[XR16]`). Without it, k repeated attempts of one task in a
     # pass^k experiment send identical prompts, hit the disk+memory cache that
     # dspy enables by default, and come back byte-identical -- so pass^k equals
-    # pass@1 by construction and the run looks like a spectacular result. The
-    # lever is process-wide because nothing threads per-call kwargs down to
-    # here; `**kwargs` already reaches `dspy.LM`, but no caller passes any.
-    #
-    # Unset leaves today's behavior exactly as it was. The value is the env file
-    # ``init`` loaded, else the process environment (``get_env_var``, fix-hia1.40),
-    # so a harness can set ``FW_LM_CACHE=0`` without calling ``init``.
+    # pass@1 by construction and the run looks like a spectacular result.
     if not lm_cache_enabled():
         kwargs.setdefault("cache", False)
     # Without one, a provider request that stalls blocks the turn for minutes.
@@ -185,41 +204,25 @@ def _build_lm(model_env_var: str, api_key_env_var: Optional[str] = None, **kwarg
     if num_retries is not None:
         kwargs.setdefault("num_retries", num_retries)
 
-    model = fastworkflow.get_env_var(model_env_var)
+    resolved = resolve_role(model_env_var)
+    model = resolved.model
     if not model:
         logger.critical(f"Critical Error: DSPy Language Model not provided. Set {model_env_var} environment variable.")
         raise ValueError(f"DSPy Language Model not provided. Set {model_env_var} environment variable.")
-    
-    # Check if this is a LiteLLM Proxy call
-    if model.startswith("litellm_proxy/"):
-        # Route through LiteLLM Proxy
-        proxy_api_base = fastworkflow.get_env_var("LITELLM_PROXY_API_BASE")
+
+    if resolved.provider == model_roles.PROXY_PROVIDER:
+        proxy_api_base = fastworkflow.get_env_var("LITELLM_PROXY_API_BASE", default="")
         if not proxy_api_base:
             raise ValueError(
                 f"Model '{model}' uses litellm_proxy/ prefix but LITELLM_PROXY_API_BASE is not set. "
                 "Set LITELLM_PROXY_API_BASE to your LiteLLM Proxy URL (e.g., http://127.0.0.1:4000)."
             )
-        
-        # Get optional proxy API key (allows no-auth proxies when empty/not set)
-        proxy_api_key = fastworkflow.get_env_var("LITELLM_PROXY_API_KEY", default=None)
-        
         logger.debug(f"Routing {model_env_var} through LiteLLM Proxy at {proxy_api_base}")
-        
-        if proxy_api_key:
-            return dspy.LM(
-                model=model,
-                api_base=proxy_api_base,
-                api_key=proxy_api_key,
-                **kwargs,
-            )
-        else:
-            return dspy.LM(model=model, api_base=proxy_api_base, **kwargs)
-    
-    # Direct provider call (existing behavior)
-    api_key = fastworkflow.get_env_var(api_key_env_var) if api_key_env_var else None
+        kwargs["api_base"] = proxy_api_base
+
     return (
-        dspy.LM(model=model, api_key=api_key, **kwargs)
-        if api_key
+        dspy.LM(model=model, api_key=resolved.key, **kwargs)
+        if resolved.key
         else dspy.LM(model=model, **kwargs)
     )
 

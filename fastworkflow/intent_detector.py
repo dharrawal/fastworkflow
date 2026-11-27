@@ -415,9 +415,9 @@ def warn_if_engine_setting() -> None:
 
 
 def heads_required() -> bool:
-    """``FW_REQUIRE_HEADS=1`` in the process environment (read directly, as the test switch is): a scope
-    with no trained local model is a failure, and the matcher does not stand in for it."""
-    return os.environ.get("FW_REQUIRE_HEADS") == "1"
+    """``FW_REQUIRE_HEADS=1`` (the process environment or the workflow env file, ``fastworkflow.raw_env_var``): a
+    scope with no trained local model is a failure, and the matcher does not stand in for it."""
+    return fastworkflow.raw_env_var("FW_REQUIRE_HEADS") == "1"
 
 
 def head_is_confident(answer: "ScopeAnswer") -> bool:

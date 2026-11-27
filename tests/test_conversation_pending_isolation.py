@@ -22,7 +22,7 @@ from fastworkflow.review_engine import AWAITING, INVALIDATED
 from fastworkflow.turn import TurnStatus
 from tests.test_approval_binding import (  # noqa: F401 - fixtures and the scripted agent
     _added, _ask, _finish, annotated_library, no_live_model, no_model_call_for_parameters, todo)
-from tests.test_round1_gate import EMMA, JOKE, _open_review, _split_into, gated  # noqa: F401
+from tests.test_round1_gate import EMMA, JOKE, _open_review, _split_into, gated, remote_decides_emma_and_joke  # noqa: F401
 from tests.test_round1_handoff import _scripted_context  # noqa: F401 - a fresh context on the annotated library
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401
 
@@ -134,7 +134,7 @@ def test_a_new_conversation_cancels_a_pending_approval_at_once(todo, annotated_l
 # ----------------------------------------------------------------------
 
 
-def test_an_open_round_one_review_is_parked_and_never_answered_from_the_second_conversation(gated, monkeypatch):
+def test_an_open_round_one_review_is_parked_and_never_answered_from_the_second_conversation(gated, monkeypatch, remote_decides_emma_and_joke):
     gated.ctx.bind_observability_identity(conversation_id=CONV_A)
     _split_into(monkeypatch, [EMMA, JOKE])
     gated.ctx.process_turn(f"{EMMA} and {JOKE}")

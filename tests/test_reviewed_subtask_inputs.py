@@ -71,7 +71,6 @@ def drafting(monkeypatch, no_planner_key):
     # One extractor LM is scripted in CALL order across the sub-tasks: drafts run one after another here (fix-awg8).
     monkeypatch.setenv("FW_SUBTASK_WORKERS", "1")
     monkeypatch.setitem(fastworkflow._env_vars, "FW_JEV_FIELD_GIVEN", "off")
-    monkeypatch.setattr(signatures, "LLM_PARAM_EXTRACTION", "scripted/extractor")
     # fix-o1lg.2: a planning command the local model picks is only a candidate until the remote decision model agrees,
     # and a part with several candidates is asked about BEFORE the review. These tests are about the review's drafts,
     # so the remote model's answer is scripted: a request about a book's title gets book_by_title, the Austen request

@@ -150,7 +150,7 @@ def _rekey_parameter_examples(workflow_path: str) -> None:
                         f"seed {seed}, so training it would call a model")
         fingerprint = param_example_fingerprint(
             fields.model_fields, name, trainer.PARAM_EXAMPLE_COUNT,
-            trainer.PARAM_VALIDATION_THRESHOLD, fastworkflow.get_env_var("LLM_SYNDATA_GEN"))
+            trainer.PARAM_VALIDATION_THRESHOLD)
         assert cache.store(fingerprint, seed, entry["valid_examples"], entry.get("rejected_examples"))
     RoutingRegistry.clear_registry()
 

@@ -831,13 +831,12 @@ class BenchmarkPinIsWriteOnce(ValueError):
 
 
 def _env(name: str, default: str) -> str:
-    """FW_* knob: process env first, then the workflow env file, then default."""
-    value = os.environ.get(name)
-    if value is None or value == "":
-        value = fastworkflow._env_vars.get(name)
-    if value is None or str(value).strip() == "":
+    """FW_* knob under the one precedence rule (``fastworkflow.raw_env_var``: the process, then the workflow env
+    file); unset or blank is *default*."""
+    value = fastworkflow.raw_env_var(name)
+    if value is None or value.strip() == "":
         return default
-    return str(value).strip()
+    return value.strip()
 
 
 _warned_env_values: set[tuple[str, str]] = set()

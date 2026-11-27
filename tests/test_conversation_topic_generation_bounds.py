@@ -268,18 +268,18 @@ def test_the_workflow_env_file_is_used_when_the_process_has_no_override(
     assert resolve_topic_generation_timeout() == (3.5, "workflow env file")
 
 
-def test_an_empty_process_value_falls_through_instead_of_failing(
+def test_an_empty_process_value_is_set_and_means_the_default_instead_of_failing(
     conversation_store_env, monkeypatch
 ):
     """An exported-but-empty variable is how container templating leaves a blank.
 
-    Treating "" as a configured value would turn a blank template into a hard
-    failure, or worse a zero deadline.
+    It is set (the one precedence rule, ``fastworkflow.raw_env_var``: an empty process value hides the env file's),
+    and an empty value means the default: never a hard failure, never a zero deadline.
     """
     monkeypatch.setenv(TOPIC_GENERATION_TIMEOUT_ENV_VAR, "")
     conversation_store_env[TOPIC_GENERATION_TIMEOUT_ENV_VAR] = "3.5"
 
-    assert resolve_topic_generation_timeout() == (3.5, "workflow env file")
+    assert resolve_topic_generation_timeout() == (DEFAULT_TOPIC_GENERATION_TIMEOUT_SECONDS, "default")
 
 
 @pytest.mark.parametrize("bad", ["banana", "12s", "0", "-1"])

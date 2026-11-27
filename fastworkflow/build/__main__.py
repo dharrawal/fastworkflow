@@ -14,6 +14,7 @@ from fastworkflow.build.context_model_generator import (
 from fastworkflow.build.context_folder_generator import ContextFolderGenerator
 from fastworkflow.build.command_stub_generator import CommandStubGenerator
 from fastworkflow.build.navigator_stub_generator import NavigatorStubGenerator
+from fastworkflow.utils.env import add_env_file_arguments
 from fastworkflow.utils.logging import logger
 
 def parse_args():
@@ -25,7 +26,17 @@ def parse_args():
     parser.add_argument('--overwrite', action='store_true', help='Overwrite files in output directory if present')
     parser.add_argument('--stub-commands', help='Comma-separated list of command names to generate stubs for')
     parser.add_argument('--no-startup', action='store_true', help='Skip generating the startup.py file')
+    add_env_file_arguments(parser)
     return parser.parse_args()
+
+
+
+def init_env(args) -> None:
+    """``fastworkflow.init`` with the workflow's env files (``utils.env.init_from_env_files``)."""
+    from fastworkflow.utils.env import init_from_env_files
+
+    init_from_env_files(args.workflow_folderpath, getattr(args, "env_file_path", None),
+                        getattr(args, "passwords_file_path", None))
 
 def validate_directories(args):
     if not os.path.isdir(args.app_dir):
@@ -326,7 +337,7 @@ class ResponseGenerator:
 def main():  # sourcery skip: extract-method
     try:
         args = parse_args()
-        fastworkflow.init(env_vars={})  # Initialize with empty environment variables
+        init_env(args)
         validate_directories(args)
         all_classes_data, ctx_model_data = run_command_generation(args)
         if errors := run_validation(args, all_classes_data, ctx_model_data):
@@ -349,7 +360,7 @@ def build_main(args):  # sourcery skip: extract-method
 
     try:
         # Skip parsing args since they're provided by the CLI
-        fastworkflow.init(env_vars={})  # Initialize with empty environment variables
+        init_env(args)
         validate_directories(args)
         all_classes_data, ctx_model_data = run_command_generation(args)
         if errors := run_validation(args, all_classes_data, ctx_model_data):

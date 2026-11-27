@@ -57,7 +57,6 @@ def _framework(tmp_path, monkeypatch):
     fastworkflow.RoutingRegistry.clear_registry()
     # Jev's "is this field given" check is a model call: off, so the scripted LM answers alone.
     monkeypatch.setitem(fastworkflow._env_vars, "FW_JEV_FIELD_GIVEN", "off")
-    monkeypatch.setattr(signatures, "LLM_PARAM_EXTRACTION", "scripted/extractor")
     yield
     fastworkflow.RoutingRegistry.clear_registry()
 

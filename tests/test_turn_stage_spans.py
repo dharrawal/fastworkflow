@@ -26,7 +26,7 @@ from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 from tests import span_tree
 from tests.test_approval_binding import (  # noqa: F401
     _finish, annotated_library, no_live_model, no_model_call_for_parameters, todo)
-from tests.test_round1_gate import EMMA, FIND, JOKE, _split_into, gated, no_draft_extraction  # noqa: F401
+from tests.test_round1_gate import EMMA, FIND, JOKE, _split_into, gated, remote_decides_emma_and_joke, no_draft_extraction  # noqa: F401
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401
 from fastworkflow.workflow_agent import build_query_with_next_steps as _REAL_PLANNER   # the fixtures stub it
 
@@ -39,7 +39,7 @@ def _stages(sink) -> list[str]:
     return [child.name for child in turn.children if child.name in tracing.STAGE_SPAN_NAMES]
 
 
-def test_a_reviewed_two_part_turn_has_split_resolve_review_run_in_order(gated, monkeypatch):
+def test_a_reviewed_two_part_turn_has_split_resolve_review_run_in_order(gated, monkeypatch, remote_decides_emma_and_joke):
     _split_into(monkeypatch, [EMMA, JOKE])
     gated.ctx.process_turn(f"{EMMA} and {JOKE}")
     (review,) = span_tree.named(gated.sink, tracing.SPAN_REVIEW)
@@ -98,7 +98,7 @@ def _the_tree_is_the_new_one(sink) -> None:
     assert span_tree.same_name_parents(sink) == []
 
 
-def test_a_turn_resumed_in_another_context_reopens_the_same_stage_span(gated, monkeypatch):
+def test_a_turn_resumed_in_another_context_reopens_the_same_stage_span(gated, monkeypatch, remote_decides_emma_and_joke):
     """The saved session carries the stage the turn waits in and how often each span was opened, so a context built
     from it reopens the SAME review span and closes it as its second segment."""
     _split_into(monkeypatch, [EMMA, JOKE])
@@ -149,7 +149,7 @@ def _summarized_by(ctx, monkeypatch, summary: str = "the summary") -> None:
                         lambda *args, **kwargs: DummyLM([{"reasoning": "", "conversation_summary": summary}] * 4))
 
 
-def test_an_ad_hoc_part_has_its_plan_under_it_and_its_steps_carry_the_plan(gated, monkeypatch):
+def test_an_ad_hoc_part_has_its_plan_under_it_and_its_steps_carry_the_plan(gated, monkeypatch, remote_decides_emma_and_joke):
     """A part no command fits, with an agent model (reviewed, then accepted): the text planner's ``fw.plan`` is the
     part's child, and the steps the agent then takes are its siblings, each carrying the plan's id."""
     from dspy.utils import DummyLM

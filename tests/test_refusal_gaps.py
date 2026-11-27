@@ -73,7 +73,6 @@ def _setup(gated, no_agent_model, no_planner_key, monkeypatch):
     original = signatures.dspy_utils.get_lm
     monkeypatch.setattr(signatures.dspy_utils, "get_lm",
                         lambda name, *a, **k: lm if name == "LLM_PARAM_EXTRACTION" else original(name, *a, **k))
-    monkeypatch.setattr(signatures, "LLM_PARAM_EXTRACTION", "scripted/extractor")
     monkeypatch.setattr("fastworkflow.workflow_agent.split_into_subtasks", lambda user_query, **kwargs: [user_query])
 
 

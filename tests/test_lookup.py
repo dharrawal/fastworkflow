@@ -43,6 +43,7 @@ from tests.test_global_first_lookup import (  # noqa: F401 - fixtures
     _route,
 )
 from tests.test_lookup_exact_names import _run  # noqa: F401
+from tests.scripted_extractor import script_extractor
 from tests.test_turn_result_capture import (  # noqa: F401 - shared fixtures
     initialized_fastworkflow,
 )
@@ -142,6 +143,9 @@ def test_a_switch_to_a_user_said_on_a_user_is_resolved_by_the_climb_and_bound_to
     bob = User(root, "bob")
     root.add_user(bob)
 
+    # The parameter extractor's model is scripted (``script_extractor``) with what the request gives: these walks used
+    # to reach a live extraction model through a developer's .env that litellm loaded into the process.
+    script_extractor(monkeypatch, *[{"user_name": "bob"}] * 3)
     out = _route(cme, "set_current_user bob")
 
     artifacts = out.command_response.artifacts
@@ -186,6 +190,9 @@ def test_library_hours_is_reachable_by_exact_name_from_inside_a_book(
     app, cme, library = library_on_a_book
     book = app._current_command_context
 
+    # The parameter extractor's model is scripted (``script_extractor``) with what the request gives: these walks used
+    # to reach a live extraction model through a developer's .env that litellm loaded into the process.
+    script_extractor(monkeypatch, *[{"branch": "NOT_FOUND"}] * 3)
     run = _run(app, cme, monkeypatch, "library_hours")
 
     assert _short(run.command_name) == "library_hours"
@@ -208,6 +215,10 @@ def test_library_hours_by_natural_language_from_a_book(
                     f"{len(HOURS_CANDIDATES)} probed phrasings: reachable by exact name only")
     asked = _heads_asked(monkeypatch)
 
+    # The parameter extractor's model is scripted (``script_extractor``) with what the request gives: these walks used
+    # to reach a live extraction model through a developer's .env that litellm loaded into the process.
+    branch = "Riverside" if "Riverside" in hits[0] else "NOT_FOUND"
+    script_extractor(monkeypatch, *[{"branch": branch}] * 3)
     out = _route(cme, hits[0])
 
     assert asked[0] == "*", asked

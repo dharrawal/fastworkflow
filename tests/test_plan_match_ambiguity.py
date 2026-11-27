@@ -318,6 +318,9 @@ def test_an_unambiguous_request_opens_the_same_review_and_records_nothing(gated,
 
 @pytest.mark.parametrize("reply", ["yes", "accept", "looks good"])
 def test_an_accept_of_a_review_after_an_ambiguous_part_runs_the_bound_plan(reply, gated, no_heads, monkeypatch):
+    # An agent model is set (the agent is scripted, no call reaches it): the explicit-yes rule for an ad hoc part that
+    # may change data applies only then. Before, a developer's .env that litellm loaded into the process set it.
+    monkeypatch.setitem(fastworkflow._env_vars, "LLM_AGENT", "test/agent-model")
     _, record = _ambiguous_review(gated, monkeypatch)
     gated.script.steps = [("finish", {})] * 2
     out = gated.ctx.process_turn(reply)

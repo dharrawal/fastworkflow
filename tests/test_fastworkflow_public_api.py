@@ -48,6 +48,8 @@ PUBLIC = (
     ("Refused", "type", "fastworkflow"),
     ("RoutingDefinition", "NoneType", ""),
     ("RoutingRegistry", "NoneType", ""),
+    ("SOURCE_ENV_FILE", "str", ""),
+    ("SOURCE_PROCESS", "str", ""),
     ("Span", "type", "fastworkflow.observability.tracing"),
     ("TraceSink", "_ProtocolMeta", "fastworkflow.observability.tracing"),
     ("TurnOutput", "ModelMetaclass", "fastworkflow.turn"),
@@ -72,6 +74,7 @@ PUBLIC = (
     ("UiOptions", "_TypedDictMeta", "fastworkflow.field_options"),
     ("descends_to", "function", "fastworkflow.command_declarations"),
     ("get_active_workflow", "function", "fastworkflow.active_workflow"),
+    ("env_source", "function", "fastworkflow"),
     ("get_env_var", "function", "fastworkflow"),
     ("get_fastworkflow_package_path", "function", "fastworkflow"),
     ("get_internal_workflow_path", "function", "fastworkflow"),
@@ -84,6 +87,7 @@ PUBLIC = (
     ("observability", "module", "fastworkflow.observability"),
     ("os", "module", "os"),
     ("pop_active_workflow", "function", "fastworkflow.active_workflow"),
+    ("raw_env_var", "function", "fastworkflow"),
     ("push_active_workflow", "function", "fastworkflow.active_workflow"),
     ("resolve_startup_action", "function", "fastworkflow"),
     ("time", "module", "time"),
@@ -164,7 +168,7 @@ def test_public_names_still_resolve():
     assert fresh_types == {name: "NoneType" for name in INIT_ASSIGNED}
 
 
-def test_get_env_var_reads_the_env_files_then_the_process_then_the_default(monkeypatch):
+def test_get_env_var_reads_the_process_then_the_env_files_then_the_default(monkeypatch):
     """The process environment is read with or without a default (fix-hia1.40)."""
     name = "FW_TEST_GET_ENV_VAR"
     monkeypatch.delitem(fastworkflow._env_vars, name, raising=False)
@@ -176,6 +180,8 @@ def test_get_env_var_reads_the_env_files_then_the_process_then_the_default(monke
     assert fastworkflow.get_env_var(name, default="1") == "0"
     assert fastworkflow.get_env_var(name, int, default=5) == 0
     assert fastworkflow.get_env_var(name, bool, default=True) is False
-    # The env files fastworkflow.init loaded outrank the process environment.
+    # The process environment outranks the env files fastworkflow.init loaded (bd fix-ygxo), which outrank the default.
     monkeypatch.setitem(fastworkflow._env_vars, name, "7")
+    assert fastworkflow.get_env_var(name, int, default=5) == 0
+    monkeypatch.delenv(name)
     assert fastworkflow.get_env_var(name, int, default=5) == 7

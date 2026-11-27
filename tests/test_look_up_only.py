@@ -50,9 +50,6 @@ def no_model_call_for_parameters(monkeypatch):
     import dspy
     from dspy.utils import DummyLM
 
-    from fastworkflow.utils import signatures
-
-    monkeypatch.setattr(signatures, "LLM_PARAM_EXTRACTION", "scripted/extractor")
     param_lm = DummyLM([{"reasoning": "n", "item": "1"}] * 12, adapter=dspy.JSONAdapter())
 
     def get_lm(role, *a, **k):

@@ -25,6 +25,7 @@ from typing import Any, Optional
 import fastworkflow
 
 AGENT_MODEL_ENV = "LLM_AGENT"
+PLANNER_MODEL_ENV = "LLM_PLANNER"
 JEV_KEY_ENV = "JEV_API_KEY"
 
 #: The artifact key under which a turn lists its stopped or refused parts (a list, one entry per part).
@@ -72,6 +73,9 @@ NOT_PLANNED_NOTE = ("This request was not planned because no agent model is conf
 STARTUP_PROBLEM = ("no agent model is set (LLM_AGENT) and no Jev key is set (JEV_API_KEY): one of them is needed. "
                    "Set LLM_AGENT to run the ReAct agent as before, or set JEV_API_KEY to run without an "
                    "agent model (Jev then matches each sub-task to a planning command).")
+#: No base model: every model role falls back to ``LLM_AGENT``, else ``LLM_PLANNER`` (``dspy_utils.resolve_role``).
+BASE_MODEL_PROBLEM = ("no model is set: set LLM_AGENT (the agent model, which every other model role falls back to), "
+                      "or, to run without an agent model, LLM_PLANNER and JEV_API_KEY.")
 
 
 def agent_model_specified() -> bool:
@@ -83,15 +87,25 @@ def jev_key_specified() -> bool:
     return bool(str(fastworkflow.get_env_var(JEV_KEY_ENV, default="") or "").strip())
 
 
+def base_model_specified() -> bool:
+    """Whether a base model is set: ``LLM_AGENT``, else ``LLM_PLANNER`` (``model_roles.base_role``)."""
+    from fastworkflow.utils import model_roles
+
+    return model_roles.base_role(fastworkflow.raw_env_var) is not None
+
+
 def startup_problem() -> Optional[str]:
     """The startup problem of no-agent mode: neither the agent model nor the Jev key is set. None otherwise."""
     return None if agent_model_specified() or jev_key_specified() else STARTUP_PROBLEM
 
 
 def runtime_problems() -> list[str]:
-    """The problems only a process that serves turns reports (``fastworkflow run_cli``, the server), not training."""
-    problem = startup_problem()
-    return [problem] if problem else []
+    """The problems only a process that serves turns reports (``fastworkflow run_cli``, the server), not training: no
+    base model (neither ``LLM_AGENT`` nor ``LLM_PLANNER``), and no agent model with no Jev key."""
+    problems = [] if base_model_specified() else [BASE_MODEL_PROBLEM]
+    if problem := startup_problem():
+        problems.append(problem)
+    return problems
 
 
 def startup_line() -> Optional[str]:

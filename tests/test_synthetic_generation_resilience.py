@@ -388,7 +388,6 @@ def _fingerprint(**overrides):
         "num_personas": 2,
         "utterances_per_persona": 2,
         "personas_per_batch": 1,
-        "model": MODEL,
         "completion_fn": None,
         "persona_dataset_loader": None,
     }
@@ -399,7 +398,6 @@ def _fingerprint(**overrides):
         kwargs["num_personas"],
         kwargs["utterances_per_persona"],
         kwargs["personas_per_batch"],
-        kwargs["model"],
         completion_fn=kwargs["completion_fn"],
         persona_dataset_loader=kwargs["persona_dataset_loader"],
     )
@@ -468,7 +466,6 @@ def test_an_entry_written_before_selection_code_was_digested_is_not_reused(
         num_personas=2,
         utterances_per_persona=2,
         personas_per_batch=1,
-        model=MODEL,
         persona_source=(
             f"{_local_persona_dataset.__module__}.{_local_persona_dataset.__qualname__}"
         ),

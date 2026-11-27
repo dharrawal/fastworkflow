@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import dspy
 import pytest
+
+import fastworkflow
 from dspy.utils import DummyLM
 from types import SimpleNamespace
 
@@ -444,6 +446,9 @@ def _commands_run(out) -> list[str]:
 
 
 def test_part_you_misunderstood_then_a_pick_runs_the_picked_command_once(todo, monkeypatch):
+    # An agent model is configured: the agent loop builds its LM from LLM_AGENT, and every call it makes is scripted.
+    # Before, a developer's .env that litellm loaded into the process named one.
+    monkeypatch.setitem(fastworkflow._env_vars, "LLM_AGENT", "test/agent-model")
     _asked_while_running(todo, monkeypatch, "misunderstood")
     asked = todo.ctx.process_turn("you misunderstood")
     names = [each["name"] for each in _artifacts(asked)["plan_choice"]["choices"]]

@@ -60,9 +60,9 @@ def _slot_binding_signal_version(extraction_method: str) -> str:
     if static_version := _STATIC_SLOT_BINDING_SIGNAL_VERSIONS.get(extraction_method):
         return static_version
     if not LLM_PARAM_EXTRACTION_MODEL:
-        LLM_PARAM_EXTRACTION_MODEL = (
-            fastworkflow.get_env_var("LLM_PARAM_EXTRACTION") or "unknown"
-        )
+        from fastworkflow.utils import dspy_utils
+
+        LLM_PARAM_EXTRACTION_MODEL = dspy_utils.resolve_role("LLM_PARAM_EXTRACTION").model or "unknown"
     return f"param-extraction/llm/{LLM_PARAM_EXTRACTION_MODEL}"
 
 

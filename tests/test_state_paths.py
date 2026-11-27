@@ -24,7 +24,9 @@ def _restore_env():
     fastworkflow.init(previous or {})
 
 
-def test_state_root_from_env_file_is_expanded_and_absolute(tmp_path):
+def test_state_root_from_env_file_is_expanded_and_absolute(tmp_path, monkeypatch):
+    # conftest sets the root in the process, which wins over the env file (bd fix-ygxo): clear it to read the file.
+    monkeypatch.delenv("FASTWORKFLOW_STATE_ROOT", raising=False)
     fastworkflow.init({"FASTWORKFLOW_STATE_ROOT": str(tmp_path / "st")})
     assert state_paths.state_root() == str((tmp_path / "st").resolve())
 
@@ -43,10 +45,11 @@ def test_os_environ_used_when_absent_from_env_file(tmp_path, monkeypatch):
     assert state_paths.state_root() == str((tmp_path / "shell").resolve())
 
 
-def test_env_file_wins_over_os_environ(tmp_path, monkeypatch):
+def test_os_environ_wins_over_the_env_file(tmp_path, monkeypatch):
+    # The one precedence rule (bd fix-ygxo): the process environment, then the env file, then the default.
     monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "shell"))
     fastworkflow.init({"FASTWORKFLOW_STATE_ROOT": str(tmp_path / "file")})
-    assert state_paths.state_root() == str((tmp_path / "file").resolve())
+    assert state_paths.state_root() == str((tmp_path / "shell").resolve())
 
 
 def test_workflow_id_defaults_to_folder_basename(monkeypatch):
@@ -67,7 +70,8 @@ def test_workflow_id_is_encoded():
     assert "/" not in encoded  # safe as a single path component
 
 
-def test_subdirs_are_namespaced_and_created(tmp_path):
+def test_subdirs_are_namespaced_and_created(tmp_path, monkeypatch):
+    monkeypatch.delenv("FASTWORKFLOW_STATE_ROOT", raising=False)
     fastworkflow.init({"FASTWORKFLOW_STATE_ROOT": str(tmp_path)})
     wp = "/srv/apps/my_workflow"
     base = str((tmp_path / "workflows" / "my_workflow").resolve())

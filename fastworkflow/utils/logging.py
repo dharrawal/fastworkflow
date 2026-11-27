@@ -1,10 +1,9 @@
 """ utility functions """
 
 import logging
+import os
 from datetime import datetime, timezone
 from time import time_ns
-
-from fastworkflow.utils.env import get_env_variable
 
 
 def format_ns(time_in_ns):
@@ -50,24 +49,33 @@ logging.setLogRecordFactory(LogRecordNs)
 LOG_FORMAT = "%(levelname)s:     %(message)s - %(asctime)s - %(filename)s-%(funcName)s"
 log_formatter = FormatterNs(LOG_FORMAT)
 
-if log_level := get_env_variable("LOG_LEVEL", "INFO"):
-    if log_level == "DEBUG":
-        LOG_LEVEL = logging.DEBUG
-    elif log_level == "INFO":
-        LOG_LEVEL = logging.INFO
-    elif log_level == "WARNING":
-        LOG_LEVEL = logging.WARNING
-    elif log_level == "ERROR":
-        LOG_LEVEL = logging.ERROR
-    elif log_level == "CRITICAL":
-        LOG_LEVEL = logging.CRITICAL
-    else:
-        raise ValueError(
-            "LOG_LEVEL is not one of DEBUG, INFO, WARNING, ERROR, CRITICAL"
-        )
-else:
-    print("LOG_LEVEL env variable is not specified")
-    LOG_LEVEL = logging.DEBUG if __debug__ else logging.INFO
+#: The values ``LOG_LEVEL`` takes, in any case.
+LOG_LEVELS = {
+    "DEBUG": logging.DEBUG,
+    "INFO": logging.INFO,
+    "WARNING": logging.WARNING,
+    "ERROR": logging.ERROR,
+    "CRITICAL": logging.CRITICAL,
+}
+DEFAULT_LOG_LEVEL = logging.INFO
+
+#: A bad ``LOG_LEVEL`` seen before the logger exists, warned about once it does.
+_invalid_log_level_at_import: str | None = None
+
+
+def parse_log_level(text) -> int | None:
+    """The one reader of ``LOG_LEVEL``: one of ``LOG_LEVELS`` in any case and spacing, else None (a bad value)."""
+    return LOG_LEVELS.get(str(text or "").strip().upper())
+
+
+# Read when this module is imported, which is before ``fastworkflow.init`` loads the env files, so only the process
+# environment can set it here; ``init`` applies it again under the one precedence rule (``fastworkflow.get_env_var``:
+# the process, then the env files), and ``reconfigure_log_level`` is the same reader.
+_log_level_text = os.environ.get("LOG_LEVEL", "")
+LOG_LEVEL = parse_log_level(_log_level_text) if _log_level_text.strip() else DEFAULT_LOG_LEVEL
+if LOG_LEVEL is None:
+    _invalid_log_level_at_import = _log_level_text
+    LOG_LEVEL = DEFAULT_LOG_LEVEL
 
 # create logger
 logger = logging.getLogger("fastWorkflow")
@@ -86,6 +94,11 @@ ch.setFormatter(log_formatter)
 
 # add ch to logger
 logger.addHandler(ch)
+
+if _invalid_log_level_at_import is not None:
+    logger.warning(
+        f"Invalid LOG_LEVEL {_invalid_log_level_at_import!r}, must be one of {list(LOG_LEVELS)} (any case); "
+        f"using {logging.getLevelName(DEFAULT_LOG_LEVEL)}.")
 
 
 # create a separate logger for pytest_logger to log assertions
@@ -115,44 +128,29 @@ logging.getLogger("datasets").setLevel(logging.WARNING)
 
 
 def reconfigure_log_level(log_level_str: str) -> None:
-    """Reconfigure the fastWorkflow logger's level after initialization.
-    
-    This allows LOG_LEVEL to be set via dotenv files loaded after module import.
-    
-    Args:
-        log_level_str: One of DEBUG, INFO, WARNING, ERROR, CRITICAL
-    """
+    """Set the fastWorkflow logger's level from a ``LOG_LEVEL`` value after import (``fastworkflow.init`` calls it once
+    the env files are loaded). Read by ``parse_log_level``; a bad value logs a warning and keeps the current level."""
     global LOG_LEVEL
-    
-    level_map = {
-        "DEBUG": logging.DEBUG,
-        "INFO": logging.INFO,
-        "WARNING": logging.WARNING,
-        "ERROR": logging.ERROR,
-        "CRITICAL": logging.CRITICAL,
-    }
-    
-    log_level_str_upper = log_level_str.upper()
-    if log_level_str_upper not in level_map:
+
+    new_level = parse_log_level(log_level_str)
+    if new_level is None:
         logger.warning(
-            f"Invalid LOG_LEVEL '{log_level_str}', must be one of {list(level_map.keys())}. Keeping current level."
+            f"Invalid LOG_LEVEL {log_level_str!r}, must be one of {list(LOG_LEVELS)} (any case). Keeping current level."
         )
         return
-    
-    new_level = level_map[log_level_str_upper]
-    
+
     # Only reconfigure if the level is actually different
     if LOG_LEVEL == new_level:
         return
-    
+
     LOG_LEVEL = new_level
     logger.setLevel(LOG_LEVEL)
-    
+
     # Update all handlers
     for handler in logger.handlers:
         handler.setLevel(LOG_LEVEL)
-    
-    logger.info(f"Log level reconfigured to {log_level_str_upper}")
+
+    logger.info(f"Log level reconfigured to {logging.getLevelName(new_level)}")
 
 
 # some testing code

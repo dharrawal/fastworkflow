@@ -1088,7 +1088,9 @@ class _ChatbotRequestHandler(
         return time.perf_counter()
 
     def _end_request(self, started: float) -> None:
-        if os.environ.get("FASTWORKFLOW_CHATBOT_ACCESS_LOG") != "1":
+        import fastworkflow
+
+        if fastworkflow.raw_env_var("FASTWORKFLOW_CHATBOT_ACCESS_LOG") != "1":
             return
         duration_ms = (time.perf_counter() - started) * 1000.0
         logger.info(

@@ -3352,7 +3352,7 @@ class ComposerUnavailable(Exception):
 def _composer_lm():
     """The composer's language model, or ``ComposerUnavailable`` when it is not configured."""
     try:
-        return dspy_utils.get_lm("LLM_RESPONSE_GEN", "LITELLM_API_KEY_RESPONSE_GEN")
+        return dspy_utils.get_lm("LLM_RESPONSE_GEN")
     except ValueError as error:
         raise ComposerUnavailable(str(error)) from error
 

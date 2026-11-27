@@ -181,7 +181,6 @@ def test_the_filter_is_inside_the_cache_fingerprint(training_env):
         2,
         2,
         1,
-        MODEL,
     ).inputs["generator_source_digest"]
 
     # Each component is labelled `qualname:digest` so a stale-cache miss names the
@@ -210,7 +209,7 @@ def test_editing_the_filter_would_change_the_cache_key(training_env):
     a claim about `utterance_fingerprint` and not about today's bytes.
     """
     fingerprint = utterance_fingerprint(
-        SEED_UTTERANCES, COMMAND_NAME, 2, 2, 1, MODEL)
+        SEED_UTTERANCES, COMMAND_NAME, 2, 2, 1)
     components = fingerprint.inputs["generator_source_digest"].split("+")
     filter_components = [
         component for component in components
@@ -224,7 +223,7 @@ def test_editing_the_filter_would_change_the_cache_key(training_env):
     # which is what "editing the filter invalidates every entry" means operationally.
     assert filter_components[0].split(":", 1)[1] == source_digest(_is_template_echo)
     assert fingerprint.variant_key == utterance_fingerprint(
-        SEED_UTTERANCES, COMMAND_NAME, 2, 2, 1, MODEL).variant_key
+        SEED_UTTERANCES, COMMAND_NAME, 2, 2, 1).variant_key
 
 
 def test_every_entry_in_the_echo_set_is_lowercase():

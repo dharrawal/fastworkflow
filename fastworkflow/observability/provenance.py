@@ -66,6 +66,8 @@ from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from fastworkflow.utils.model_roles import ROLE_KEY_VARS, resolve as resolve_role_model
+
 # Lock files worth hashing, enumerated rather than globbed. Recording *which*
 # were found is itself provenance: a `uv.lock` appearing later should show up as
 # a new key, not silently change what a single hash covers. Only `poetry.lock`
@@ -77,35 +79,14 @@ LOCK_FILENAMES: tuple[str, ...] = (
     "Pipfile.lock",
 )
 
-# Every per-role model env var read anywhere in the codebase, paired with the
-# key var that authenticates it. This is the first such registry here — until
-# now every name was a string literal at its call site — so two things are worth
-# stating rather than leaving to be rediscovered:
+# Every per-role model setting, paired with the key setting that authenticates it,
+# is `model_roles.ROLE_KEY_VARS` (the table moved there with the fallback rule,
+# bd fix-ygxo). A role is recorded as `model_roles.resolve` resolves it: the
+# model it will call (its own or the one it falls back to), the role that model
+# came from, and the key that follows it.
 #
-#   * `LLM_COMMAND_METADATA_GEN` pairs with `LITELLM_API_KEY_COMMANDMETADATA_GEN`.
-#     There is no underscore between COMMAND and METADATA on the key side, so
-#     code deriving the key name from the role name silently reads an unset
-#     variable for this one role. That is why the pairing is a table and not a
-#     format string.
-#   * `LLM_RESPONSE_GEN` was an orphan until `run_chatbot.composer` began reading it
-#     (it composes answer cards and question forms), so it is an active role
-#     now. `ORPHAN_ROLE_VARS` stays for a setting an operator believes is in
-#     effect that no Python reads; it is empty today.
-LLM_ROLE_VARS: tuple[tuple[str, str], ...] = (
-    ("LLM_SYNDATA_GEN", "LITELLM_API_KEY_SYNDATA_GEN"),
-    ("LLM_PARAM_EXTRACTION", "LITELLM_API_KEY_PARAM_EXTRACTION"),
-    ("LLM_PLANNER", "LITELLM_API_KEY_PLANNER"),
-    ("LLM_AGENT", "LITELLM_API_KEY_AGENT"),
-    ("LLM_CONVERSATION_STORE", "LITELLM_API_KEY_CONVERSATION_STORE"),
-    ("LLM_COMMAND_METADATA_GEN", "LITELLM_API_KEY_COMMANDMETADATA_GEN"),
-    ("LLM_DISTILLATION", "LITELLM_API_KEY_DISTILLATION"),
-    ("LLM_TEACHER_AGENT", "LITELLM_API_KEY_TEACHER_AGENT"),
-    ("LLM_TEACHER_PLANNER", "LITELLM_API_KEY_TEACHER_PLANNER"),
-    ("LLM_STUDENT_AGENT", "LITELLM_API_KEY_STUDENT_AGENT"),
-    ("LLM_STUDENT_PLANNER", "LITELLM_API_KEY_STUDENT_PLANNER"),
-    ("LLM_RESPONSE_GEN", "LITELLM_API_KEY_RESPONSE_GEN"),
-)
-
+# `ORPHAN_ROLE_VARS` is for a setting an operator believes is in effect that no
+# Python reads; it is empty today.
 ORPHAN_ROLE_VARS: tuple[str, ...] = ()
 
 # Routing, not authentication: a model string prefixed `litellm_proxy/` is
@@ -641,6 +622,9 @@ class RoleProvenance(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     model: Optional[str] = None
+    #: The role the model came from when the role's own setting is unset (``model_roles.resolve``); None when it is
+    #: the role's own.
+    model_from: Optional[str] = None
     via_proxy: bool = False
     proxy_base: Optional[str] = None
     proxy_credentials_fingerprint: Optional[str] = None
@@ -706,15 +690,17 @@ def capture_model_provenance(
     roles: dict[str, RoleProvenance] = {}
     proxy_base = strip_url_credentials(source.get(PROXY_BASE_VAR))
     proxy_credentials = _proxy_credentials(source.get(PROXY_BASE_VAR))
-    for model_var, key_var in LLM_ROLE_VARS:
-        model = source.get(model_var) or None
+    for model_var in ROLE_KEY_VARS:
+        resolved = resolve_role_model(model_var, source.get)
+        model = resolved.model
         via_proxy = bool(model and model.startswith("litellm_proxy/"))
         roles[model_var] = RoleProvenance(
             model=model,
+            model_from=resolved.inherited_from,
             via_proxy=via_proxy,
             proxy_base=proxy_base if via_proxy else None,
             proxy_credentials_fingerprint=proxy_credentials if via_proxy else None,
-            api_key_fingerprint=secret_fingerprint(source.get(key_var)),
+            api_key_fingerprint=secret_fingerprint(resolved.key),
         )
 
     orphans = {

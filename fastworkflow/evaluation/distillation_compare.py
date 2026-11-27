@@ -168,7 +168,7 @@ def _narrate(
     is shown twice.
     """
     try:
-        lm = dspy_utils.get_lm("LLM_DISTILLATION", "LITELLM_API_KEY_DISTILLATION")
+        lm = dspy_utils.get_lm("LLM_DISTILLATION")
         with dspy.context(lm=lm):
             result = dspy.ChainOfThought(DivergenceNarrativeSignature)(
                 task_opening=teacher.first_user_message or student.first_user_message,

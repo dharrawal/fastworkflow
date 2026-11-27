@@ -2569,7 +2569,7 @@ def _split(user_query: str, planner_lm, workflow_folderpath: str | None, convers
     each (``plan_label``) so parts of one plan can be joined; without it nothing is labelled.
     """
     if planner_lm is None:
-        planner_lm = dspy_utils.get_lm("LLM_PLANNER", "LITELLM_API_KEY_PLANNER")
+        planner_lm = dspy_utils.get_lm("LLM_PLANNER")
     job_types = _job_types_for(workflow_folderpath)
     # The one-job gate: a confident "one" from the remote decision model is the request as one part, as a split the
     # model left whole returns it, and the splitter is not called (``state["attempts"]`` stays unset: 0 calls).
@@ -2985,7 +2985,7 @@ def build_query_with_next_steps(user_query: str,
 
     # Use provided planner_lm if available (distillation mode), else build from env
     if planner_lm is None:
-        planner_lm = dspy_utils.get_lm("LLM_PLANNER", "LITELLM_API_KEY_PLANNER")
+        planner_lm = dspy_utils.get_lm("LLM_PLANNER")
     agent_adapter = CommandsSystemPreludeAdapter()
 
     # One fw.plan per plan, a child of the part it plans for (bd fix-qjne.34): `trigger` is what planned again mid-turn

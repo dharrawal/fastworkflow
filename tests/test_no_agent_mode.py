@@ -381,13 +381,31 @@ def test_the_mode_is_decided_in_one_place_from_llm_agent_alone(monkeypatch):
     assert no_agent_mode.agent_model_specified() is True
 
 
-def test_no_agent_model_and_no_jev_key_is_a_startup_problem_naming_both_settings_and_the_two_ways_out():
+def test_no_agent_model_and_no_jev_key_is_a_startup_problem_naming_both_settings_and_the_two_ways_out(monkeypatch):
+    # A planner model alone is a base model (bd fix-ygxo), so the only problem left is the missing agent and Jev key.
+    monkeypatch.setitem(fastworkflow._env_vars, "LLM_PLANNER", "test/planner")
     problem = no_agent_mode.startup_problem()
 
     assert problem is not None
     assert "LLM_AGENT" in problem and "JEV_API_KEY" in problem
     assert "Set LLM_AGENT" in problem and "or set JEV_API_KEY" in problem
     assert no_agent_mode.runtime_problems() == [problem]
+
+
+def test_no_base_model_is_a_startup_problem_of_its_own(monkeypatch):
+    """Neither LLM_AGENT nor LLM_PLANNER: no role has a model to fall back to (bd fix-ygxo), so a serving process stops
+    at start instead of failing at the first model call."""
+    monkeypatch.delitem(fastworkflow._env_vars, "LLM_PLANNER", raising=False)
+    monkeypatch.delenv("LLM_PLANNER", raising=False)
+    monkeypatch.setitem(fastworkflow._env_vars, "JEV_API_KEY", "key")
+
+    assert no_agent_mode.runtime_problems() == [no_agent_mode.BASE_MODEL_PROBLEM]
+    assert no_agent_mode.BASE_MODEL_PROBLEM in command_preview.load_problems(LIBRARY, runtime=True)
+    # Training does not ask for it (`fastworkflow train` has its own check of the generator's model).
+    assert no_agent_mode.BASE_MODEL_PROBLEM not in command_preview.load_problems(LIBRARY)
+
+    monkeypatch.setitem(fastworkflow._env_vars, "LLM_PLANNER", "test/planner")
+    assert no_agent_mode.runtime_problems() == []
 
 
 def test_the_startup_problem_reaches_a_serving_process_and_never_training():
@@ -398,8 +416,10 @@ def test_the_startup_problem_reaches_a_serving_process_and_never_training():
     assert problem not in command_preview.load_problems(LIBRARY)
 
 
-def test_a_jev_key_alone_is_no_problem_and_the_mode_is_named_once(monkeypatch):
+def test_a_jev_key_and_a_planner_model_are_no_problem_and_the_mode_is_named_once(monkeypatch):
+    # The minimal no-agent set (bd fix-ygxo): LLM_PLANNER, the base model, and JEV_API_KEY.
     monkeypatch.setitem(fastworkflow._env_vars, "JEV_API_KEY", "key")
+    monkeypatch.setitem(fastworkflow._env_vars, "LLM_PLANNER", "test/planner")
 
     assert no_agent_mode.startup_problem() is None
     assert no_agent_mode.runtime_problems() == []

@@ -55,7 +55,6 @@ class _ScriptedLM(DummyLM):
 def extractor(tmp_path, monkeypatch):
     fastworkflow.init({"FASTWORKFLOW_STATE_ROOT": str(tmp_path / "workflow_contexts")})
     monkeypatch.setitem(fastworkflow._env_vars, "FW_JEV_FIELD_GIVEN", "off")
-    monkeypatch.setattr(signatures, "LLM_PARAM_EXTRACTION", "scripted/extractor")
 
     def run(request, *answers):
         lm = _ScriptedLM(list(answers))

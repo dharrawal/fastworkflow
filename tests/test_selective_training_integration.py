@@ -394,7 +394,6 @@ def _preseed_fixed_utterance_cache(
             num_personas,
             utterances_per_persona,
             personas_per_batch,
-            model,
         )
         assert cache.store(fingerprint, seed, corpus)
         baseline_corpora[command_name] = corpus
@@ -417,7 +416,6 @@ def _preseed_fixed_utterance_cache(
         num_personas,
         utterances_per_persona,
         personas_per_batch,
-        model,
     )
     assert cache.store(changed_fingerprint, seed, changed_corpus)
     return baseline_corpora, changed_corpus

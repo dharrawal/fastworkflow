@@ -238,6 +238,9 @@ def _assistant_ctx(tmp_path, monkeypatch, name: str, text: str):
 
 
 def test_assistant_mode_runs_a_mechanical_planning_command_by_exact_name(tmp_path, monkeypatch):
+    # An agent model is configured: the agent loop builds its LM from LLM_AGENT, and every call it makes is scripted.
+    # Before, a developer's .env that litellm loaded into the process named one.
+    monkeypatch.setitem(fastworkflow._env_vars, "LLM_AGENT", "test/agent-model")
     ctx, _ = _assistant_ctx(tmp_path, monkeypatch, "Library/count_members",
                             MECHANICAL_COUNT_MEMBERS)
     # Its phases are code steps: the scripted model only closes each phase (no step is asked for).

@@ -67,7 +67,6 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import os
 import threading
 from array import array
 from collections import OrderedDict
@@ -1218,7 +1217,9 @@ def configured_model_id() -> str:
     default -- the operator asked for a specific model and getting a different
     one's numbers under that name is worse than getting none.
     """
-    override = os.environ.get("FASTWORKFLOW_CONSISTENCY_EMBEDDING_MODEL")
+    import fastworkflow
+
+    override = fastworkflow.raw_env_var("FASTWORKFLOW_CONSISTENCY_EMBEDDING_MODEL")
     return override.strip() if override and override.strip() else DEFAULT_EMBEDDING_MODEL
 
 

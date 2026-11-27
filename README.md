@@ -168,7 +168,7 @@ You'll get a `User >` prompt. Try **"what can you do?"** or **"add 49 + 51"**. R
 > intentionally want to discard the generated-data caches.
 
 > [!tip]
-> Get a free API key from [Mistral AI](https://mistral.ai) (works with `mistral-small-latest`) or [OpenRouter](https://openrouter.ai/openai/gpt-oss-20b:free). You can assign different models to different roles in the same workflow.
+> Get a free API key from [Mistral AI](https://mistral.ai) (works with `mistral-small-latest`) or [OpenRouter](https://openrouter.ai/openai/gpt-oss-20b:free). You can assign different models to different roles in the same workflow; a role you leave unset falls back to `LLM_AGENT` (see "Environment variables reference").
 
 ---
 
@@ -319,7 +319,7 @@ Coding agents: use the wheel-shipped [author-planning-commands](fastworkflow/ski
 
 ### Running without an agent model
 
-If your client is itself an agent (an MCP or HTTP client), you may not want a second one inside the server. Leave `LLM_AGENT` unset (or empty) and the framework runs in **no-agent mode**. Only the ReAct agent is absent: the intent classifier, parameter extraction, the planner and splitter (`LLM_PLANNER`) and Jev (`JEV_API_KEY`) still run, and **Jev is mandatory** here, since it matches each sub-task to a planning command. With neither `LLM_AGENT` nor `JEV_API_KEY` set, startup stops: `fastworkflow run_cli` prints the problem and exits non-zero (it does not fall back to deterministic mode in that case), and the server refuses to start. `fastworkflow train` is unaffected.
+If your client is itself an agent (an MCP or HTTP client), you may not want a second one inside the server. Leave `LLM_AGENT` unset (or empty) and the framework runs in **no-agent mode**. Only the ReAct agent is absent: the intent classifier, parameter extraction, the planner and splitter (`LLM_PLANNER`) and Jev (`JEV_API_KEY`) still run, and **Jev is mandatory** here, since it matches each sub-task to a planning command. `LLM_PLANNER` is then the base model every other role falls back to, so it is required too. With neither `LLM_AGENT` nor `JEV_API_KEY` set, or with neither `LLM_AGENT` nor `LLM_PLANNER`, startup stops: `fastworkflow run_cli` prints the problem and exits non-zero (it does not fall back to deterministic mode in that case), and the server refuses to start. `fastworkflow train` is unaffected.
 
 - A single command runs, and its own response is the answer.
 - A predefined planning command runs its code steps. At a step code cannot run it either **pauses and asks the client** (a decision step, below) or, for free work (a prose step, a value that has to be found, a step that failed, no path to its command, a page cap) and where its answer would need a model (no `__result__` text), it **ends as a completed turn that carries a stop**. The turn's answer text is a short plain explanation written in code (what ran, where it stopped and why, that the remaining steps are in the data); how to word the final answer is left to your client.
@@ -800,37 +800,105 @@ At the `fastworkflow run_cli` prompt, `//new` starts a new conversation, `//exit
 
 ## Environment variables reference
 
-Two files per workflow (templates ship with `fastworkflow examples fetch`).
+Two files per workflow (templates ship with `fastworkflow examples fetch`): `fastworkflow.env` for settings and `fastworkflow.passwords.env` for keys. `fastworkflow train`, `run_cli`, `run_fastapi_mcp`, `build` and `refine` load both (`build` and `refine` take `--env-file-path` and `--passwords-file-path`, and default to the workflow folder's own files when present).
 
-### `fastworkflow.env`
+**Precedence, one rule for every variable:** a variable set in the process environment (a shell `export`, a container or CI variable) wins over the env files, and the env files win over the code default. An empty value exported in the shell counts as set: it hides the file's value. One exception: `LOG_LEVEL` is first read when fastWorkflow is imported, before any env file is loaded, so at that moment only the process environment counts; the files apply once they are loaded. litellm, when imported, would load the first `.env` it finds searching upward from its own installed file (so a virtualenv inside a project finds that project's `.env`) into the process environment, where under this rule it would beat the workflow's env files; fastWorkflow turns that off by setting `LITELLM_MODE=PRODUCTION` (that is the variable's only effect in litellm) unless you set `LITELLM_MODE` yourself. Put settings and keys in the workflow's env files or export them; a `.env` above the virtualenv is not read. If your own code imports litellm before fastWorkflow, the load has already happened, and fastWorkflow logs a warning: import fastWorkflow first.
+
+**Models: one is required.** Every model role falls back, so one model is enough:
+
+- The **base model** is `LLM_AGENT`, else `LLM_PLANNER` (no-agent mode). `LLM_PLANNER` falls back to `LLM_AGENT`.
+- `LLM_SYNDATA_GEN`, `LLM_PARAM_EXTRACTION`, `LLM_CONVERSATION_STORE`, `LLM_OBSERVATION_SEARCH`, `LLM_POLICY_INTENT` and `LLM_COMMAND_METADATA_GEN` fall back to the base model. `LLM_AGENT` never falls back. `LLM_RESPONSE_GEN` and the distillation roles (`LLM_DISTILLATION`, `LLM_TEACHER_*`, `LLM_STUDENT_*`) are used only when set.
+- **The key follows the model**: a role's own `LITELLM_API_KEY_*`, else the key of the role its model came from, else the base role's key when both models name the same provider (the part before the first `/`). A key is never sent to another provider. A `litellm_proxy/` model uses `LITELLM_PROXY_API_KEY`; a `bedrock/` model needs no key (it authenticates from the AWS credential chain).
+- A role that falls back says so once at startup in the log, and the run's model provenance records the model each role resolved to and the role it came from.
+
+The smallest working sets: **agent mode** `LLM_AGENT`; **no-agent mode** `LLM_PLANNER` and `JEV_API_KEY`; **training** any one of `LLM_SYNDATA_GEN`, `LLM_AGENT`, `LLM_PLANNER`. Add the model's key where its provider needs one, and `LITELLM_PROXY_API_BASE` for `litellm_proxy/` models. With no base model, `run_cli` and the servers stop at startup and say so; `train` stops at start when it has no model to generate utterances with. The generator model is not part of the generated-data caches or of the training signature: changing it reuses every cached utterance and parameter example.
+
+### `fastworkflow.env`: models
 
 | Variable | Purpose | When needed | Default |
 |:---|:---|:---|:---|
-| `FASTWORKFLOW_STATE_ROOT` | Absolute root for all persistent state (conversations, suspended sessions, checkpoints, function caches, and the always-on observability record — for `run`/`run_fastapi_mcp`/`run_chatbot` and library embedders alike, an owner-only (`0600` file, `0700` directory) SQLite database at `workflows/<workflow-id>/observability.sqlite3`, pruned automatically by `FW_OBS_RETENTION_DAYS` and `FW_OBS_DB_MAX_BYTES`) | Optional | `~/.local/state/fastworkflow` |
-| `FASTWORKFLOW_WORKFLOW_ID` | Overrides the per-workflow state namespace (defaults to the workflow folder name) | Optional | *workflow folder name* |
-| `LOG_LEVEL` | Log level (`DEBUG`…`CRITICAL`) | Optional | `INFO` |
-| `LLM_SYNDATA_GEN` | Model for synthetic utterance generation | `train` | `mistral/mistral-small-latest` |
-| `LLM_PARAM_EXTRACTION` | Model for parameter extraction | `train`, `run` | `mistral/mistral-small-latest` |
-| `LLM_PLANNER` | Model for the agent's task planner | `run` (agent) | `mistral/mistral-small-latest` |
-| `LLM_AGENT` | Model for the DSPy agent. **Unset or empty runs without an agent model** (see "Running without an agent model"; Jev is then mandatory) | `run` (agent) | `mistral/mistral-small-latest` |
-| `LLM_RESPONSE_GEN` | Model for the chat's composed answer cards and `ask_user` question forms (`POST /compose_answer_card`, `POST /compose_question_form`; the **Rich answers** switch in `run_chatbot`). The shipped template sets it to `mistral/mistral-small-latest`; the code has no fallback, so unset it the composed card and form are absent and everything else works. A Bedrock model needs no `LITELLM_API_KEY_RESPONSE_GEN` (AWS credential chain). It also appears in the run's model provenance, so its `config_hash` differs from one recorded before this role was used | `run_chatbot` / FastAPI service (optional) | `mistral/mistral-small-latest` (template) |
-| `LLM_CONVERSATION_STORE` | Model for conversation topic/summary | FastAPI service | `mistral/mistral-small-latest` |
-| `LLM_CONVERSATION_STORE_TIMEOUT_SECONDS` | Per-attempt client-side deadline for the topic/summary call (2 attempts max) | Optional | `12` |
+| `LLM_AGENT` | The ReAct agent's model, and the base model every other role falls back to. **Unset or empty runs without an agent model** (see "Running without an agent model"; `LLM_PLANNER` and `JEV_API_KEY` are then required) | Agent mode: required | *none* |
+| `LLM_PLANNER` | The task planner and splitter | No-agent mode: required | `LLM_AGENT` |
+| `LLM_PARAM_EXTRACTION` | Parameter extraction | Optional | base model |
+| `LLM_SYNDATA_GEN` | Synthetic utterance and parameter-example generation (`train`) | Optional | base model |
+| `LLM_CONVERSATION_STORE` | Conversation topic and summary | Optional | base model |
+| `LLM_OBSERVATION_SEARCH` | Search of an offloaded observation (`search_memory`) | Optional | base model |
+| `LLM_POLICY_INTENT` | The readings some policy rules use | Optional | base model |
+| `LLM_COMMAND_METADATA_GEN` | `fastworkflow refine` (command metadata) | Optional | base model |
+| `LLM_RESPONSE_GEN` | The chat's composed answer cards and `ask_user` question forms (`POST /compose_answer_card`, `POST /compose_question_form`; the **Rich answers** switch in `run_chatbot`). No fallback: unset, the composed card and form are absent and everything else works. It also appears in the run's model provenance | `run_chatbot` / FastAPI service (optional) | *none* |
+| `LLM_DISTILLATION`, `LLM_TEACHER_AGENT`, `LLM_TEACHER_PLANNER`, `LLM_STUDENT_AGENT`, `LLM_STUDENT_PLANNER` | Distillation runs (`fastworkflow distill`) | `distill` | *none* (no fallback) |
 | `LITELLM_PROXY_API_BASE` | LiteLLM Proxy URL | with `litellm_proxy/` models | *not set* |
-| `INTENT_DETECTION_TINY_MODEL` | HF id for the small intent model | `train` (optional) | `google/bert_uncased_L-4_H-128_A-2` |
-| `INTENT_DETECTION_LARGE_MODEL` | HF id for the large intent model | `train` (optional) | `distilbert-base-uncased` |
+| `LLM_TIMEOUT_SECONDS` | Per-attempt model timeout of every role without its own | Optional | `120` |
+| `LLM_TIMEOUT_SECONDS_<ROLE>`, `LLM_NUM_RETRIES_<ROLE>` | One role's timeout and retries (`<ROLE>` is the name after `LLM_`) | Optional | parameter extraction `20` s and `2`; others `LLM_TIMEOUT_SECONDS` and DSPy's `3` |
+| `LLM_CONVERSATION_STORE_TIMEOUT_SECONDS` | Per-attempt client-side deadline for the topic/summary call (2 attempts max) | Optional | `12` |
+| `LLM_SPLIT_MAX_TOKENS` | Output token budget of the request splitter | Optional | `4700` |
+| `FW_LM_CACHE` | `0` or `false` turns DSPy's response cache off for every model | Optional | `1` |
+
+### `fastworkflow.env`: training and intent detection
+
+| Variable | Purpose | When needed | Default |
+|:---|:---|:---|:---|
+| `SYNTHETIC_UTTERANCE_GEN_NUMOF_PERSONAS` | Personas that write each command's generated utterances | `train` (optional) | `4` |
+| `SYNTHETIC_UTTERANCE_GEN_UTTERANCES_PER_PERSONA` | Utterances each persona writes | `train` (optional) | `5` |
+| `SYNTHETIC_UTTERANCE_GEN_PERSONAS_PER_BATCH` | Personas per model call | `train` (optional) | `1` |
+| `SYNTHETIC_UTTERANCE_GEN_PERSONA_FILE` | A persona file outside the workflow folder | `train` (optional) | *none* |
+| `TRAINING_SEED` | The trainer's seed | `train` (optional) | `42` |
 | `INTENT_MODEL_LAYOUT` | `embedding` (a frozen sentence encoder and one linear head for the whole workflow), `workflow` (one fine-tuned large classifier for the whole workflow) or `per_context` (a fine-tuned small and large classifier per context); see "The local intent model" above for the measured trade. Read at train time only; the runtime reads the layout of the published version | `train` (optional) | `embedding` |
 | `INTENT_EMBEDDING_MODEL` | Hugging Face id of the `embedding` layout's sentence encoder (one shared download of about 418 MB for the default, never trained, nothing stored per workflow) | `train` (optional) | `intfloat/e5-base-v2` |
 | `INTENT_EMBEDDING_POOLING` | `cls` or `mean`: how the encoder's output becomes one vector (the e5 family also gets the prefix `query: ` before every text) | `train` (optional) | `cls` for `BAAI/bge-*`, `mean` otherwise |
 | `INTENT_COMMIT_THRESHOLD` | `embedding` layout: the probability at or above which the local model answers with one command; below it the request goes to the remote decision model, else the user is asked. A fixed number, not calibrated | `train` (optional) | `0.65` |
+| `INTENT_DETECTION_TINY_MODEL` | HF id for the small intent model (`per_context` layout) | `train` (optional) | `google/bert_uncased_L-4_H-128_A-2` |
+| `INTENT_DETECTION_LARGE_MODEL` | HF id for the large intent model (`workflow` and `per_context` layouts) | `train` (optional) | `distilbert-base-uncased` |
 | `INTENT_REMOTE_ACCEPT_THRESHOLD` | The probability at or above which the remote decision model's best command is the answer; below it the candidates are asked | `run_cli`, servers (optional) | `0.9` |
 | `INTENT_REMOTE_DECLINE_THRESHOLD` | The probability at or above which the remote model's "none", or a command of another scope on the path, declines a scope | `run_cli`, servers (optional) | `0.9` |
 | `INTENT_LEARNING_RECORD` | Record every resolved request (what it was, the command, how it was settled, whether a person or agent confirmed it, what the local model knew) in `<workflow>/___convo_info/intent_learning.sqlite3`. `off` writes nothing | `run_cli`, servers (optional) | `on` |
 | `INTENT_LEARNING_MIN_CONFIRMATIONS` | Confirmations of one command for one request text before `fastworkflow learn` teaches the head with it | `learn` (optional) | `1` |
 | `INTENT_LEARNING_REFIT` | `background`, or `off`: after `INTENT_LEARNING_REFIT_EVERY` new confirmed rows, one daemon thread per workflow refits the head (the same refit and gate as `fastworkflow learn`) | `run_cli`, servers (optional) | `background` |
 | `INTENT_LEARNING_REFIT_EVERY` | New confirmed rows that start a background refit | `run_cli`, servers (optional) | `25` |
+| `FW_REQUIRE_HEADS` | `1`: a scope with no trained local model is a failure even with `JEV_API_KEY` | Optional | *off* |
+
+### `fastworkflow.env`: turns and planning commands
+
+| Variable | Purpose | When needed | Default |
+|:---|:---|:---|:---|
+| `FW_TURN_MAX_STEPS` | The most model steps the nested planning-command calls of one turn take together | Optional | `400` |
+| `FW_CODE_MAX_PAGES` | The most pages code reads of one full-list step of a planning command | Optional | `20` |
+| `FW_SUBTASK_WORKERS` | Per-part model calls of a split request that wait on the model together | Optional | `4` |
+| `FW_SPLIT_GATE_THRESHOLD` | With `JEV_API_KEY`, the "one job" probability at or above which a request is not split; `off` turns the gate off | Optional | `0.85` |
+| `FW_DRAFT_ARGUMENTS` | `off` stops drafting a planning command's arguments for the review | Optional | `on` |
+| `FW_EXTRACTION_ARGUMENT_CHECKS` | `off` turns off the strict checks of extracted values | Optional | `on` |
+| `FW_JEV_FIELD_GIVEN` | `off` turns off the remote "was this value given" check | Optional | `on` |
+| `FW_JEV_MISSING_VALUE_REPLY` | `off` turns off the remote read of a reply to a parameter question | Optional | `on` |
+| `FW_JEV_REPLY_WAIT` | `off`: the remote read of a reply no longer offers "wait" | Optional | `on` |
+| `FW_APPROVAL_BINDING` | The approval-binding check: `off`, `shadow` or `enforce` (another value warns once and enforces) | Optional | `enforce` |
+| `FW_MODEL_CONTEXT_TOKENS` | The agent model's context window, from which every byte budget below is a fixed fraction | Optional | the `LLM_AGENT` model's metadata, else `131072` |
+| `FW_TRAJECTORY_MAX_BYTES` | The whole executor ReAct prompt; observations are offloaded oldest-first when it is over | Optional | from the window |
+| `FW_ANSWER_REHYDRATION_MAX_BYTES` | Answer-time extraction budget | Optional | from the window |
+| `FW_OFFLOAD_MIN_SAVING_BYTES` | Minimum bytes an offload must free | Optional | from the window |
+| `FW_OFFLOAD_EVIDENCE_REDACTION` | Scrub credentials from offloaded observations (`on`/`off`) | Optional | `on` |
+
+### `fastworkflow.env`: state, servers and observability
+
+| Variable | Purpose | When needed | Default |
+|:---|:---|:---|:---|
+| `FASTWORKFLOW_STATE_ROOT` | Absolute root for all persistent state (conversations, suspended sessions, checkpoints, function caches, and the always-on observability record — for `run`/`run_fastapi_mcp`/`run_chatbot` and library embedders alike, an owner-only (`0600` file, `0700` directory) SQLite database at `workflows/<workflow-id>/observability.sqlite3`, pruned automatically by `FW_OBS_RETENTION_DAYS` and `FW_OBS_DB_MAX_BYTES`) | Optional | `~/.local/state/fastworkflow` |
+| `FASTWORKFLOW_WORKFLOW_ID` | Overrides the per-workflow state namespace (defaults to the workflow folder name) | Optional | *workflow folder name* |
+| `LOG_LEVEL` | Log level: `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL`, in any case; another value logs a warning and keeps the current level | Optional | `INFO` |
+| `SESSION_STATE_STORE` | Where suspended sessions are kept: `disk` or `redis` | Optional | `disk` |
+| `SESSION_STATE_REDIS_URL`, `REDIS_URL` | The Redis URL when `SESSION_STATE_STORE=redis` (the first that is set) | with `redis` | *none* |
+| `MAX_LIVE_SESSIONS` | Live sessions kept in the `run_fastapi_mcp` process cache (the soft target) | Optional | `50` |
+| `MAX_LIVE_SESSIONS_HARD` | Hard ceiling on live sessions; a new session past it is refused with 503 once idle ones were released | Optional | `4 x MAX_LIVE_SESSIONS` |
+| `PINNED_SESSION_IDLE_TTL_SECONDS`, `PROTECTED_SESSION_IDLE_TTL_SECONDS` | Idle seconds before a session that cannot be checkpointed (and one with a question waiting) may expire while live sessions exceed `MAX_LIVE_SESSIONS`; `0` never expires | Optional | `1800`, `86400` |
+| `FASTWORKFLOW_DEPLOYMENT_ID` | Names the deployment a session checkpoint belongs to | Optional | `default` |
+| `FASTWORKFLOW_CHECKPOINT_PROTOCOL_FLOOR` | The oldest checkpoint protocol version a server restores | Optional | the current version |
+| `FASTWORKFLOW_CHATBOT_ACCESS_LOG` | `1` logs one line per `run_chatbot` request | Optional | *off* |
+| `FASTWORKFLOW_CONSISTENCY_EMBEDDING_MODEL` | Local embedding model of the observability consistency report | Optional | the built-in model |
 | `FW_OBS_RETENTION_DAYS` | Age beyond which the automatic prune (run at recorder startup and hourly) drops spans/artifacts (turn records are exempt) | Optional | `30` |
 | `FW_OBS_DB_MAX_BYTES` | Size cap, `-wal` file included; the automatic prune (startup and hourly) evicts oldest spans first, then the oldest finished non-experiment turn records, while over it. A non-integer value is ignored with a warning | Optional | `1073741824` (1 GiB) |
+| `FW_OBS_INLINE_ARTIFACT_BYTES` | Larger artifact values are offloaded | Optional | `262144` |
+| `FW_OBS_QUEUE_MAX` | Span and artifact writer queue bound | Optional | `10000` |
+| `FW_OBS_SYNC_WRITE_TIMEOUT_S` | Busy timeout of in-request database writes | Optional | `5` |
+| `FW_OBS_SYNC_BREAKER_COOLDOWN_S` | Cool-down, in seconds, of the breaker that sends turn-record writes to the queue after in-request writes failed | Optional | `60` |
 | `FW_OBS_CAPTURE_TRACEBACKS` | Persist exception tracebacks as artifacts. Off by default because tracebacks can carry sensitive values | Optional | `0` |
 | `FW_OBS_SUPPRESS_PRUNE` | Withhold the automatic prune. **This is the cross-process contract for a measured run**: the in-process `suppress_pruning()` helper only covers the process that calls it, so when a harness drives a separate server the variable must be in the *server's* environment **before it starts** — the recorder prunes on construction (and hourly after), so setting it afterwards is too late. Confirm the value took hold with `GET /probes/readyz?observability=true`, which reports `pruning_suppressed`; the server also logs the regime at startup | Optional | `0` |
 
@@ -838,13 +906,18 @@ Two files per workflow (templates ship with `fastworkflow examples fetch`).
 
 | Variable | For | When needed |
 |:---|:---|:---|
-| `LITELLM_API_KEY_SYNDATA_GEN` | `LLM_SYNDATA_GEN` | `train` |
-| `LITELLM_API_KEY_PARAM_EXTRACTION` | `LLM_PARAM_EXTRACTION` | `train`, `run` |
-| `LITELLM_API_KEY_PLANNER` | `LLM_PLANNER` | `run` (agent) |
-| `LITELLM_API_KEY_AGENT` | `LLM_AGENT` | `run` (agent) |
-| `LITELLM_API_KEY_RESPONSE_GEN` | `LLM_RESPONSE_GEN` | `run_chatbot` / FastAPI service (optional) |
-| `LITELLM_API_KEY_CONVERSATION_STORE` | `LLM_CONVERSATION_STORE` | FastAPI service |
-| `LITELLM_PROXY_API_KEY` | shared LiteLLM Proxy key | with `litellm_proxy/` models |
+| `LITELLM_API_KEY_AGENT` | `LLM_AGENT`, and every role that falls back to it on the same provider | Agent mode, unless the provider needs no key (Bedrock) |
+| `LITELLM_API_KEY_PLANNER` | `LLM_PLANNER`, and the roles that fall back to it | No-agent mode, unless the provider needs no key; otherwise optional (`LITELLM_API_KEY_AGENT` when the provider matches) |
+| `LITELLM_API_KEY_SYNDATA_GEN` | `LLM_SYNDATA_GEN` | Optional (follows the model it falls back to) |
+| `LITELLM_API_KEY_PARAM_EXTRACTION` | `LLM_PARAM_EXTRACTION` | Optional (follows the model) |
+| `LITELLM_API_KEY_CONVERSATION_STORE` | `LLM_CONVERSATION_STORE` | Optional (follows the model) |
+| `LITELLM_API_KEY_OBSERVATION_SEARCH` | `LLM_OBSERVATION_SEARCH` | Optional (follows the model) |
+| `LITELLM_API_KEY_POLICY_INTENT` | `LLM_POLICY_INTENT` | Optional (follows the model) |
+| `LITELLM_API_KEY_COMMANDMETADATA_GEN` | `LLM_COMMAND_METADATA_GEN` (no underscore between COMMAND and METADATA) | Optional (follows the model) |
+| `LITELLM_API_KEY_RESPONSE_GEN` | `LLM_RESPONSE_GEN` | with `LLM_RESPONSE_GEN`, unless the provider needs no key |
+| `LITELLM_API_KEY_DISTILLATION`, `LITELLM_API_KEY_TEACHER_AGENT`, `LITELLM_API_KEY_TEACHER_PLANNER`, `LITELLM_API_KEY_STUDENT_AGENT`, `LITELLM_API_KEY_STUDENT_PLANNER` | the distillation roles | `distill` |
+| `LITELLM_PROXY_API_KEY` | every `litellm_proxy/` model | with a proxy that needs one |
+| `JEV_API_KEY` | The remote decision model (Jev): intent detection when the local model is not confident, planning-command matching, the split gate | No-agent mode: required; otherwise optional |
 
 ### Using LiteLLM Proxy
 
@@ -858,7 +931,7 @@ LITELLM_PROXY_API_BASE=http://127.0.0.1:4000
 LITELLM_PROXY_API_KEY=your-proxy-api-key
 ```
 
-When a model uses the `litellm_proxy/` prefix, the per-role keys are ignored and the shared proxy key is used. You can mix proxied and direct models.
+When a model uses the `litellm_proxy/` prefix, the per-role keys are ignored and the shared proxy key is used, also for a role that falls back to a proxied model. You can mix proxied and direct models.
 
 ---
 

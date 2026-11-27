@@ -3082,7 +3082,7 @@ class WorkflowExecutionContext:
 
     def _agent_dspy_context(self):
         """Return (lm, adapter) for agent-mode dspy.context blocks."""
-        lm = dspy_utils.get_lm("LLM_AGENT", "LITELLM_API_KEY_AGENT")
+        lm = dspy_utils.get_lm("LLM_AGENT")
         from fastworkflow.utils.chat_adapter import CommandsSystemPreludeAdapter
 
         return lm, CommandsSystemPreludeAdapter()
@@ -6600,7 +6600,7 @@ class WorkflowExecutionContext:
 
         inputs = bounded_summary_inputs(user_query, workflow_actions, final_agent_response)
         try:
-            planner_lm = dspy_utils.get_lm("LLM_PLANNER", "LITELLM_API_KEY_PLANNER")
+            planner_lm = dspy_utils.get_lm("LLM_PLANNER")
             with dspy_utils.role_context("LLM_PLANNER", planner_lm), tracing.model_purpose("conversation_summary"):
                 prediction = dspy.ChainOfThought(ConversationSummarySignature)(**inputs)
             summary = prediction.conversation_summary

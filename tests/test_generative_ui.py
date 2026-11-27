@@ -1098,8 +1098,9 @@ def test_composer_unavailable_propagates(monkeypatch):
 
 
 def test_composer_lm_raises_unavailable_when_the_model_is_not_set(monkeypatch):
-    def missing(model_env_var, api_key_env_var=None, **kwargs):
-        assert (model_env_var, api_key_env_var) == ("LLM_RESPONSE_GEN", "LITELLM_API_KEY_RESPONSE_GEN")
+    def missing(model_env_var, **kwargs):
+        # The key follows the model (dspy_utils.resolve_role): get_lm takes the role's model setting only.
+        assert model_env_var == "LLM_RESPONSE_GEN"
         raise ValueError("DSPy Language Model not provided. Set LLM_RESPONSE_GEN environment variable.")
     monkeypatch.setattr(dspy_utils, "get_lm", missing)
     with pytest.raises(ComposerUnavailable):

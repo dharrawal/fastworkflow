@@ -43,5 +43,5 @@ def test_the_jev_lm_follows_the_switch(env, value, cached):
 def test_get_lm_follows_the_switch(env):
     env["FW_LM_CACHE"] = "0"
     env["LLM_TEST_MODEL"] = "openai/gpt-test"
-    lm = dspy_utils.get_lm("LLM_TEST_MODEL", "LITELLM_API_KEY_TEST")
+    lm = dspy_utils.get_lm("LLM_TEST_MODEL")
     assert getattr(lm, "cache") is False

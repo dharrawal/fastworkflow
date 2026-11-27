@@ -54,16 +54,9 @@ _ARCHIVES_DIRNAME = "archives"
 
 
 def _optional_env(name: str) -> str | None:
-    """Read an optional env var (env file first, then OS env) without warning.
-
-    ``get_env_var`` logs a warning when a variable is absent and no default is
-    given; both variables here are legitimately optional, so this mirrors its
-    file-then-environment precedence quietly.
-    """
-    value = fastworkflow._env_vars.get(name)
-    if value is None:
-        value = os.getenv(name)
-    return value
+    """Read an optional env var under the one precedence rule (``fastworkflow.raw_env_var``) without the
+    warning ``get_env_var`` logs for an absent variable with no default."""
+    return fastworkflow.raw_env_var(name)
 
 
 # The two variables that decide which live DB a process resolves.

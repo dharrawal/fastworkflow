@@ -209,17 +209,13 @@ def test_run_agent_pass_returns_a_detached_action_snapshot(
     _, _, teacher_actions, _ = ds._run_agent_pass(
         "list my tasks",
         agent_lm_role="LLM_TEACHER_AGENT",
-        agent_api_key_role="LITELLM_API_KEY_TEACHER_AGENT",
         planner_lm_role="LLM_TEACHER_PLANNER",
-        planner_api_key_role="LITELLM_API_KEY_TEACHER_PLANNER",
     )
     ds.restore_workflow_state(initial)
     _, _, student_actions, _ = ds._run_agent_pass(
         "list my tasks",
         agent_lm_role="LLM_STUDENT_AGENT",
-        agent_api_key_role="LITELLM_API_KEY_STUDENT_AGENT",
         planner_lm_role="LLM_STUDENT_PLANNER",
-        planner_api_key_role="LITELLM_API_KEY_STUDENT_PLANNER",
     )
 
     assert [a["command_name"] for a in teacher_actions] == [

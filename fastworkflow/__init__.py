@@ -1,4 +1,24 @@
+import os as _os
 import sys as _sys
+
+
+def _stop_litellm_loading_a_dotenv_file() -> None:
+    """litellm, when imported, copies the first ``.env`` it finds searching upward from its own installed file into
+    ``os.environ``, unless ``LITELLM_MODE`` is ``PRODUCTION``: that is the variable's only effect in litellm. Under the
+    precedence rule (the process environment beats the env files) such a file would silently override the workflow's
+    own env files, so fastworkflow turns that load off. A ``LITELLM_MODE`` the user set is left as it is; when litellm
+    was imported before fastworkflow, its load has already happened and this can only say so."""
+    _os.environ.setdefault("LITELLM_MODE", "PRODUCTION")
+    if "litellm" in _sys.modules and _os.environ["LITELLM_MODE"] == "PRODUCTION":
+        import logging
+        logging.getLogger("fastWorkflow").warning(
+            "litellm was imported before fastworkflow, so it may already have loaded a .env file into the process "
+            "environment, where its values beat the workflow's env files. Import fastworkflow first, or set "
+            "LITELLM_MODE=PRODUCTION before litellm is imported.")
+
+
+_stop_litellm_loading_a_dotenv_file()
+
 # dspy imported first leaves a lazy `openai` stand-in that breaks litellm's import;
 # touching it loads the real package. Only then, so `import fastworkflow` stays light.
 if "dspy" in _sys.modules and "openai" in _sys.modules:
@@ -391,9 +411,9 @@ def init(env_vars: dict):
     global _env_vars, CommandContextModel, RoutingDefinition, RoutingRegistry, ModelPipelineRegistry
     _env_vars = env_vars
 
-    # Reconfigure log level from env_vars (dotenv files) if LOG_LEVEL is specified
-    # This allows LOG_LEVEL to be set in fastworkflow.env files, not just OS environment
-    if log_level := env_vars.get("LOG_LEVEL"):
+    # The import-time LOG_LEVEL could see only the process environment; now that the env files are loaded, the one
+    # rule (``get_env_var``: process, then the files) applies to it too.
+    if log_level := raw_env_var("LOG_LEVEL"):
         from .utils.logging import reconfigure_log_level
         reconfigure_log_level(log_level)
 
@@ -424,15 +444,39 @@ def init(env_vars: dict):
     with contextlib.suppress(Exception):
         import datasets  # noqa: F401 – pre-load Hugging Face datasets
 
-def get_env_var(var_name: str, var_type: type = str, default: Optional[Union[str, int, float, bool]] = None) -> Union[str, int, float, bool]:
-    """The value of *var_name*, converted to *var_type*: from the env files
-    ``fastworkflow.init`` loaded, else the process environment, else *default*
-    (returned as given)."""
-    global _env_vars
+#: Where a setting's value came from (``env_source``).
+SOURCE_PROCESS = "process environment"
+SOURCE_ENV_FILE = "workflow env file"
 
-    value = _env_vars.get(var_name)
+
+def env_source(var_name: str) -> Optional[str]:
+    """Which layer holds *var_name* under the one precedence rule (``get_env_var``): ``SOURCE_PROCESS``,
+    ``SOURCE_ENV_FILE``, or None when neither sets it."""
+    if var_name in os.environ:
+        return SOURCE_PROCESS
+    if _env_vars.get(var_name) is not None:
+        return SOURCE_ENV_FILE
+    return None
+
+
+def raw_env_var(var_name: str) -> Optional[str]:
+    """The text of *var_name* under the one precedence rule, or None when unset; no conversion and no warning.
+
+    The rule: the process environment (a shell export, a container or CI variable) wins over the env files
+    ``fastworkflow.init`` loaded, and the env files win over the code default. A process value that is the empty
+    string counts as set, as ``os.environ`` has it: it hides the env file's value.
+    """
+    value = os.environ.get(var_name)
     if value is None:
-        value = os.getenv(var_name)
+        value = _env_vars.get(var_name)
+    return None if value is None else str(value)
+
+
+def get_env_var(var_name: str, var_type: type = str, default: Optional[Union[str, int, float, bool]] = None) -> Union[str, int, float, bool]:
+    """The value of *var_name*, converted to *var_type*: from the process environment, else the env files
+    ``fastworkflow.init`` loaded, else *default* (returned as given). The one precedence rule of every setting
+    (``raw_env_var``)."""
+    value = raw_env_var(var_name)
     if value is None and default is not None:
         return default
 

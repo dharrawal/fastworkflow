@@ -28,7 +28,7 @@ something unparseable yields no reading, and every rule that reads one is
 written so that "no reading" means "nothing to enforce".
 
 The model is ``LLM_POLICY_INTENT`` (key ``LITELLM_API_KEY_POLICY_INTENT``) when
-set, otherwise the agent's own model, so it works with no extra configuration.
+set, otherwise the base model (``dspy_utils.resolve_role``), so it works with no extra configuration.
 """
 
 from __future__ import annotations
@@ -42,7 +42,6 @@ import litellm  # noqa: F401  (must precede dspy; see fastworkflow/utils/dspy_ut
 import dspy
 import pydantic
 
-import fastworkflow
 from fastworkflow.policy.policy_decision import (
     ASK_USER,
     USER_MESSAGE,
@@ -190,14 +189,9 @@ def for_rules(requests: Sequence[TrackedRequest]) -> tuple[RequestedOperation, .
 def policy_lm():
     """The model the policy readers use, with a hard time limit and no retries.
 
-    ``LLM_POLICY_INTENT`` when set, otherwise the agent's own model.
+    ``LLM_POLICY_INTENT`` when set, otherwise the base model (``dspy_utils.resolve_role``).
     """
-    limits = {"timeout": POLICY_TIMEOUT_S, "num_retries": 0}
-    if fastworkflow.get_env_var("LLM_POLICY_INTENT", default=""):
-        return dspy_utils.get_lm(
-            "LLM_POLICY_INTENT", "LITELLM_API_KEY_POLICY_INTENT", **limits
-        )
-    return dspy_utils.get_lm("LLM_AGENT", "LITELLM_API_KEY_AGENT", **limits)
+    return dspy_utils.get_lm("LLM_POLICY_INTENT", timeout=POLICY_TIMEOUT_S, num_retries=0)
 
 
 def _clip(text: str, limit: int = _MESSAGE_LIMIT) -> str:

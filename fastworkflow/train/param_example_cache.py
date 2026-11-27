@@ -109,6 +109,7 @@ from fastworkflow.train.utterance_cache import (
     normalize_mode,
     prune_orphaned_variants,
     slugify,
+    variant_key_of,
 )
 from fastworkflow.utils.logging import logger
 from fastworkflow.utils.python_utils import legacy_module_names
@@ -135,9 +136,10 @@ purpose so the examples are diverse.
 * Inside, `entries` is keyed by the training seed.
 * An entry is reused only when every fingerprint input matches — the command name,
   the parameter model's field annotations exactly as they are rendered into the
-  prompt, how many examples were asked for, the validation threshold, the model, the
+  prompt, how many examples were asked for, the validation threshold, the
   temperature, and the text of the prompt-building and example-parsing code. Edit any
-  of them and the command regenerates.
+  of them and the command regenerates. The generator model is not an input: changing
+  it reuses these files.
 * A generation that yielded no usable examples is never written here.
 
 Force regeneration with `fastworkflow train ... --regenerate-utterances`, which
@@ -294,7 +296,6 @@ def compute_fingerprint(
     num_examples: Optional[int],
     validation_threshold: Optional[float],
     temperature: Optional[float],
-    model: Optional[str],
     api_base: Optional[str] = None,
     completion_backend: str = "",
     generator_source_digest: str = "",
@@ -327,8 +328,9 @@ def compute_fingerprint(
     * `temperature` — see the module docstring; kept explicit rather than left to the
       source digest so that a future decision to lower it invalidates every entry
       loudly instead of silently reusing high-temperature draws.
-    * `model` / `api_base` — a different model, or the same model name pointed at a
-      different proxy, is a different generator.
+    * `api_base` — the same model name pointed at a different proxy is a different
+      generator. The model itself is deliberately NOT an input (bd fix-ygxo): examples
+      written by one model are reused under another.
     * `completion_backend` — an injected completion function can never share an entry
       with the real one.
     * `generator_source_digest` — the prompt template and the parsing code.
@@ -352,15 +354,12 @@ def compute_fingerprint(
         "num_examples": num_examples,
         "validation_threshold": validation_threshold,
         "temperature": temperature,
-        "model": model,
         "api_base_digest": api_base_digest,
         "completion_backend": completion_backend,
         "generator_source_digest": generator_source_digest,
     }
-    canonical = json.dumps(inputs, sort_keys=True, separators=(",", ":"))
-    variant_key = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:24]
     return Fingerprint(
-        command_name=str(command_name), variant_key=variant_key, inputs=inputs
+        command_name=str(command_name), variant_key=variant_key_of(inputs), inputs=inputs
     )
 
 

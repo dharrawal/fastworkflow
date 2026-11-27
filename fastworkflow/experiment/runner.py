@@ -66,6 +66,15 @@ LM_CACHE_VAR = "FW_LM_CACHE"
 LEARNING_OFF_SETTINGS = {"INTENT_LEARNING_REFIT": "off", "INTENT_LEARNING_RECORD": "off"}
 
 
+def _force_setting(name: str, value: str) -> None:
+    """Set *name* for this process whatever the env files or the shell say: into the env dict ``init`` loaded, and
+    over a process value too, because the process environment wins (``fastworkflow.get_env_var``). The process is
+    left alone when it does not set the name, so nothing leaks past the env dict's own lifetime."""
+    fastworkflow._env_vars[name] = value
+    if name in os.environ and os.environ[name] != value:
+        os.environ[name] = value
+
+
 class ExperimentAborted(RuntimeError):
     """The run could not be completed and the experiment was left `running`.
 
@@ -881,9 +890,9 @@ class ExperimentHarness:
         )
         posture["sink"] = "in-process" if self._sink is not None else "none"
         if self.defeat_caches:
-            # `[XR16]`, both contaminants. Set through `fastworkflow`'s env dict
-            # rather than os.environ so `get_env_var` sees them; the process is
-            # the experiment, so process-wide is the right scope.
+            # `[XR16]`, both contaminants. Forced over the env files and a shell
+            # export alike (`_force_setting`); the process is the experiment, so
+            # process-wide is the right scope.
             #
             # MERGED, never `fastworkflow.init({...})`. `init` REPLACES the
             # process env dict wholesale (`__init__.py:253`), so calling it with
@@ -891,12 +900,12 @@ class ExperimentHarness:
             # every threshold the run needs -- and the failure would surface as
             # "DSPy Language Model not provided" from somewhere unrelated, long
             # after the harness had already been blamed and cleared.
-            fastworkflow._env_vars[LM_CACHE_VAR] = "0"
+            _force_setting(LM_CACHE_VAR, "0")
             posture[LM_CACHE_VAR] = "0"
         # Same mechanism, forced whether or not the caches are defeated: a head refitted or a row recorded
         # mid-round is a different model under test for the attempts that follow.
         for name, value in LEARNING_OFF_SETTINGS.items():
-            fastworkflow._env_vars[name] = value
+            _force_setting(name, value)
             posture[name] = value
 
         # The DSPy memory policy. A long agentic sweep in one process fills

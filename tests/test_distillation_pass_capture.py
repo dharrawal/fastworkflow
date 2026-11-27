@@ -696,9 +696,7 @@ def test_an_unstamped_pass_id_records_nothing(
         DistillationSession(ctx)._run_agent_pass(
             "tidy up my lists",
             agent_lm_role="LLM_TEACHER_AGENT",
-            agent_api_key_role="LITELLM_API_KEY_TEACHER_AGENT",
             planner_lm_role="LLM_TEACHER_PLANNER",
-            planner_api_key_role="LITELLM_API_KEY_TEACHER_PLANNER",
         )
     finally:
         ctx.clear_workflow_stack()

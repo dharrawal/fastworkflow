@@ -37,5 +37,4 @@ def script_extractor(monkeypatch, *answers: dict) -> ScriptedExtractor:
         return lm if name == "LLM_PARAM_EXTRACTION" else original(name, *args, **kwargs)
 
     monkeypatch.setattr(signatures.dspy_utils, "get_lm", get_lm)
-    monkeypatch.setattr(signatures, "LLM_PARAM_EXTRACTION", "scripted/extractor")
     return lm

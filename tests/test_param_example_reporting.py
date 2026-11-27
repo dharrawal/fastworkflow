@@ -272,7 +272,6 @@ def test_the_utterance_cache_reports_regenerate_misses_too(workflow_dir):
         num_personas=2,
         utterances_per_persona=2,
         personas_per_batch=1,
-        model=MODEL,
     )
     seeded = UtteranceCache(workflow_dir, mode=MODE_REUSE)
     assert seeded.store(fingerprint, 42, ["the stale draw"])
@@ -559,7 +558,6 @@ def test_an_undigestable_field_detail_degrades_to_uncached_and_says_so(log_sink)
         "add_user",
         3,
         0.3,
-        MODEL,
     )
     assert fingerprint is None
 

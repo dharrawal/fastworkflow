@@ -143,14 +143,10 @@ def search_memory(
         handle["context_clause"],
         str(handle.get("command") or ""),
     )
-    # A deployment that never declared the search role gets the agent's model
-    # and credential rather than a failed search.
-    model_env, key_env = (
-        (SEARCH_MODEL_ENV, "LITELLM_API_KEY_OBSERVATION_SEARCH")
-        if context_budget.env_value(SEARCH_MODEL_ENV)
-        else (context_budget.AGENT_MODEL_ENV, "LITELLM_API_KEY_AGENT"))
+    # A deployment that never declared the search role gets the base model and its
+    # key (``dspy_utils.resolve_role``) rather than a failed search.
     try:
-        lm = get_lm(model_env, key_env,
+        lm = get_lm(SEARCH_MODEL_ENV,
                     temperature=0, max_tokens=2048, timeout=120, num_retries=1)
 
         def search(model):
@@ -172,8 +168,8 @@ def search_memory(
                      scope=selected_scope, store=store)
         # Do not print provider exceptions: they may include credentials or payloads.
         return (f"search_memory: search of {wanted} failed ({type(error).__name__}); "
-                f"no evidence answer was produced. Check {model_env} and "
-                f"{key_env} configuration or retry.")
+                f"no evidence answer was produced. Check {SEARCH_MODEL_ENV} (or the base model it "
+                f"falls back to) and its key configuration, or retry.")
     history = lm.history[-1] if lm.history else {}
     record_event({**event, "status": "answered", "model": lm.model,
                   "subject_recorded": not subject_is_unknown(subject),

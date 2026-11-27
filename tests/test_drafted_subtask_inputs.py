@@ -73,7 +73,6 @@ def _framework(tmp_path, monkeypatch, no_planner_key):
     monkeypatch.setitem(fastworkflow._env_vars, "FW_DRAFT_ARGUMENTS", "on")
     # One extractor LM is scripted in CALL order across the sub-tasks: drafts run one after another here (fix-awg8).
     monkeypatch.setenv("FW_SUBTASK_WORKERS", "1")
-    monkeypatch.setattr(signatures, "LLM_PARAM_EXTRACTION", "scripted/extractor")
     yield
     fastworkflow.RoutingRegistry.clear_registry()
 

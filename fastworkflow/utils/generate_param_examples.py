@@ -664,6 +664,7 @@ _UNDIGESTED_FUNCTIONS: frozenset[str] = frozenset(
         # Appended by the trainer after generation; never cached.
         "missing_value_example",
         "param_example_fingerprint",
+        "_is_role_completion",
         "prompt_source_digest",
         "_digested_functions",
     }
@@ -681,16 +682,19 @@ def param_example_fingerprint(
     command_name: str,
     num_examples: int,
     validation_threshold: float,
-    model: Optional[str],
+    model: Optional[str] = None,
     field_details: Optional[List[Dict[str, Any]]] = None,
     completion_fn: Optional[Callable] = None,
 ) -> Optional[Fingerprint]:
     """Fingerprint this command's parameter-example configuration for the cache.
 
-    Everything the LLM sees is in here, plus the two inputs that decide how its
-    response is written to disk (`validation_threshold` and the payload-shaping
+    Everything the LLM sees is in here except the model, plus the two inputs that decide
+    how its response is written to disk (`validation_threshold` and the payload-shaping
     source). See `param_example_cache.compute_fingerprint` for the per-field
-    rationale.
+    rationale. `model` is NOT a key input (bd fix-ygxo): the parameter exists only
+    because `generate_dspy_examples`, whose source is itself a key input and so is not
+    edited, passes it. The trainer's `dspy_utils.role_completion` is the production
+    backend, named as such.
 
     Returns None — meaning "this command cannot be cached this run" — when a field
     detail has no run-stable representation to digest. That is deliberately loud and
@@ -713,10 +717,10 @@ def param_example_fingerprint(
             num_examples=num_examples,
             validation_threshold=validation_threshold,
             temperature=DSPY_EXAMPLE_TEMPERATURE,
-            model=model,
             api_base=api_base or None,
             completion_backend=callable_identity(
-                completion_fn, PRODUCTION_COMPLETION_BACKEND),
+                None if _is_role_completion(completion_fn) else completion_fn,
+                PRODUCTION_COMPLETION_BACKEND),
             generator_source_digest=prompt_source_digest(),
         )
     except TypeError as exc:
@@ -727,6 +731,12 @@ def param_example_fingerprint(
             f"{command_name}_param_labeled.json files."
         )
         return None
+
+
+def _is_role_completion(completion_fn: Optional[Callable]) -> bool:
+    """Whether *completion_fn* is the production backend ``dspy_utils.role_completion`` builds (``litellm.completion``
+    with the role's model and key)."""
+    return bool(getattr(completion_fn, "fastworkflow_role_completion", None))
 
 
 def generate_dspy_examples(

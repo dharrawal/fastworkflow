@@ -24,7 +24,7 @@ from tests.test_no_agent_mode import _plan
 from tests.test_parameter_form_reply_contract import PARTIAL, session  # noqa: F401 - the CME on plain_required_workflow
 from tests.test_parameter_loop import (  # noqa: F401 - fixtures and helpers
     A_NOTE, ABOUT_DUNE, ABOUT_EMMA, HOST, no_agent)
-from tests.test_round1_gate import EMMA, JOKE, _open_review, _split_into, gated  # noqa: F401
+from tests.test_round1_gate import EMMA, JOKE, _open_review, _split_into, gated, remote_decides_emma_and_joke  # noqa: F401
 from tests.test_step_helpers import _build_planning_command, library_env  # noqa: F401
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401
 from tests.test_waiting_kinds import _last, _no_agent_joke_decisions, no_param_model  # noqa: F401
@@ -89,7 +89,7 @@ def test_a_slash_message_answers_a_plans_value_question_at_the_gate(no_agent, de
     assert [item["goal"] for item in _last(review)["review"]["items"]] == [ABOUT_EMMA, ABOUT_DUNE]
 
 
-def test_a_slash_message_answers_a_sub_task_review(gated, no_param_model, monkeypatch, deterministic_runs):
+def test_a_slash_message_answers_a_sub_task_review(gated, no_param_model, monkeypatch, deterministic_runs, remote_decides_emma_and_joke):
     _split_into(monkeypatch, [EMMA, JOKE])
     assert gated.ctx.process_turn(f"{EMMA} and {JOKE}").status is TurnStatus.AWAITING_USER
     _open_review(gated)

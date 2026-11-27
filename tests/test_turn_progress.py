@@ -19,7 +19,7 @@ from fastworkflow.turn import TurnStatus
 from fastworkflow.turn_progress import ProgressEvent
 from tests.test_approval_binding import (  # noqa: F401 - the real agent on the annotated library copy, and the guards
     annotated_library, no_live_model, no_model_call_for_parameters, todo)
-from tests.test_round1_gate import EMMA, JOKE, _split_into, gated  # noqa: F401
+from tests.test_round1_gate import EMMA, JOKE, _split_into, gated, remote_decides_emma_and_joke  # noqa: F401
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401
 
 pytestmark = pytest.mark.usefixtures("initialized_fastworkflow")
@@ -34,7 +34,7 @@ def _drain(q: queue.Queue) -> list:
             return events
 
 
-def test_the_stages_of_a_turn_that_opens_a_review_are_announced_in_order(gated, monkeypatch):
+def test_the_stages_of_a_turn_that_opens_a_review_are_announced_in_order(gated, monkeypatch, remote_decides_emma_and_joke):
     events_queue: queue.Queue = queue.Queue()
     gated.ctx.set_transport_queues(command_trace_queue=events_queue)
     _split_into(monkeypatch, [EMMA, JOKE])
@@ -98,7 +98,7 @@ def test_emission_from_a_worker_thread_with_the_turns_context(gated):
     assert events_queue.empty()
 
 
-def test_the_stream_delivers_progress_to_on_progress_and_never_to_on_trace(gated, monkeypatch):
+def test_the_stream_delivers_progress_to_on_progress_and_never_to_on_trace(gated, monkeypatch, remote_decides_emma_and_joke):
 
     events_queue: queue.Queue = queue.Queue()
     gated.ctx.set_transport_queues(command_trace_queue=events_queue)

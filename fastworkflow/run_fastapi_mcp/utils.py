@@ -93,21 +93,14 @@ SERVER_INCARNATION = uuid.uuid4().hex
 
 
 def resolve_max_live_sessions() -> tuple[int, str]:
-    """Resolve MAX_LIVE_SESSIONS with the process environment taking precedence.
-
-    OS first, deliberately. ``get_env_var`` reads the workflow env file *before*
-    ``os.environ``, so resolving through it alone would let the env file outrank
-    the container variable — and an operator control that the image's own file
-    outranks is not an operator control.
+    """Resolve MAX_LIVE_SESSIONS under the one precedence rule (``fastworkflow.get_env_var``: the process
+    environment, then the workflow env file, then the default); unset or empty is the default.
 
     Returns the value and where it came from, because an operator has to be able
     to see whether their override actually took effect.
     """
-    raw = os.environ.get("MAX_LIVE_SESSIONS")
-    source = "process environment"
-    if raw is None or raw == "":
-        raw = fastworkflow.get_env_var("MAX_LIVE_SESSIONS", default=None)
-        source = "workflow env file"
+    raw = fastworkflow.raw_env_var("MAX_LIVE_SESSIONS")
+    source = fastworkflow.env_source("MAX_LIVE_SESSIONS")
     if raw is None or raw == "":
         return DEFAULT_MAX_LIVE_SESSIONS, "default"
 
@@ -142,12 +135,9 @@ MAX_TRACE_QUEUE_EVENTS = 10_000
 
 
 def _resolve_env_int(name: str, default: int, *, minimum: int) -> tuple[int, str]:
-    """An integer setting, the process environment first (same precedence as resolve_max_live_sessions)."""
-    raw = os.environ.get(name)
-    source = "process environment"
-    if raw is None or raw == "":
-        raw = fastworkflow.get_env_var(name, default=None)
-        source = "workflow env file"
+    """An integer setting under the one precedence rule (as resolve_max_live_sessions)."""
+    raw = fastworkflow.raw_env_var(name)
+    source = fastworkflow.env_source(name)
     if raw is None or raw == "":
         return default, "default"
     try:

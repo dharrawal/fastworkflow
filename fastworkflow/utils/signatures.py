@@ -47,8 +47,6 @@ MISSING_INFORMATION_ERRMSG = ask.MISSING_INFORMATION
 INVALID_INFORMATION_ERRMSG = ask.INVALID_INFORMATION
 PARAMETER_EXTRACTION_ERROR_MSG = "Error in parameter extraction: {error}"
 
-LLM_PARAM_EXTRACTION = None
-LITELLM_API_KEY_PARAM_EXTRACTION = None
 
 INVALID_INT_VALUE = -sys.maxsize
 INVALID_FLOAT_VALUE = -sys.float_info.max
@@ -1272,15 +1270,9 @@ Today's date is {today}.
         Returns:
             The extracted parameters
         """
-        global LLM_PARAM_EXTRACTION, LITELLM_API_KEY_PARAM_EXTRACTION
-
         self.fields_reset_not_given = {}
         self.unparsed = False
-        if not LLM_PARAM_EXTRACTION:
-            LLM_PARAM_EXTRACTION = fastworkflow.get_env_var("LLM_PARAM_EXTRACTION")
-            LITELLM_API_KEY_PARAM_EXTRACTION = fastworkflow.get_env_var("LITELLM_API_KEY_PARAM_EXTRACTION")
-
-        lm = dspy_utils.get_lm("LLM_PARAM_EXTRACTION", "LITELLM_API_KEY_PARAM_EXTRACTION")
+        lm = dspy_utils.get_lm("LLM_PARAM_EXTRACTION")
         
         model_class = CommandParameters 
         if model_class is None:

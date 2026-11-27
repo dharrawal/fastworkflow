@@ -47,7 +47,6 @@ prompt. It is a constant (``fastworkflow.observability.tracing.MAX_ATTR_BYTES``)
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass
 from fractions import Fraction
 from typing import Optional
@@ -89,23 +88,11 @@ SOURCE_FALLBACK = "fallback"
 
 
 def env_value(name: str) -> str:
-    """The raw setting of *name*, from the fastworkflow env file or the process.
+    """The raw setting of *name*, stripped ("" when unset), under the one precedence rule
+    (``fastworkflow.raw_env_var``: the process, then the workflow env file)."""
+    import fastworkflow
 
-    Both are checked, file first, as ``fastworkflow.get_env_var`` does -- which
-    is also what makes an override written into a workflow's own
-    ``fastworkflow.env`` take effect, where the per-knob readers this module
-    replaced saw only ``os.environ``.
-    """
-    value = None
-    try:
-        import fastworkflow
-
-        value = fastworkflow._env_vars.get(name)
-    except Exception:  # noqa: BLE001 - a budget must never fail a turn
-        value = None
-    if value is None:
-        value = os.environ.get(name)
-    return str(value or "").strip()
+    return str(fastworkflow.raw_env_var(name) or "").strip()
 
 
 # ---------------------------------------------------------------------------

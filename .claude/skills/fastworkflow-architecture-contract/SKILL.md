@@ -167,7 +167,7 @@ weak-point fix-cgs), `action_log`, and conversation turns.
 `apply_serialized_state` (`:358-405`) restores it.
 
 Backends (`session_state_store.py:112-142`, factory keyed on env `SESSION_STATE_STORE`):
-disk = one JSON per channel under `SPEEDDICT_FOLDERNAME/channel_session_state`
+disk = one JSON per channel under the workflow's state folder in `FASTWORKFLOW_STATE_ROOT`
 (default); redis = `RedisSessionStateStore` for multi-pod.
 
 **Serialize-before-evict invariant:** the FastAPI LRU (`max_live_sessions=2000`,

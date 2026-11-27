@@ -31,7 +31,7 @@ from tests.test_approval_binding import (  # noqa: F401 - the fixtures and the s
     Script, annotated_library, no_live_model, no_model_call_for_parameters, todo)
 from tests.test_planning_command_phases import RecordingSink
 from tests.test_round1_gate import (  # noqa: F401 - the gated context and the gate's helpers
-    EMMA, FIND, JOKE, _confirmed, _marker, _open_review, _ran, _split_into, gated)
+    EMMA, FIND, JOKE, _confirmed, _marker, _open_review, _ran, _split_into, gated, remote_decides_emma_and_joke)
 from tests.test_turn_result_capture import (  # noqa: F401 - the shared fixtures
     _make_agent_ctx, _set_agents, initialized_fastworkflow)
 
@@ -86,7 +86,7 @@ def _planner_stub(monkeypatch, queries: list):
 # ----------------------------------------------------------------------
 
 
-def test_a_free_text_edit_is_read_by_one_model_call_and_shown_back_until_confirmed(gated, monkeypatch):
+def test_a_free_text_edit_is_read_by_one_model_call_and_shown_back_until_confirmed(gated, monkeypatch, remote_decides_emma_and_joke):
     _split_into(monkeypatch, [EMMA, JOKE])
     gated.ctx.process_turn(f"{EMMA} and {JOKE}")
     record = _open_review(gated)
@@ -108,7 +108,7 @@ def test_a_free_text_edit_is_read_by_one_model_call_and_shown_back_until_confirm
     assert _marker(gated) == "reviewed"
 
 
-def test_a_free_text_drop_is_read_and_the_confirmed_edit_applies(gated, monkeypatch):
+def test_a_free_text_drop_is_read_and_the_confirmed_edit_applies(gated, monkeypatch, remote_decides_emma_and_joke):
     _split_into(monkeypatch, [EMMA, JOKE])
     gated.ctx.process_turn(f"{EMMA} and {JOKE}")
     record = _open_review(gated)
@@ -138,7 +138,7 @@ def test_the_reader_reads_add_merge_and_split_as_typed_edits_the_engine_applies(
     assert [item.goal for item in edited.items] == expected
 
 
-def test_a_reply_the_reader_cannot_read_asks_again_and_counts_toward_the_cap(gated, monkeypatch):
+def test_a_reply_the_reader_cannot_read_asks_again_and_counts_toward_the_cap(gated, monkeypatch, remote_decides_emma_and_joke):
     _split_into(monkeypatch, [EMMA, JOKE])
     gated.ctx.process_turn(f"{EMMA} and {JOKE}")
     record = _open_review(gated)
@@ -161,7 +161,7 @@ def test_a_reply_the_reader_cannot_read_asks_again_and_counts_toward_the_cap(gat
 # ----------------------------------------------------------------------
 
 
-def test_an_accepted_plan_runs_its_plain_goal_with_its_inputs_and_a_narrowed_listing(gated, monkeypatch):
+def test_an_accepted_plan_runs_its_plain_goal_with_its_inputs_and_a_narrowed_listing(gated, monkeypatch, remote_decides_emma_and_joke):
     queries: list = []
     _planner_stub(monkeypatch, queries)
     listings: list = []
@@ -192,7 +192,7 @@ def test_an_accepted_plan_runs_its_plain_goal_with_its_inputs_and_a_narrowed_lis
     assert queries[-1] == JOKE                              # the from-scratch goal runs as its own goal
 
 
-def test_a_from_sub_task_input_takes_the_output_of_that_sub_task(gated, monkeypatch):
+def test_a_from_sub_task_input_takes_the_output_of_that_sub_task(gated, monkeypatch, remote_decides_emma_and_joke):
     queries: list = []
     _planner_stub(monkeypatch, queries)
     _split_into(monkeypatch, [JOKE, FIND])
@@ -210,7 +210,7 @@ def test_a_from_sub_task_input_takes_the_output_of_that_sub_task(gated, monkeypa
     assert queries[-1] == f"{FIND} (inputs: query=the answer)"
 
 
-def test_a_from_sub_task_input_takes_the_typed_output_of_a_run_that_produced_one(gated, monkeypatch):
+def test_a_from_sub_task_input_takes_the_typed_output_of_a_run_that_produced_one(gated, monkeypatch, remote_decides_emma_and_joke):
     """find_member returns a typed Output (member_uids, names, total): the 'from sub-task 1' input of the next goal is
     that Output, not the agent's answer text (fix-3rsq.plan-review.2.11)."""
     queries: list = []
@@ -239,7 +239,7 @@ def test_a_from_sub_task_input_takes_the_typed_output_of_a_run_that_produced_one
     assert "found=the answer" not in queries[-1]
 
 
-def test_a_goal_whose_command_succeeded_but_whose_finish_check_fails_is_not_complete(gated, monkeypatch):
+def test_a_goal_whose_command_succeeded_but_whose_finish_check_fails_is_not_complete(gated, monkeypatch, remote_decides_emma_and_joke):
     """Inv. 3: the goal's plan names find_member. A different command that succeeds does not satisfy it, the finish check
     sends the agent back, and the goal completes only once find_member has run."""
     queries: list = []
@@ -308,7 +308,7 @@ def _scripted_context(annotated_library, monkeypatch):
     return SimpleNamespace(ctx=ctx, wf=wf, sink=sink, script=script, library=library)
 
 
-def test_an_accept_after_a_process_restart_resumes_the_review_and_runs_its_goals(annotated_library, monkeypatch):
+def test_an_accept_after_a_process_restart_resumes_the_review_and_runs_its_goals(annotated_library, monkeypatch, remote_decides_emma_and_joke):
     queries: list = []
     _planner_stub(monkeypatch, queries)
     _split_into(monkeypatch, [EMMA, JOKE])

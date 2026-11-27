@@ -257,7 +257,8 @@ class TrainingSignature(BaseModel):
     seed: Optional[int] = None
     tiny_model: Optional[str] = None
     large_model: Optional[str] = None
-    syndata_model: Optional[str] = None
+    # No syndata model (bd fix-ygxo): generated utterances are cached and reused under any generator model, so changing
+    # LLM_SYNDATA_GEN (or the model it falls back to) changes nothing a run produces from the cache.
     persona_source: Optional[str] = None
     generator_source_digest: Optional[str] = None
     trainer_source_digest: Optional[str] = None
@@ -294,7 +295,6 @@ class TrainingSignature(BaseModel):
             "seed": self.seed,
             "tiny_model": self.tiny_model,
             "large_model": self.large_model,
-            "syndata_model": self.syndata_model,
             "persona_source": self.persona_source,
             "generator_source_digest": self.generator_source_digest,
             "trainer_source_digest": self.trainer_source_digest,
@@ -865,8 +865,6 @@ def compute_training_signature(
             lambda: fastworkflow.get_env_var(
                 "INTENT_DETECTION_LARGE_MODEL", default="distilbert-base-uncased"),
             "INTENT_DETECTION_LARGE_MODEL"),
-        syndata_model=_global_input(
-            lambda: fastworkflow.get_env_var("LLM_SYNDATA_GEN"), "LLM_SYNDATA_GEN"),
         persona_source=_global_input(
             active_persona_source_label, "persona source"),
         generator_source_digest=_global_input(
