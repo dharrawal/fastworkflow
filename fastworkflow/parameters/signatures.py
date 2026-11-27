@@ -34,7 +34,8 @@ from fastworkflow.utils.dspy_logger import DSPyForward
 from fastworkflow.core.command_directory import CommandDirectory
 from fastworkflow.planning import planning_commands
 from fastworkflow.parameters import ask, rules
-from fastworkflow.parameters.rules import allowed_member, is_union, literal_values, pattern_refusal
+from fastworkflow.parameters.rules import allowed_member, literal_values, pattern_refusal
+from fastworkflow.utils.python_utils import is_union
 from fastworkflow.parameters.workflow_vocabulary import (
     KIND_WORD_WHY, WorkflowVocabulary, is_kind_word, is_pronoun_phrase, load_workflow_vocabulary)
 

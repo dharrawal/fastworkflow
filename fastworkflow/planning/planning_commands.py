@@ -284,6 +284,7 @@ from fastworkflow.core.workflow_inheritance_model import (
 from fastworkflow.parameters import check as one_guard  # noqa: E402 - the one guard module (bd fix-qoyz step 3)
 from fastworkflow.parameters import ask  # noqa: E402 - the one question builder (bd fix-qoyz step 4)
 from fastworkflow.parameters import rules  # noqa: E402 - the shared text helpers (bd fix-qoyz step 1)
+from fastworkflow.utils.python_utils import is_union  # noqa: E402 - the one union test
 
 #: A ``classifier_confirms`` check replaces the planner's argument only at or above this probability.
 VERIFY_THRESHOLD = 0.65
@@ -957,7 +958,7 @@ def _flag(spec: dict, key: str, name: str, where: str) -> bool:
 
 def _option_kind(annotation) -> str:
     """The coarse type of a field's annotation for an option check: str, int, bool, float, list[str], enum or other."""
-    if rules.is_union(annotation) and type(None) in get_args(annotation):
+    if is_union(annotation) and type(None) in get_args(annotation):
         inner = [a for a in get_args(annotation) if a is not type(None)]
         annotation = inner[0] if len(inner) == 1 else annotation
     if annotation in (str, int, bool, float):
@@ -975,7 +976,7 @@ def _spec_from_field(name: str, info, where: str, *, planning: bool = False) -> 
     from pydantic_core import PydanticUndefined
 
     annotation = info.annotation
-    optional = rules.is_union(annotation) and type(None) in get_args(annotation)
+    optional = is_union(annotation) and type(None) in get_args(annotation)
     optional_number = False
     if optional:
         inner = [a for a in get_args(annotation) if a is not type(None)]
@@ -1320,7 +1321,7 @@ def check_ui_option(name: str, extra, where: str, *, kind: str = "other", on_out
 
 def _literal_values(annotation) -> tuple:
     """The declared values of a ``Literal`` annotation (or ``Optional`` of one), else ()."""
-    if rules.is_union(annotation) and type(None) in get_args(annotation):
+    if is_union(annotation) and type(None) in get_args(annotation):
         inner = [a for a in get_args(annotation) if a is not type(None)]
         annotation = inner[0] if len(inner) == 1 else annotation
     return get_args(annotation) if get_origin(annotation) is Literal else ()
@@ -3965,7 +3966,7 @@ def type_sentences(info) -> tuple[str, ...]:
     """The sentences of a field's type and format: a ``bool`` (``Optional[bool]`` too) is true only when the request asks
     for it (false only when the request asks against it, for a bool that defaults to true), a rule of the type on both
     kinds of command; a declared ``Field(pattern=...)`` is its format (``rules.pattern_sentence``)."""
-    members = [a for a in get_args(info.annotation) if a is not type(None)] if rules.is_union(info.annotation) \
+    members = [a for a in get_args(info.annotation) if a is not type(None)] if is_union(info.annotation) \
         else [info.annotation]
     sentences = []
     if members == [bool]:

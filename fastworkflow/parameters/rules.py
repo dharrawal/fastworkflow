@@ -16,8 +16,8 @@ from __future__ import annotations
 
 import re
 import typing
-from types import UnionType
 from typing import Any, List, Optional, Tuple
+from fastworkflow.utils.python_utils import is_union
 
 #: Number words the request may write instead of digits (0 to 20). Read by ``written_numbers`` only (the planning
 #: check reaches it through ``written_numbers``).
@@ -215,12 +215,6 @@ def pattern_refusal(name: str, field_info: Any, value: Any) -> Optional[str]:
     examples = getattr(field_info, "examples", None) or []
     example = f" (e.g., {examples[0]})" if examples else ""
     return f"{name} {value!r} does not match the pattern {_pattern_text(pattern)}{example}"
-
-
-def is_union(annotation: Any) -> bool:
-    """Whether *annotation* is a union: ``Optional[X]``, ``Union[X, Y]`` and ``X | Y`` are all one thing. The one
-    test every place that unwraps an annotation uses, so the two spellings of an optional type never differ."""
-    return typing.get_origin(annotation) in (typing.Union, UnionType)
 
 
 def literal_values(annotation: Any) -> Tuple[str, ...]:

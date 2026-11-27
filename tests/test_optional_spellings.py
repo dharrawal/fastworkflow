@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 from fastworkflow.planning import planning_commands as pc
 from fastworkflow.parameters import check
 from fastworkflow.parameters.fill import unwrap_optional
-from fastworkflow.parameters.rules import is_union
+from fastworkflow.utils.python_utils import is_union
 from fastworkflow.parameters import signatures
 
 COPIED = {"copied_from_command_text": True}

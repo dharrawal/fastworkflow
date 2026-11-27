@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 from typing import Type, Optional, Dict, Any, Union, get_args, get_origin, Tuple, List
 
 import fastworkflow
-from fastworkflow.parameters.rules import is_union
+from fastworkflow.utils.python_utils import is_union
 from fastworkflow.utils import model_roles
 from fastworkflow.utils.logging import logger
 

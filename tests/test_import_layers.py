@@ -53,8 +53,6 @@ KNOWN_EXCEPTIONS = {
         "the planning-argument gap code moves into parameters/ (later)",
     ("fastworkflow.observation_offloading.agent", "fastworkflow.agent.react"):
         "the offloading wiring of the ReAct loop moves to agent/ (later)",
-    ("fastworkflow.utils.dspy_utils", "fastworkflow.parameters.rules"):
-        "is_union, a typing helper, moves to utils (step 7)",
 }
 
 

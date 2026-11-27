@@ -27,7 +27,7 @@ from pydantic import BaseModel
 from pydantic_core import PydanticUndefined
 
 from fastworkflow.parameters.field_options import COMMAND_TEXT_AFTER_COMMAND_NAME
-from fastworkflow.parameters.rules import is_union
+from fastworkflow.utils.python_utils import is_union
 from fastworkflow.parameters.input_validation import bound_fields, field_checked_class
 
 
