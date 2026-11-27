@@ -55,7 +55,7 @@ from fastworkflow.train.utterance_cache import (
 from fastworkflow.train.utterance_cache import (
     compute_fingerprint as utterance_compute_fingerprint,
 )
-from fastworkflow.utils.generate_param_examples import (
+from fastworkflow.train.generate_param_examples import (
     extract_field_details,
     generate_dspy_examples,
     param_example_fingerprint,
@@ -589,8 +589,8 @@ def test_an_undigestable_command_still_trains_just_without_reuse(workflow_dir):
 
 
 def test_a_bare_call_example_answers_missing_for_required_fields(monkeypatch):
-    from fastworkflow.utils.generate_param_examples import missing_value_example
-    from fastworkflow.utils.signatures import INVALID_INT_VALUE
+    from fastworkflow.train.generate_param_examples import missing_value_example
+    from fastworkflow.parameters.signatures import INVALID_INT_VALUE
 
     monkeypatch.setattr(fastworkflow, "get_env_var", lambda name, *a, **k: "NOT_FOUND")
 
@@ -609,7 +609,7 @@ def test_a_bare_call_example_answers_missing_for_required_fields(monkeypatch):
 
 
 def test_a_command_without_required_fields_gets_no_bare_call_example():
-    from fastworkflow.utils.generate_param_examples import missing_value_example
+    from fastworkflow.train.generate_param_examples import missing_value_example
 
     class Params(BaseModel):
         start: int | None = None

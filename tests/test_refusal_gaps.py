@@ -62,7 +62,7 @@ def _offline(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _setup(gated, no_agent_model, no_planner_key, monkeypatch):
-    from fastworkflow.utils import signatures
+    from fastworkflow.parameters import signatures
 
     monkeypatch.setenv("FW_DRAFT_ARGUMENTS", "on")
     monkeypatch.setattr(WorkflowExecutionContext, "_agent_dspy_context",

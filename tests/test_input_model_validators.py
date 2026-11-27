@@ -5,7 +5,7 @@ import fastworkflow
 from pydantic import BaseModel, Field, model_validator
 
 from fastworkflow import planning_commands as pc
-from fastworkflow.utils.signatures import InputForParamExtraction, removed_validate_hook_message
+from fastworkflow.parameters.signatures import InputForParamExtraction, removed_validate_hook_message
 from tests.test_planning_command_files import _write as write_files
 
 
@@ -218,7 +218,7 @@ def test_an_input_validator_that_reads_the_context_names_it_when_built_without_o
     the validator runs unchanged, and the guard is applied once however often the command is loaded."""
     import os
     from fastworkflow.command_routing import RoutingRegistry
-    from fastworkflow.utils.signatures import ModuleType
+    from fastworkflow.parameters.signatures import ModuleType
 
     folder = os.path.join(os.path.dirname(fastworkflow.__file__), "examples", "simple_workflow_template")
     routing = RoutingRegistry.get_definition(folder)
@@ -237,7 +237,7 @@ def test_an_input_validator_that_reads_the_context_names_it_when_built_without_o
 
     # a second load of the same command does not wrap the validator again
     again = routing.get_command_class("WorkItem/go_to_workitem", ModuleType.INPUT_FOR_PARAM_EXTRACTION_CLASS).Input
-    from fastworkflow.utils.input_validation import _CONTEXT_GUARD
+    from fastworkflow.parameters.input_validation import _CONTEXT_GUARD
     dec = again.__pydantic_decorators__.model_validators["path_from_workitem_type"]
     assert getattr(dec.func, _CONTEXT_GUARD, False)
     assert not getattr(dec.func.__wrapped__, _CONTEXT_GUARD, False)
@@ -292,7 +292,7 @@ def test_a_different_missing_key_is_a_plain_key_error(tmp_path):
 
 
 def test_validation_context_is_a_dict_except_for_the_removed_key():
-    from fastworkflow.utils.input_validation import ValidationContext
+    from fastworkflow.parameters.input_validation import ValidationContext
     import copy
     import pickle
 
@@ -393,7 +393,7 @@ def test_a_stored_phase_output_holding_a_command_input_is_rebuilt_without_its_va
 def test_a_stored_command_input_still_has_its_fields_checked():
     from pydantic import ValidationError
 
-    from fastworkflow.utils.input_validation import stored_value
+    from fastworkflow.parameters.input_validation import stored_value
 
     with pytest.raises(ValidationError):
         stored_value(StoredFacts, {"called_with": {"uid": "u1", "size": "big"}, "count": 1})
@@ -402,7 +402,7 @@ def test_a_stored_command_input_still_has_its_fields_checked():
 
 
 def test_a_stored_model_holding_no_command_input_is_validated_as_before():
-    from fastworkflow.utils.input_validation import stored_value
+    from fastworkflow.parameters.input_validation import stored_value
 
     class Plain(BaseModel):
         n: int

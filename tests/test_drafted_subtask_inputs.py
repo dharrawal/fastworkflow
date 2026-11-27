@@ -30,7 +30,7 @@ from fastworkflow import review_proposals
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import extract_arguments
 from fastworkflow.review_proposals import Means, SubTask, SubTaskInput, draft_inputs, resolve_inputs, run_text
 from fastworkflow.run_listing import has_trained_heads
-from fastworkflow.utils import signatures
+from fastworkflow.parameters import signatures
 from tests.test_approval_binding import annotated_library  # noqa: F401 - the library copy with its trained heads
 
 TUTORIAL = str(Path(__file__).parent.joinpath("planning_tutorial_workflow").resolve())
@@ -318,7 +318,7 @@ def test_a_drafted_input_round_trips_through_the_review_json():
 
 def _signature_text(folder: str, name: str) -> str:
     from fastworkflow import ModuleType, planning_commands
-    from fastworkflow.utils.signatures import InputForParamExtraction
+    from fastworkflow.parameters.signatures import InputForParamExtraction
 
     fastworkflow.RoutingRegistry.get_definition(folder, load_cached=False)
     model = fastworkflow.RoutingRegistry.get_definition(folder).get_command_class(

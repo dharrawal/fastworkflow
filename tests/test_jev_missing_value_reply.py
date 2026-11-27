@@ -19,7 +19,8 @@ from dotenv import dotenv_values
 from pydantic import BaseModel, Field
 
 import fastworkflow
-from fastworkflow import intent_loop, parameter_clarification, waiting
+from fastworkflow import intent_loop, waiting
+from fastworkflow.parameters import parameter_clarification
 from fastworkflow import workflow_agent
 from fastworkflow._workflows.command_metadata_extraction import parameter_reply
 from fastworkflow._workflows.command_metadata_extraction._commands import wildcard
@@ -28,7 +29,7 @@ from fastworkflow._workflows.command_metadata_extraction.parameter_extraction im
     classify_missing_value_reply,
     missing_value_reply_enabled,
 )
-from fastworkflow.utils.signatures import NOT_FOUND
+from fastworkflow.parameters.signatures import NOT_FOUND
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PENDING_COMMAND = "ChatRoom/set_current_user"
@@ -431,7 +432,7 @@ def test_real_jev_reads_hesitation_and_answers(jev_env, reply, expected):
 from pathlib import Path as _Path
 
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import park
-from fastworkflow.utils.signatures import INVALID_FLOAT_VALUE
+from fastworkflow.parameters.signatures import INVALID_FLOAT_VALUE
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 
 _HELLO = str(_Path(__file__).parent.joinpath("hello_world_workflow").resolve())

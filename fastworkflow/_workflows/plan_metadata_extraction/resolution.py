@@ -272,7 +272,8 @@ def _values_command(turn: Turn, item):
     or (with no agent model, where nothing else would find a value the user did not give) an execution command stated as
     a command with parameters (``planning_commands.execution_command``). With an agent model the agent finds an
     execution command's missing value."""
-    from fastworkflow import parameter_clarification as loops, planning_commands, review_proposals
+    from fastworkflow.parameters import parameter_clarification as loops
+    from fastworkflow import planning_commands, review_proposals
 
     if item.means.kind == review_proposals.MEANS_PLANNING:
         return planning_commands.planning_command(turn.workflow.folderpath, item.means.name), loops.KIND_PLANNING
@@ -289,7 +290,8 @@ def _values_question(resolution: PlanResolution, plan, turn: Turn) -> Optional[s
     part bound to an execution command when no agent model is set (``_values_command``): the same loop, the same
     reader, the same asking rule. A pinned plan is always asked (every parameter shown, ``yes`` runs). With an agent model,
     a part whose inputs were not drafted (``FW_DRAFT_ARGUMENTS`` off) is not asked: the run reads its values."""
-    from fastworkflow import parameter_clarification as loops, planning_commands, review_proposals
+    from fastworkflow.parameters import parameter_clarification as loops
+    from fastworkflow import planning_commands, review_proposals
 
     item = plan.items[resolution.index]
     if not turn.can_ask:
@@ -476,7 +478,8 @@ def ask_misunderstood_running_part(text: str, turn: Turn):
 
 
 def _take_values(resolution: PlanResolution, held, reply: str, plan, turn: Turn):
-    from fastworkflow import parameter_clarification as loops, planning_commands, review_proposals
+    from fastworkflow.parameters import parameter_clarification as loops
+    from fastworkflow import planning_commands, review_proposals
 
     loop = loops.ParameterLoop.from_state(held.payload["loop"])
     item = plan.items[resolution.index]

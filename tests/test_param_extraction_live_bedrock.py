@@ -12,7 +12,7 @@ from typing import List
 import pytest
 from pydantic import BaseModel
 
-from fastworkflow.utils.signatures import NOT_FOUND, InputForParamExtraction
+from fastworkflow.parameters.signatures import NOT_FOUND, InputForParamExtraction
 
 pytestmark = [
     pytest.mark.requires_llm_key,

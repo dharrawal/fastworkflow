@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 import fastworkflow
 from fastworkflow import Action
 from fastworkflow import intent_loop
-from fastworkflow import parameter_clarification
+from fastworkflow.parameters import parameter_clarification
 from fastworkflow import waiting
 from fastworkflow.command_executor import CommandExecutor
 from fastworkflow.nlu_labels import PARAMETER_VALUE_PLACEHOLDERS

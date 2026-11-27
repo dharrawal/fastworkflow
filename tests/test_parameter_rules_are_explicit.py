@@ -33,7 +33,7 @@ from pydantic import BaseModel, Field
 
 from fastworkflow import planning_commands as pc
 from fastworkflow.parameters import check, rules
-from fastworkflow.utils import workflow_vocabulary as wv
+from fastworkflow.parameters import workflow_vocabulary as wv
 from tests.test_argument_checks import _command
 
 COPIED = {"copied_from_command_text": True}
@@ -105,7 +105,7 @@ def test_the_remote_given_check_is_not_asked_about_a_marked_field(monkeypatch):
 
     import fastworkflow
     from fastworkflow import workflow_agent
-    from fastworkflow.utils.signatures import fields_not_given
+    from fastworkflow.parameters.signatures import fields_not_given
     from tests.test_jev_field_given import _Recorder
 
     class Input(BaseModel):
@@ -150,7 +150,7 @@ def test_a_marked_optional_str_given_and_not_written_is_refused_and_one_not_give
 
 
 def test_the_slash_path_asks_for_a_marked_optional_str_the_request_does_not_write():
-    from fastworkflow.utils.signatures import InputForParamExtraction
+    from fastworkflow.parameters.signatures import InputForParamExtraction
 
     extractor = InputForParamExtraction(command="find dune", input_for_param_extraction_class=None)
     valid, message, _, fields = extractor.validate_parameters(
@@ -260,7 +260,7 @@ def test_the_policy_fallback_keeps_the_flags_of_the_workflows_id_patterns(tmp_pa
 # ---------------------------------------------------------------- 5. what the extraction model is told
 
 def _descriptions(model: type) -> dict:
-    from fastworkflow.utils.signatures import InputForParamExtraction
+    from fastworkflow.parameters.signatures import InputForParamExtraction
 
     signature = InputForParamExtraction.create_signature_from_pydantic_model(model, pc.option_sentences(model))
     return {name: field.json_schema_extra["desc"] for name, field in signature.output_fields.items()}
@@ -303,7 +303,7 @@ def test_the_planners_typed_fill_reads_the_same_sentences(tmp_path):
 
 
 def test_no_sentence_depends_on_the_kind_of_command():
-    from fastworkflow.utils import signatures
+    from fastworkflow.parameters import signatures
 
     assert not hasattr(signatures, "planning_verbatim_sentences")
 
@@ -379,7 +379,7 @@ def test_unmarked_fields_that_hold_one_value_are_not_reset(tmp_path):
 def _slash_validate(model: type, values: dict, request: str):
     """``validate_parameters``, the stage the "/" reply merge, the agent's typed call and every code-read form of an
     execution command reach (and the LLM fill too, after its check stage)."""
-    from fastworkflow.utils.signatures import InputForParamExtraction
+    from fastworkflow.parameters.signatures import InputForParamExtraction
 
     extractor = InputForParamExtraction(command=request, input_for_param_extraction_class=None)
     valid, message, _, fields = extractor.validate_parameters(None, "app/find", model.model_construct(**values))
@@ -403,7 +403,7 @@ def test_an_upper_case_id_with_a_number_is_a_value_on_every_path(tmp_path, value
     ("<Dune>", "unwrapped"), ("<Ann Lee>", "unwrapped"), ("<9a1b>", "unwrapped"), ("<sku_42>", "unwrapped"),
 ])
 def test_a_bracketed_value_is_judged_by_its_shape_alone(value, verdict):
-    from fastworkflow.utils import signatures
+    from fastworkflow.parameters import signatures
 
     assert signatures.classify_bracketed_value(value)[0] == verdict
     assert not hasattr(signatures, "_PLACEHOLDER_WORDS")
@@ -417,7 +417,7 @@ def test_a_bracketed_value_is_judged_by_its_shape_alone(value, verdict):
     ("your_uid", "item_uid", False), ("new-name", "group_name", False), ("placeholder", "query", False),
 ])
 def test_an_ungrounded_placeholder_is_only_an_echo_of_the_fields_own_name(value, field, refused):
-    from fastworkflow.utils import signatures
+    from fastworkflow.parameters import signatures
 
     assert signatures.is_ungrounded_placeholder(value, field, "label the item 9a1b2c3d") is refused
     assert not hasattr(signatures, "_PLACEHOLDER_QUALIFIERS")
@@ -447,7 +447,7 @@ def test_one_verdict_on_the_execution_fill_the_slash_stage_and_the_plan_call(tmp
     ('{"a": 1}', False), ("{Ann Lee}", False), ("{x1}", False), ('{"title": "Dune", "copies": 2}', False),
 ])
 def test_braces_are_judged_by_the_same_inner_shape_as_brackets_and_never_unwrapped(value, placeholder):
-    from fastworkflow.utils import signatures
+    from fastworkflow.parameters import signatures
 
     assert rules.placeholder_like(value) is placeholder
     assert signatures.classify_bracketed_value(value) == (("placeholder" if placeholder else "unchanged"), value)
@@ -458,7 +458,7 @@ def test_a_json_object_string_is_a_value_left_as_written_on_every_path(tmp_path,
     request = f"store {value}"
     assert check.check_execution(Plain, {"name": value}, request).gaps == []          # the execution fill
     params = Plain.model_construct(name=value)
-    from fastworkflow.utils.signatures import InputForParamExtraction
+    from fastworkflow.parameters.signatures import InputForParamExtraction
 
     extractor = InputForParamExtraction(command=request, input_for_param_extraction_class=None)
     valid, _, _, _ = extractor.validate_parameters(None, "app/find", params)          # the agent's typed call, "/"

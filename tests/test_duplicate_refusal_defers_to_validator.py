@@ -78,7 +78,7 @@ class Place(BaseModel):
 
 
 def _slash_validate(model: type, values: dict, request: str):
-    from fastworkflow.utils.signatures import InputForParamExtraction
+    from fastworkflow.parameters.signatures import InputForParamExtraction
 
     extractor = InputForParamExtraction(command=request, input_for_param_extraction_class=None)
     diagnostics: dict = {}
@@ -250,7 +250,7 @@ SCOPE_FIELD = 'scope: str = Field(description="where to compare")'
 
 
 def test_the_question_on_a_tie_carries_the_validators_message_and_field(tmp_path):
-    from fastworkflow import parameter_clarification as loops
+    from fastworkflow.parameters import parameter_clarification as loops
 
     command = _command(tmp_path, _module(SAME_WITH_FIELD), name="compare")
     gaps = pc.argument_gaps(command, {"record_a": "Payroll", "record_b": "Payroll"}, REQUEST)
@@ -264,7 +264,7 @@ def test_the_question_on_a_tie_carries_the_validators_message_and_field(tmp_path
 
 
 def test_the_question_keeps_the_framework_wording_when_the_validators_pass(tmp_path):
-    from fastworkflow import parameter_clarification as loops
+    from fastworkflow.parameters import parameter_clarification as loops
 
     command = _command(tmp_path, _module('if self.record_a == "Archive": raise fastworkflow.Refused("no archive")'),
                        name="compare")
@@ -275,7 +275,7 @@ def test_the_question_keeps_the_framework_wording_when_the_validators_pass(tmp_p
 
 
 def test_with_another_gap_the_validators_are_not_run_and_the_framework_wording_stands(tmp_path):
-    from fastworkflow import parameter_clarification as loops
+    from fastworkflow.parameters import parameter_clarification as loops
 
     command = _command(tmp_path, _module(f"{RECORD_CALL}\n{SAME_WITH_FIELD}", extra=(SCOPE_FIELD,)), name="compare")
     VALIDATOR_CALLS.clear()

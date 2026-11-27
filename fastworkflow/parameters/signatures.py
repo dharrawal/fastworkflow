@@ -28,14 +28,14 @@ from fastworkflow.utils.fuzzy_match import (
     best_window_distance, find_best_matches, normalize_text, normalized_levenshtein_distance,
 )
 from fastworkflow.utils import dspy_utils
-from fastworkflow.utils.extraction_attempts import FirstAttemptGreedy
-from fastworkflow.utils.input_validation import bound_fields, is_pydantic_model, set_field_unvalidated
+from fastworkflow.parameters.extraction_attempts import FirstAttemptGreedy
+from fastworkflow.parameters.input_validation import bound_fields, is_pydantic_model, set_field_unvalidated
 from fastworkflow.utils.dspy_logger import DSPyForward
 from fastworkflow.command_directory import CommandDirectory
 from fastworkflow import planning_commands
 from fastworkflow.parameters import ask, rules
 from fastworkflow.parameters.rules import allowed_member, is_union, literal_values, pattern_refusal
-from fastworkflow.utils.workflow_vocabulary import (
+from fastworkflow.parameters.workflow_vocabulary import (
     KIND_WORD_WHY, WorkflowVocabulary, is_kind_word, is_pronoun_phrase, load_workflow_vocabulary)
 
 # Framework sentinels, fixed in code (not env settings). ``NOT_FOUND`` is what the
@@ -389,7 +389,7 @@ def command_name_refusals(cmd_parameters: BaseModel, subject_command_name: str,
 # A planner that fills a free-text (``str``) input can write a word that names the kind of
 # record or a field name rather than a record (``query='right_name'``, ``query='department'``),
 # or a pronoun (``query='Her'``). The workflow's own vocabulary
-# (``fastworkflow.utils.workflow_vocabulary``) and the closed pronoun list decide. Only a value
+# (``fastworkflow.parameters.workflow_vocabulary``) and the closed pronoun list decide. Only a value
 # that is exactly such a word is refused; a value that merely contains one passes. A declared
 # choice (a Literal or an Enum field) is never screened, whatever word it is. A kind-selector
 # field (its labeled examples give the kinds it takes, ``kind_options``; a description exempts nothing) is exempt

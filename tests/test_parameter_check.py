@@ -117,7 +117,7 @@ def test_allowed_placeholder_and_ground_rules():
 
 
 def test_state_of_why_reads_a_placeholder_pronoun_or_kind_word_as_missing():
-    from fastworkflow.utils.workflow_vocabulary import KIND_WORD_WHY
+    from fastworkflow.parameters.workflow_vocabulary import KIND_WORD_WHY
 
     for why in (check.PLACEHOLDER_WHY, pc.PRONOUN_WHY, KIND_WORD_WHY):
         assert check.state_of_why(why) == check.MISSING

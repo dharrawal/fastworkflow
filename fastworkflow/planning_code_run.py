@@ -22,7 +22,7 @@ import os
 import uuid
 from typing import Any, Callable, Iterable, Optional
 
-from fastworkflow.utils.input_validation import stored_value
+from fastworkflow.parameters.input_validation import stored_value
 
 CORE = ["go_up", "reset_context"]
 

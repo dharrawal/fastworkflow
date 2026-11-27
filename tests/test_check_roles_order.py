@@ -13,7 +13,7 @@ import pytest
 
 from fastworkflow import planning_commands as sc
 from fastworkflow import workflow_agent
-from fastworkflow.utils.signatures import InputForParamExtraction
+from fastworkflow.parameters.signatures import InputForParamExtraction
 from tests.test_check_roles_one_step import REQUEST, workflow  # noqa: F401  (workflow is a fixture)
 
 #: Two required str inputs; a validator corrects ``branch`` when it repeats ``member``, so the two then differ.

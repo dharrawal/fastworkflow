@@ -17,7 +17,7 @@ verdict: accepted as given, accepted as another value (respelled, or replaced), 
 The verdicts must be equal, except for a case that names one of the ``DIFFERENCES`` below: such a case must
 show exactly the difference its entry describes (so the list stays truthful), and each entry must have a case.
 A new disagreement fails the test with both verdicts. The fix is then one of two, chosen on purpose: align
-the checkers (move the rule into the shared module, ``fastworkflow/utils/argument_checks.py``, with both paths
+the checkers (move the rule into the shared module, ``fastworkflow/parameters/argument_checks.py``, with both paths
 calling it, and its gate measured: fix-48np.2's notes), or add a documented entry to ``DIFFERENCES``, by an
 explicit decision, with the measurement for the path whose behaviour differs.
 
@@ -46,8 +46,8 @@ from fastworkflow import planning_commands as pc
 from fastworkflow.parameters import check
 from fastworkflow.parameters import check as one_guard
 from fastworkflow import workflow_agent
-from fastworkflow.utils import argument_checks
-from fastworkflow.utils.signatures import INVALID_INT_VALUE, NOT_FOUND
+from fastworkflow.parameters import argument_checks
+from fastworkflow.parameters.signatures import INVALID_INT_VALUE, NOT_FOUND
 from tests.test_planning_command_argument_screens import TRANSFER_LOAN
 from tests.test_typed_call_strictness import ACCOUNTS, CORPUS
 
@@ -510,7 +510,7 @@ def test_the_checkers_agree_except_on_a_listed_difference(commands, case):
     if case.difference is None:
         assert planning == execution, (
             f"The argument checkers disagree on {shown}. Align the checkers (one rule in "
-            f"fastworkflow/utils/argument_checks.py, both paths calling it), or, by an explicit decision, add a "
+            f"fastworkflow/parameters/argument_checks.py, both paths calling it), or, by an explicit decision, add a "
             f"documented entry to DIFFERENCES in this file and tag the case with it (fix-48np.2's notes).")
         return
     difference = DIFFERENCES[case.difference]

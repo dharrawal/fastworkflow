@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from fastworkflow.utils.signatures import InputForParamExtraction
+from fastworkflow.parameters.signatures import InputForParamExtraction
 from tests.conftest import script_matcher
 from tests.test_parameter_loop import HOST, no_agent, _offline  # noqa: F401
 from tests.test_round1_gate import gated  # noqa: F401

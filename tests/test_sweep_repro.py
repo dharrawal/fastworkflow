@@ -40,7 +40,7 @@ def _validated(value: str, text: str, command_name: str = "find_application"):
     since bd fix-qoyz the written-in-the-request check is made only on a field marked ``copied_from_command_text``, by
     the one guard (``planning_commands.option_command`` -> ``check_plan``), which reads the text with a leading
     own-command word stripped (``fill.without_own_command_word``). ``(is_valid, message, refused field names)``."""
-    from fastworkflow.utils.signatures import InputForParamExtraction
+    from fastworkflow.parameters.signatures import InputForParamExtraction
 
     step = InputForParamExtraction(command=text, input_for_param_extraction_class=None)
     is_valid, message, _suggestions, fields = step.validate_parameters(None, command_name, _Find(query=value))

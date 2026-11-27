@@ -47,8 +47,8 @@ from pydantic import BaseModel
 
 import fastworkflow
 from fastworkflow.parameters import check as one_guard
-from fastworkflow.utils.input_validation import set_field_unvalidated
-from fastworkflow.utils.signatures import NOT_FOUND, not_given_value
+from fastworkflow.parameters.input_validation import set_field_unvalidated
+from fastworkflow.parameters.signatures import NOT_FOUND, not_given_value
 
 #: The switch. On unless set to off, 0 or false (case-insensitive), like the other extraction guards.
 ARGUMENT_CHECKS_ENV_VAR = "FW_EXTRACTION_ARGUMENT_CHECKS"

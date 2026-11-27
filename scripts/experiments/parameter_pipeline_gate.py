@@ -170,7 +170,7 @@ def _first_pass(app, row, counter):
 
 def _install_snapshot():
     import copy
-    from fastworkflow.utils.signatures import InputForParamExtraction
+    from fastworkflow.parameters.signatures import InputForParamExtraction
 
     original = InputForParamExtraction.validate_parameters
 
@@ -203,9 +203,9 @@ def _second_pass(app, row, first, counter):
     from fastworkflow import ModuleType
     from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import (
         ExtractedArguments, extraction_of)
-    from fastworkflow.utils import argument_checks
-    from fastworkflow.utils.signatures import InputForParamExtraction
-    from fastworkflow.utils.signatures import _planning_command_of as planning_of
+    from fastworkflow.parameters import argument_checks
+    from fastworkflow.parameters.signatures import InputForParamExtraction
+    from fastworkflow.parameters.signatures import _planning_command_of as planning_of
 
     folder = app.folderpath
     command, text = row["command"], row["text"]
@@ -234,7 +234,7 @@ def _second_pass(app, row, first, counter):
 
 
 def _is_planning(app, command) -> bool:
-    from fastworkflow.utils.signatures import _planning_command_of as planning_of
+    from fastworkflow.parameters.signatures import _planning_command_of as planning_of
     return planning_of(app, command) is not None
 
 
@@ -428,7 +428,7 @@ def cmd_score(args) -> int:
     counter = Counter()
     with tempfile.TemporaryDirectory(prefix="parameter_pipeline_gate_") as scratch:
         apps, model = _setup(Path(scratch))
-        from fastworkflow.utils.signatures import InputForParamExtraction
+        from fastworkflow.parameters.signatures import InputForParamExtraction
 
         original = InputForParamExtraction.extract_parameters
 
@@ -439,7 +439,7 @@ def cmd_score(args) -> int:
         InputForParamExtraction.extract_parameters = counted
         validate_original = _install_snapshot()
         import dspy
-        from fastworkflow.utils import signatures
+        from fastworkflow.parameters import signatures
 
         STATS.reset()
         lm_call_original = dspy.BaseLM.__call__

@@ -21,7 +21,7 @@ from fastworkflow._workflows.command_metadata_extraction.parameter_extraction im
     ParameterExtraction,
 )
 from fastworkflow import command_executor as command_executor_module
-from fastworkflow.utils.signatures import InputForParamExtraction
+from fastworkflow.parameters.signatures import InputForParamExtraction
 from fastworkflow.command_executor import (
     CommandExecutor,
     _resolve_planning_command_name,

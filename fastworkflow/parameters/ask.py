@@ -145,7 +145,7 @@ def word(extraction: Any = None, *, form: str = FORM_REFUSAL, audience: str = HU
     from fastworkflow import planning_commands
 
     if refusal is None:
-        from fastworkflow import parameter_clarification
+        from fastworkflow.parameters import parameter_clarification
 
         refusal = parameter_clarification.refusal_from_gaps(extraction, values or {})
     text = with_left_empty(f"{retry}{_refusal_text(command, refusal)}", left_empty)

@@ -25,7 +25,7 @@ from fastworkflow.command_directory import CommandDirectory, get_cached_command_
 from fastworkflow.command_metadata_api import CommandMetadataAPI
 from fastworkflow.command_routing import RoutingRegistry
 from fastworkflow.planning_phases import fill_output
-from fastworkflow.utils.signatures import InputForParamExtraction, not_given_value, parameters_with_unfilled
+from fastworkflow.parameters.signatures import InputForParamExtraction, not_given_value, parameters_with_unfilled
 from tests.context_declarations import declare_inherits
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

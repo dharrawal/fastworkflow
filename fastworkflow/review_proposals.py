@@ -1138,7 +1138,7 @@ def _producers(workflow, means: Means, earlier: list[SubTask]) -> dict[str, int]
 def _given(info: Any, value: Any) -> bool:
     from pydantic_core import PydanticUndefined
 
-    from fastworkflow.utils.signatures import NOT_FOUND
+    from fastworkflow.parameters.signatures import NOT_FOUND
 
     if value is None or (isinstance(value, str) and value.strip() in ("", NOT_FOUND, "None")):
         return False

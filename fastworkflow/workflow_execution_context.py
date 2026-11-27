@@ -51,7 +51,7 @@ from fastworkflow.observability.execution_recorder import ExecutionRecorder, rec
 from fastworkflow.turn import TurnResult, TurnStatus, mint_turn_key
 from fastworkflow.utils.logging import logger
 from fastworkflow.utils import dspy_logger, dspy_utils
-from fastworkflow.utils.input_validation import plain_facts, stored_value, tagged_facts
+from fastworkflow.parameters.input_validation import plain_facts, stored_value, tagged_facts
 from fastworkflow.utils.react import AskUserSuspend, NoSuspendedAgentStateError
 
 #: A sub-task that hits the ReAct step cap is continued by a fresh executor at most this many times.
@@ -1103,7 +1103,7 @@ class WorkflowExecutionContext:
         (which command, its values) is a child of that part's span; a question of the run (an agent's, a decision
         step's, an approval's, a running part's values) is a child of the run part it was asked for; any other is a
         child of the open stage, else of the turn. Kept with the turn (``_turn_questions``), so the close in a later process has the same parent."""
-        from fastworkflow import parameter_clarification
+        from fastworkflow.parameters import parameter_clarification
 
         held = self._waiting
         kind = self._QUESTION_KINDS.get(held.kind, "agent") if held is not None else "agent"
@@ -3376,7 +3376,8 @@ class WorkflowExecutionContext:
         (``resolution.take_reply``) and the resolution carries on: the next question, or the review, or the run. A
         question a running part put (a refused typed call, ``after`` ``resume_part``) resumes that part
         (``_resume_parameter_loop_unlistened``)."""
-        from fastworkflow import parameter_clarification, turn_progress
+        from fastworkflow.parameters import parameter_clarification
+        from fastworkflow import turn_progress
         from fastworkflow._workflows.plan_metadata_extraction import resolution
 
         with turn_progress.bound(self):
@@ -4465,7 +4466,7 @@ class WorkflowExecutionContext:
         The agent holds a minimal suspended state, so the suspension is kept, restored and resumed as an ask_user
         question is."""
         if waited:
-            from fastworkflow import parameter_clarification
+            from fastworkflow.parameters import parameter_clarification
 
             question = parameter_clarification.wait_question(decision["question"])
         else:
@@ -4554,7 +4555,7 @@ class WorkflowExecutionContext:
         return "go", {"number": decision["number"], "text": text}
 
     # ------------------------------------------------------------------
-    # The parameter question of a running part (fix-yu3l.4, fastworkflow/parameter_clarification.py)
+    # The parameter question of a running part (fix-yu3l.4, fastworkflow/parameters/parameter_clarification.py)
     # ------------------------------------------------------------------
     #
     # Every part of a turn that has a review is resolved before it (``resolution.step``); while the parts run nothing
@@ -4566,7 +4567,7 @@ class WorkflowExecutionContext:
     @property
     def _part_question_out(self) -> bool:
         """Whether the running part's value question is out (waiting record ``parameters``, ``after`` ``resume_part``)."""
-        from fastworkflow import parameter_clarification
+        from fastworkflow.parameters import parameter_clarification
 
         held = self._waiting
         return (self._resolution_pending and held.kind == waiting_module.KIND_PARAMETERS
@@ -4575,7 +4576,7 @@ class WorkflowExecutionContext:
     def _put_part_loop(self, loop, waited: int = 0) -> None:
         """Put the running part's value question *loop* out as the turn's one waiting record (*waited*: the requests for
         a moment in a row, see ``parameter_clarification.waited_of``)."""
-        from fastworkflow import parameter_clarification
+        from fastworkflow.parameters import parameter_clarification
 
         self._turn_port().put(parameter_clarification.waiting_record(
             loop, parameter_clarification.AFTER_RESUME_PART, loop.origin, waited=waited))
@@ -4612,7 +4613,8 @@ class WorkflowExecutionContext:
         the end hands over to differs: with an agent model the call goes to the text planner or the agent, with none the
         part ends as not run naming what is missing (``_refusal_stop_reason``).
         """
-        from fastworkflow import parameter_clarification as loops, planning_commands
+        from fastworkflow.parameters import parameter_clarification as loops
+        from fastworkflow import planning_commands
 
         if self._turn_subtask_review != "not_applicable":
             # The turn's parts were resolved at the gate: a value refused while it runs is not asked again (no agent
@@ -4639,7 +4641,8 @@ class WorkflowExecutionContext:
         return outcome.question
 
     def _resume_parameter_loop_unlistened(self, reply: str) -> fastworkflow.CommandOutput:
-        from fastworkflow import parameter_clarification as loops, planning_commands
+        from fastworkflow.parameters import parameter_clarification as loops
+        from fastworkflow import planning_commands
         from fastworkflow._workflows.plan_metadata_extraction.resolution import DIFFERENT_REQUEST_REASON
 
         loop = loops.ParameterLoop.from_state(self._waiting.payload["loop"])
@@ -4652,7 +4655,8 @@ class WorkflowExecutionContext:
             self._rerun_loop = None
 
     def _rerun_part_with_reply(self, loop, reply: str, waited: int = 0) -> fastworkflow.CommandOutput:
-        from fastworkflow import parameter_clarification as loops, planning_commands
+        from fastworkflow.parameters import parameter_clarification as loops
+        from fastworkflow import planning_commands
         from fastworkflow._workflows.plan_metadata_extraction.resolution import DIFFERENT_REQUEST_REASON
 
         message = self._suspended_message()

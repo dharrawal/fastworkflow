@@ -22,9 +22,9 @@ import pytest
 
 import fastworkflow
 from fastworkflow import no_agent_mode
-from fastworkflow import parameter_clarification as pcl
+from fastworkflow.parameters import parameter_clarification as pcl
 from fastworkflow import planning_commands as pc
-from fastworkflow.parameter_clarification import Extraction
+from fastworkflow.parameters.parameter_clarification import Extraction
 from fastworkflow.parameters import ask, read
 from tests import parameter_ask_read_corpus as corpus
 from tests import parameter_check_corpus as check_corpus

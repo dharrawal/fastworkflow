@@ -8,7 +8,7 @@ import json
 import pytest
 
 from fastworkflow import intent_loop
-from fastworkflow import parameter_clarification
+from fastworkflow.parameters import parameter_clarification
 from tests.test_parameter_form_reply_contract import PARTIAL, session  # noqa: F401
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401
 

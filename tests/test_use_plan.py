@@ -111,7 +111,7 @@ class _ByReply(ScriptedExtractor):
 
 
 def extractor_finds_title_only_in_a_reply(monkeypatch) -> ScriptedExtractor:
-    from fastworkflow.utils import signatures
+    from fastworkflow.parameters import signatures
 
     lm = _ByReply([])
     original = signatures.dspy_utils.get_lm

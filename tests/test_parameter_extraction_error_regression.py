@@ -2,7 +2,7 @@ import pytest
 import os
 import fastworkflow
 from fastworkflow import Workflow
-from fastworkflow.utils.signatures import InputForParamExtraction
+from fastworkflow.parameters.signatures import InputForParamExtraction
 from fastworkflow._workflows.command_metadata_extraction._commands.wildcard import ParameterExtraction
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import NOT_FOUND, park
 from pydantic import BaseModel, Field

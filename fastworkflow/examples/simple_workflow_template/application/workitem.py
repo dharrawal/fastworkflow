@@ -718,7 +718,7 @@ class WorkItem:
             1.  Exact match on ``field`` → return those children.
             2.  If no exact match, perform a fuzzy search on the list of
                 existing values for that ``field`` using
-                :py:meth:`fastworkflow.utils.signatures.DatabaseValidator.fuzzy_match`.
+                :py:meth:`fastworkflow.parameters.signatures.DatabaseValidator.fuzzy_match`.
             3.  Return children whose field value equals the fuzzy result(s).
 
         Notes
@@ -733,7 +733,7 @@ class WorkItem:
             ``Type[field=value]`` syntax.
         """
         # Lazy import to avoid circulars / heavy deps at module load time.
-        from fastworkflow.utils.signatures import DatabaseValidator  # noqa: WPS433 – local import is intentional
+        from fastworkflow.parameters.signatures import DatabaseValidator  # noqa: WPS433 – local import is intentional
 
         # Accept leading '/' for parity with other helpers
         query = relative_matching_path.lstrip("/")

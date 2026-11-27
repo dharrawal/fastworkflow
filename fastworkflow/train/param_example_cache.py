@@ -7,7 +7,7 @@ R6 made the INTENT training data reproducible: two runs of `examples/hello_world
 `training_provenance.json` byte-identical. It covers exactly one of the two LLM calls
 that training makes.
 
-The other one is `fastworkflow.utils.generate_param_examples.generate_dspy_examples`.
+The other one is `fastworkflow.train.generate_param_examples.generate_dspy_examples`.
 It asks an LLM for ~15 `dspy.Example(...)` lines per parameterised command and writes
 them to `___command_info/<command>_param_labeled.json`, which the runtime loads as
 few-shot examples for parameter extraction. It runs at temperature 0.9, it takes no

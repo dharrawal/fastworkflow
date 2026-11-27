@@ -14,7 +14,7 @@ from fastworkflow import Action, CommandOutput, ChatSession
 from fastworkflow.observability.execution_recorder import record_execution, recorder_for
 from fastworkflow import ModuleType
 from fastworkflow.utils.python_utils import legacy_module_names
-from fastworkflow.utils.signatures import InputForParamExtraction, parameters_with_unfilled
+from fastworkflow.parameters.signatures import InputForParamExtraction, parameters_with_unfilled
 from pathlib import Path
 from fastworkflow.command_routing import RoutingDefinition
 from typing import Optional

@@ -21,8 +21,8 @@ import pytest
 from pydantic import BaseModel, Field
 
 import fastworkflow
-from fastworkflow.utils import signatures
-from fastworkflow.utils.signatures import InputForParamExtraction
+from fastworkflow.parameters import signatures
+from fastworkflow.parameters.signatures import InputForParamExtraction
 
 WORKFLOW_PATH = str(Path(__file__).parent.joinpath("planning_tutorial_workflow").resolve())
 

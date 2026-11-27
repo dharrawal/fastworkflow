@@ -17,7 +17,7 @@ from dotenv import dotenv_values
 from pydantic import BaseModel, Field
 
 from fastworkflow import planning_commands as pc
-from fastworkflow.utils.signatures import InputForParamExtraction
+from fastworkflow.parameters.signatures import InputForParamExtraction
 
 ROOT = Path(__file__).resolve().parent.parent
 

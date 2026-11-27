@@ -23,7 +23,7 @@ from fastworkflow.observability.decision_signals import slot_binding_source  # n
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import slot_binding_uncertainty
 from fastworkflow import planning_commands as pc
 from fastworkflow.planning_commands import PlanningCommandInputError
-from fastworkflow.utils.signatures import InputForParamExtraction
+from fastworkflow.parameters.signatures import InputForParamExtraction
 from fastworkflow import workflow_agent
 
 from tests.test_global_first_lookup import messaging_on_a_user  # noqa: F401 - fixture (a copy of messaging_app_4)

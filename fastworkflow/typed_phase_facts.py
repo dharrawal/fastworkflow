@@ -12,7 +12,7 @@ from typing import Any, Iterable, Mapping, Optional, Sequence, Union, get_args, 
 
 from pydantic import BaseModel, ValidationError
 
-from fastworkflow.utils.input_validation import stored_value
+from fastworkflow.parameters.input_validation import stored_value
 from fastworkflow.observation_offloading.facts import (
     FactsError,
     MissingFactError,
@@ -23,7 +23,7 @@ from fastworkflow.observation_offloading.facts import (
     _page_key,
     _scalar_of_pages,
 )
-from fastworkflow.field_options import FROM_COMMAND_OUTPUT
+from fastworkflow.parameters.field_options import FROM_COMMAND_OUTPUT
 from fastworkflow.planning_phases import FULL_LIST_PHRASES
 from fastworkflow.utils.python_utils import type_text
 

@@ -15,10 +15,11 @@ from types import SimpleNamespace
 import pytest
 
 import fastworkflow
-from fastworkflow import intent_loop, parameter_clarification as loops, planning_commands as pc
+from fastworkflow import intent_loop, planning_commands as pc
+from fastworkflow.parameters import parameter_clarification as loops
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import (
     extraction_of, model_of, park, round_ordinal)
-from fastworkflow.utils.signatures import INVALID_FLOAT_VALUE, NOT_FOUND
+from fastworkflow.parameters.signatures import INVALID_FLOAT_VALUE, NOT_FOUND
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 
 HELLO = str(Path(__file__).parent.joinpath("hello_world_workflow").resolve())

@@ -2225,7 +2225,7 @@ def check_kind_list_warnings(workflow_folder: str) -> list[str]:
     ``workflow_vocabulary.description_kind_options``. A fixed set of kinds is a ``Literal``. Nothing here
     changes extraction or the vocabulary."""
     from fastworkflow.command_directory import CommandDirectory
-    from fastworkflow.utils import workflow_vocabulary as wv
+    from fastworkflow.parameters import workflow_vocabulary as wv
 
     folder = os.path.abspath(workflow_folder)
     try:

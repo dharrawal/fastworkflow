@@ -18,7 +18,7 @@ from fastworkflow.utils.fuzzy_match import (
     normalize_text,
     normalized_levenshtein_distance,
 )
-from fastworkflow.utils.signatures import DatabaseValidator
+from fastworkflow.parameters.signatures import DatabaseValidator
 
 PEOPLE = ["Aaron Garrison", "Barry Jones"]
 

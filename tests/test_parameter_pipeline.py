@@ -118,7 +118,7 @@ def test_the_forms_are_pure_and_the_class_keeps_its_old_names():
 # ---------------------------------------------------------------- 2. fill
 
 def test_fill_reads_the_text_with_the_note_after_it_and_puts_the_text_back(environment):
-    from fastworkflow.utils.signatures import InputForParamExtraction
+    from fastworkflow.parameters.signatures import InputForParamExtraction
 
     case = {"answers": [corpus.A(query="Ann Lee"), corpus.A(query="Ann Lee")]}
     environment.begin(case)
@@ -338,7 +338,7 @@ def test_the_one_rule_for_the_retry_refused_is_read_once_more_missing_is_not(env
 
 def test_the_note_of_the_one_retry_is_live(environment, table, monkeypatch):
     """Both kinds of command read the same note after the request on the second pass."""
-    from fastworkflow.utils import argument_checks
+    from fastworkflow.parameters import argument_checks
 
     moved = _rerun(environment, table, ["impl-fm-guard-then-clean", "llm-fm-guard-then-clean", "args-ab-invented-then-clean"],
                    monkeypatch, lambda mp: mp.setattr(argument_checks, "REFUSED_EXTRACTION_NOTE",
@@ -481,7 +481,7 @@ def _record_validator_text(monkeypatch) -> list:
 
 
 def test_an_execution_validator_sees_the_request_and_every_reply(environment, monkeypatch):
-    from fastworkflow import parameter_clarification as loops
+    from fastworkflow.parameters import parameter_clarification as loops
     from fastworkflow._workflows.command_metadata_extraction import parameter_extraction as pe
 
     seen = _record_validator_text(monkeypatch)
@@ -501,7 +501,7 @@ def test_an_execution_validator_sees_the_request_and_every_reply(environment, mo
 
 
 def test_a_planning_validator_sees_the_request_as_it_was_given_which_is_the_loops_text(environment, monkeypatch):
-    from fastworkflow import parameter_clarification as loops
+    from fastworkflow.parameters import parameter_clarification as loops
 
     seen = _record_validator_text(monkeypatch)
     loop = loops.ParameterLoop(command="ledger_pc", request_text="write a line for Ann Lee", replies=["3 items"])

@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 import fastworkflow
 from fastworkflow import FieldOptions, UiOptions
 from fastworkflow import planning_commands as pc
-from fastworkflow.field_options import OPTION_KEYS, ConfirmsOptions, CopiedOptions, RecordNamedOptions, UiOptions
+from fastworkflow.parameters.field_options import OPTION_KEYS, ConfirmsOptions, CopiedOptions, RecordNamedOptions, UiOptions
 from fastworkflow.parameters import check as one_guard
 
 

@@ -372,7 +372,7 @@ def call_scope(call_id: str, *, command_name: Optional[str] = None) -> Iterator[
 # carries no such key.
 #
 # v36: fw.nlu.param_extraction v10 (fix-qjf4) -- the argument checks of an LLM extraction
-# (``fastworkflow.utils.argument_checks``): `argument_check_refusals` (the values the first extraction
+# (``fastworkflow.parameters.argument_checks``): `argument_check_refusals` (the values the first extraction
 # gave that were refused), `argument_check_retry` (the extractor was asked once more with the refusal),
 # `argument_check_refusals_final` (the values still refused after it, treated as not given) and
 # `argument_check_respelled` ({field: value}: the request's or the declared spelling taken). A span
@@ -1084,7 +1084,7 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
         # recorded the hook's verdict under the same key.
         # v10 (fix-qjf4): `argument_check_refusals`, `argument_check_retry`,
         # `argument_check_refusals_final` and `argument_check_respelled` record the argument checks of
-        # an LLM extraction (fastworkflow.utils.argument_checks): the refused values ("name='value'
+        # an LLM extraction (fastworkflow.parameters.argument_checks): the refused values ("name='value'
         # why"), the one retry with the refusal appended, what was still refused after it (treated as
         # not given), and {field: value} for a value that took the request's or the declared spelling.
         # Absent on earlier versions.

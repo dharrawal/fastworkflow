@@ -238,7 +238,7 @@ class RoutingDefinition(BaseModel):
                 self._check_paged_output(command_name, input_model, str(module_file_path))
             # the retired db_lookup is a load error that names its replacement, a model validator on Input; so is the
             # removed Signature.validate_extracted_parameters (spec 3.1), which names the same replacement
-            from fastworkflow.utils.signatures import reject_retired_db_lookup, removed_validate_hook_message
+            from fastworkflow.parameters.signatures import reject_retired_db_lookup, removed_validate_hook_message
             reject_retired_db_lookup(
                 cls_obj, input_model if isinstance(input_model, type) else None,
                 f"{module_file_path}: {command_name}")
@@ -247,7 +247,7 @@ class RoutingDefinition(BaseModel):
             # an Input validator that reads info.context says what it needs when built with no context
             if isinstance(input_model, type) and issubclass(input_model, BaseModel):
                 from fastworkflow.planning import reserved_input_name_message
-                from fastworkflow.utils.input_validation import guard_input_validators
+                from fastworkflow.parameters.input_validation import guard_input_validators
                 if message := reserved_input_name_message(input_model, f"{module_file_path}: {command_name}"):
                     raise ValueError(message)
                 guard_input_validators(input_model, f"{module_file_path}: {command_name}")

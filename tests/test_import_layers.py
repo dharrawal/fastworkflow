@@ -51,9 +51,9 @@ NOT_CHECKED = ("examples", "_workflows", "skills_for_coding_fastworkflows")
 KNOWN_EXCEPTIONS = {
     ("fastworkflow.workflow_execution_context", "fastworkflow.utils.react"):
         "AskUserSuspend and NoSuspendedAgentStateError move out of the ReAct module (step 7)",
-    ("fastworkflow.utils.signatures", "fastworkflow.model_pipeline_training"):
+    ("fastworkflow.parameters.signatures", "fastworkflow.model_pipeline_training"):
         "CommandRouter and its path helpers move to intent/ (step 7)",
-    ("fastworkflow.utils.signatures", "fastworkflow.planning_commands"):
+    ("fastworkflow.parameters.signatures", "fastworkflow.planning_commands"):
         "the planning-argument gap code moves into parameters/ (later)",
     ("fastworkflow.observation_offloading.facts", "fastworkflow.plan_frame"):
         "runs_outside_ranges moves into observation_offloading (step 7)",

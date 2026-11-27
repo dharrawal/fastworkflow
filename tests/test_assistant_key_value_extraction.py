@@ -17,7 +17,7 @@ import fastworkflow
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import (
     ParameterExtraction,
 )
-from fastworkflow.utils.signatures import InputForParamExtraction
+from fastworkflow.parameters.signatures import InputForParamExtraction
 
 FOLDER = str(Path(__file__).parent.joinpath("plain_required_workflow").resolve())
 RECORD = "record_values"

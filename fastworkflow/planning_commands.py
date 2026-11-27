@@ -239,15 +239,15 @@ from pydantic import BaseModel
 from fastworkflow.observability import tracing
 from fastworkflow.command_context_model import CommandContextModel
 from fastworkflow.command_directory import CommandDirectory, compute_commands_source_fingerprint, raised_in_helper
-from fastworkflow.field_options import (
+from fastworkflow.parameters.field_options import (
     CLASSIFIER_CONFIRMS, CLASSIFIER_DECIDES, COMMAND_TEXT_AFTER_COMMAND_NAME,
     COPIED_FROM_COMMAND_TEXT, EXAMPLES_BY, FROM_COMMAND_OUTPUT, OPTION_KEYS, RECORD_NAMED_IN_COMMAND_TEXT, UI)
-from fastworkflow.parameter_clarification import Extraction
+from fastworkflow.parameters.parameter_clarification import Extraction
 from fastworkflow.planning_command_json_schema_internal import (
     HAND_WRITTEN_AVAILABLE_FROM_KEY as _HAND_WRITTEN_AVAILABLE_FROM_KEY,
     PLANNING_COMMAND_JSON_SCHEMA_EXTRA_INTERNAL_KEYS as _PLANNING_COMMAND_JSON_SCHEMA_EXTRA_INTERNAL_KEYS,
 )
-from fastworkflow.utils.workflow_vocabulary import (
+from fastworkflow.parameters.workflow_vocabulary import (
     WorkflowVocabulary, load_workflow_vocabulary)
 from fastworkflow.observation_offloading.finish_check import (
     KIND_COMMAND,
@@ -706,7 +706,7 @@ def _retired_option_error(where: str, name: str, extra) -> None:
     """The load error of a retired spelling among a field's ``json_schema_extra`` *extra*, naming its replacement."""
     check_removed_field_keys(where, name, extra)
     if "db_lookup" in extra:
-        from fastworkflow.utils.signatures import _RETIRED_DB_LOOKUP
+        from fastworkflow.parameters.signatures import _RETIRED_DB_LOOKUP
 
         raise _field_error(where, name, _RETIRED_DB_LOOKUP)
     for key in RETIRED_OPTIONS:
@@ -2139,7 +2139,7 @@ def planning_command_from_parts(name: str, signature, path: str, *, steps_fn: Ca
         raise PlanningCommandFormatError(f"{path}: Signature.Input must be a pydantic BaseModel")
     if message := planning_api.reserved_input_name_message(input_model, path):
         raise PlanningCommandFormatError(message)
-    from fastworkflow.utils.input_validation import guard_input_validators
+    from fastworkflow.parameters.input_validation import guard_input_validators
     guard_input_validators(input_model, path)
     output_model = getattr(signature, "Output", None)
     declared_output = (inspect.isclass(output_model) and issubclass(output_model, BaseModel))
@@ -2148,7 +2148,7 @@ def planning_command_from_parts(name: str, signature, path: str, *, steps_fn: Ca
     utterances = getattr(signature, "plain_utterances", ())
     if isinstance(utterances, str) or not all(isinstance(u, str) for u in utterances):
         raise PlanningCommandFormatError(f"{path}: plain_utterances must be a list of str")
-    from fastworkflow.utils.signatures import reject_retired_db_lookup, removed_validate_hook_message
+    from fastworkflow.parameters.signatures import reject_retired_db_lookup, removed_validate_hook_message
     try:
         reject_retired_db_lookup(signature, input_model, path)
     except ValueError as error:     # one command's mistake: it does not load, the rest does
@@ -2909,7 +2909,7 @@ def not_given_default_problems(input_model: Any) -> list[str]:
     ``INVALID_INT_VALUE`` / ``INVALID_FLOAT_VALUE`` for a number), one problem each, on both kinds of command. The
     marker is how the framework holds a value nobody gave, so such a default could never be told from a missing
     value: it was required at one check and optional at others (and written into a planning command's steps)."""
-    from fastworkflow.utils.signatures import INVALID_FLOAT_VALUE, INVALID_INT_VALUE, NOT_FOUND
+    from fastworkflow.parameters.signatures import INVALID_FLOAT_VALUE, INVALID_INT_VALUE, NOT_FOUND
 
     fields = getattr(input_model, "model_fields", None) if inspect.isclass(input_model) else None
     problems = []
@@ -3928,7 +3928,7 @@ def _screen(command: PlanningCommandCommand, raw: dict, request: str) -> tuple[d
     screen (``utils.signatures.screen_parameter_values``): quotes and angle brackets around a
     value removed, a made-up number replaced by the default; ``refused`` says why a placeholder
     or an out-of-range number is refused."""
-    from fastworkflow.utils.signatures import screen_parameter_values
+    from fastworkflow.parameters.signatures import screen_parameter_values
 
     names = [p.name for p in command.params if p.type in ("str", "int") and raw.get(p.name) is not None]
     if not names or command.input_model is None:
@@ -4620,7 +4620,7 @@ def extracted_arguments(command: PlanningCommandCommand, query: str, workflow=No
 def _given_or_none(value):
     """*value*, or None for the extractor's "not given" text (``NOT_FOUND``, ``<UNKNOWN>``): no value, so the
     guards take the default or refuse a required argument."""
-    from fastworkflow.utils.signatures import NOT_FOUND, is_unknown_marker
+    from fastworkflow.parameters.signatures import NOT_FOUND, is_unknown_marker
 
     if isinstance(value, str) and (value.strip() == NOT_FOUND or is_unknown_marker(value)):
         return None
@@ -4759,7 +4759,7 @@ def typed_planning_call(command: PlanningCommandCommand, request: str, available
         return no_argument_call(command)
     import dspy
     from fastworkflow.parameters import pipeline
-    from fastworkflow.utils.argument_checks import REFUSED_EXTRACTION_NOTE
+    from fastworkflow.parameters.argument_checks import REFUSED_EXTRACTION_NOTE
 
     seen: dict = {"verdicts": None, "reset": {}, "unparsed": []}
 
@@ -4840,7 +4840,7 @@ def reextracted_arguments(command: PlanningCommandCommand, request: str, observa
     same checks. Returns None when the checks refuse them or they equal *args* (the call is not restarted).
     Raises what the extractor raises."""
     from fastworkflow.parameters import pipeline
-    from fastworkflow.utils.argument_checks import PHASE_FAILED_EXTRACTION_NOTE
+    from fastworkflow.parameters.argument_checks import PHASE_FAILED_EXTRACTION_NOTE
 
     def fill_text(note: str, attempt: int) -> dict:
         return extracted_arguments(command, request, workflow, note=note)

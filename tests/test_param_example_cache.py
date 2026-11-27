@@ -65,8 +65,8 @@ from fastworkflow.train.utterance_cache import (
     callable_identity,
     source_digest,
 )
-from fastworkflow.utils import generate_param_examples
-from fastworkflow.utils.generate_param_examples import (
+from fastworkflow.train import generate_param_examples
+from fastworkflow.train.generate_param_examples import (
     DSPY_EXAMPLE_TEMPERATURE,
     _UNDIGESTED_FUNCTIONS,
     _digested_functions,

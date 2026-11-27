@@ -161,7 +161,7 @@ def test_a_planning_command_input_validator_that_needs_the_context_says_so_witho
     # guard is applied before that, at the load point (planning_command_from_parts).
     with pytest.raises(planning_commands.PlanningCommandFormatError):
         planning_commands.command_from_module("guarded", module, "_commands/guarded.py")
-    from fastworkflow.utils.input_validation import _CONTEXT_GUARD
+    from fastworkflow.parameters.input_validation import _CONTEXT_GUARD
 
     validators = GuardedInput.__pydantic_decorators__.model_validators
     assert validators and all(getattr(dec.func, _CONTEXT_GUARD, False) for dec in validators.values())

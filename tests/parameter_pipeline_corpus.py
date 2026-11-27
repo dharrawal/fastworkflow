@@ -279,7 +279,7 @@ class Environment:
 
         import fastworkflow
         from fastworkflow import workflow_agent
-        from fastworkflow.utils import signatures
+        from fastworkflow.parameters import signatures
 
         fastworkflow.init({"FASTWORKFLOW_STATE_ROOT": str(self.directory / "workflow_contexts")})
         fastworkflow.RoutingRegistry.clear_registry()
@@ -395,7 +395,8 @@ def _output(output) -> dict:
 def _observed_context(context: dict) -> dict:
     """The CME context's keys, and the parameter loop of the turn's waiting record (the pending question) as the loop's
     own state, under ``parameter_loop``."""
-    from fastworkflow import parameter_clarification, waiting
+    from fastworkflow.parameters import parameter_clarification
+    from fastworkflow import waiting
 
     shown = {key: value for key, value in context.items() if key != waiting.PORT_KEY}
     if (loop := parameter_clarification.pending(context)) is not None:
@@ -428,7 +429,7 @@ def run_impl(env: Environment, case: dict) -> dict:
 def run_llm(env: Environment, case: dict) -> dict:
     """``ParameterExtraction._llm_extract`` on its own."""
     from fastworkflow._workflows.command_metadata_extraction import parameter_extraction as pe
-    from fastworkflow.utils.signatures import InputForParamExtraction
+    from fastworkflow.parameters.signatures import InputForParamExtraction
 
     workflow = env.workflow(case)
     name, text = case["command"], case["text"]

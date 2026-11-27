@@ -13,7 +13,7 @@ from fastworkflow import planning_commands as pc
 from fastworkflow import workflow_agent
 from fastworkflow.parameters.validate import (
     RAISED, REFUSED, Refusal, Validated, ValidatorReturnError, validate)
-from fastworkflow.utils.signatures import InputForParamExtraction
+from fastworkflow.parameters.signatures import InputForParamExtraction
 from tests.test_input_model_validators import PLANNING
 from tests.test_planning_command_files import _write
 

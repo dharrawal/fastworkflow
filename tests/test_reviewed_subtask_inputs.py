@@ -22,7 +22,7 @@ import fastworkflow
 from fastworkflow import review_proposals
 from fastworkflow.review_proposals import Means, SubTask, SubTaskInput
 from fastworkflow.turn import TurnStatus
-from fastworkflow.utils import signatures
+from fastworkflow.parameters import signatures
 from tests.conftest import script_matcher
 from tests.test_approval_binding import annotated_library, no_live_model, todo  # noqa: F401 - the fixtures
 from tests.test_round1_gate import EMMA, JOKE, _marker, _open_review, _split_into, gated  # noqa: F401

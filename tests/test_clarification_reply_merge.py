@@ -24,8 +24,8 @@ from fastworkflow._workflows.command_metadata_extraction.parameter_extraction im
     NOT_FOUND,
     ParameterExtraction,
 )
-from fastworkflow.utils import signatures
-from fastworkflow.utils.signatures import INVALID_INT_VALUE, InputForParamExtraction
+from fastworkflow.parameters import signatures
+from fastworkflow.parameters.signatures import INVALID_INT_VALUE, InputForParamExtraction
 
 COMMAND = "People/find_person"
 

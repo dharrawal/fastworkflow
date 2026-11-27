@@ -1,6 +1,6 @@
 """A planning command's `Literal` input takes its member values, as a routed enum does.
 
-The defect: `InputForParamExtraction.validate_parameters` (fastworkflow/utils/signatures.py)
+The defect: `InputForParamExtraction.validate_parameters` (fastworkflow/parameters/signatures.py)
 checks each field's value against its annotation's concrete types. It handles `Enum`
 subclasses, but a skill's `Literal["person", "login", ...]` input is `typing.Literal`, which
 is neither a type nor an Enum, so no candidate type matches and every value is rejected,
@@ -26,7 +26,7 @@ from fastworkflow import planning_commands
 from fastworkflow._workflows.command_metadata_extraction import intent_detection
 from fastworkflow.command_executor import CommandExecutor
 from fastworkflow.command_routing import RoutingRegistry
-from fastworkflow.utils.signatures import InputForParamExtraction
+from fastworkflow.parameters.signatures import InputForParamExtraction
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 from tests.test_intent_detection_foreign_context import (
     _refusing_router as refusing_router,

@@ -15,8 +15,8 @@ from pydantic import BaseModel, Field
 
 import fastworkflow
 from fastworkflow import workflow_agent
-from fastworkflow.utils import signatures
-from fastworkflow.utils.signatures import (
+from fastworkflow.parameters import signatures
+from fastworkflow.parameters.signatures import (
     FIELD_GIVEN_THRESHOLD, NOT_FOUND, InputForParamExtraction, fields_not_given,
     reset_to_not_given)
 

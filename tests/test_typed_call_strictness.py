@@ -27,8 +27,8 @@ from dspy.utils import DummyLM
 import fastworkflow
 from fastworkflow import planning_commands as pc
 from fastworkflow import workflow_agent
-from fastworkflow.utils import signatures
-from fastworkflow.utils.signatures import NOT_FOUND
+from fastworkflow.parameters import signatures
+from fastworkflow.parameters.signatures import NOT_FOUND
 from tests.test_planning_command_argument_screens import TRANSFER_LOAN
 
 TUTORIAL = Path(__file__).resolve().parent / "planning_tutorial_workflow"

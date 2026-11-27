@@ -21,7 +21,7 @@ import pytest
 import fastworkflow
 from fastworkflow import planning_commands as sc
 from fastworkflow import workflow_agent
-from fastworkflow.utils.signatures import InputForParamExtraction
+from fastworkflow.parameters.signatures import InputForParamExtraction
 
 TUTORIAL = Path(__file__).resolve().parent / "planning_tutorial_workflow"
 

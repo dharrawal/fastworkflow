@@ -10,7 +10,7 @@ import pytest
 from pydantic import BaseModel, Field, model_validator
 
 import fastworkflow
-from fastworkflow.utils import signatures
+from fastworkflow.parameters import signatures
 
 
 def _with_validator(base, check):
@@ -22,7 +22,7 @@ def _with_validator(base, check):
             check(self)
             return self
     return Checked
-from fastworkflow.utils.signatures import (
+from fastworkflow.parameters.signatures import (
     InputForParamExtraction,
     classify_bracketed_value,
 )

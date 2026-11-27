@@ -17,7 +17,7 @@ import json
 import pytest
 
 from fastworkflow import review_proposals, waiting
-from fastworkflow.parameter_clarification import ParameterLoop
+from fastworkflow.parameters.parameter_clarification import ParameterLoop
 from fastworkflow._workflows.plan_metadata_extraction import resolution
 from fastworkflow.turn import TurnStatus
 from fastworkflow.workflow_execution_context import NOT_RUN_ARTIFACT
@@ -415,7 +415,7 @@ def _note_part_plan():
 
 
 def loops_retry() -> str:
-    from fastworkflow.parameter_clarification import RETRY
+    from fastworkflow.parameters.parameter_clarification import RETRY
 
     return RETRY
 

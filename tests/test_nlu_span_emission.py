@@ -169,7 +169,7 @@ class TestStructuredValidationDiagnostics:
     trained model is needed."""
 
     def _validator_for(self, workflow, command_name):
-        from fastworkflow.utils.signatures import InputForParamExtraction
+        from fastworkflow.parameters.signatures import InputForParamExtraction
 
         return InputForParamExtraction.create(workflow, command_name, "")
 

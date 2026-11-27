@@ -14,7 +14,7 @@ import inspect
 import pytest
 
 from fastworkflow.observability import tracing
-from fastworkflow.utils.signatures import InputForParamExtraction
+from fastworkflow.parameters.signatures import InputForParamExtraction
 from tests import span_tree
 from tests.conftest import script_matcher
 from tests.test_parameter_loop import _reply, HOST, no_agent, _offline, BOOK_PLAN, ABOUT_EMMA, ABOUT_DUNE  # noqa: F401

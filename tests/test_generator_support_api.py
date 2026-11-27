@@ -23,7 +23,7 @@ from fastworkflow import ModuleType, planning_commands as pc
 from fastworkflow.observability import tracing
 from fastworkflow.command_routing import RoutingRegistry
 from fastworkflow.observability import store as obs
-from fastworkflow.utils import signatures as S
+from fastworkflow.parameters import signatures as S
 
 import dspy  # noqa: E402  (after fastworkflow: litellm must be imported before dspy)
 

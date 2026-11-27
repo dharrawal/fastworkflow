@@ -38,10 +38,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from fastworkflow import no_agent_mode, parameter_clarification, waiting
+from fastworkflow import no_agent_mode, waiting
+from fastworkflow.parameters import parameter_clarification
 from fastworkflow.parameters import ask, reply as replies
 from fastworkflow.utils.logging import logger
-from fastworkflow.utils.signatures import MISSING_INFORMATION_ERRMSG
+from fastworkflow.parameters.signatures import MISSING_INFORMATION_ERRMSG
 
 from .parameter_extraction import (
     ParameterExtraction,

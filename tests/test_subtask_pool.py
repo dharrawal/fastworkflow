@@ -26,7 +26,8 @@ import fastworkflow
 from fastworkflow import review_proposals, turn_cache, turn_progress
 from fastworkflow.utils import subtask_pool
 from fastworkflow.turn_progress import ProgressEvent
-from fastworkflow.utils import dspy_logger, signatures
+from fastworkflow.utils import dspy_logger
+from fastworkflow.parameters import signatures
 from tests.test_drafted_subtask_inputs import (  # noqa: F401 - the library copy with its trained heads, and the guards
     EMMA, _framework, annotated_library, library, library_heads)
 from tests.test_planning_command_commands import RecordingTraceSink

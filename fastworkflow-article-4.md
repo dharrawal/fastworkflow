@@ -310,7 +310,7 @@ from pydantic import BaseModel, Field
 
 import fastworkflow
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
-from fastworkflow.utils.signatures import DatabaseValidator
+from fastworkflow.parameters.signatures import DatabaseValidator
 
 from ...application.chatroom import ChatRoom
 

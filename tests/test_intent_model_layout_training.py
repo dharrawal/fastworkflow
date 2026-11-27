@@ -128,7 +128,7 @@ def _rekey_parameter_examples(workflow_path: str) -> None:
     """
     from fastworkflow.train import __main__ as trainer
     from fastworkflow.train.determinism import get_training_seed
-    from fastworkflow.utils.generate_param_examples import param_example_fingerprint
+    from fastworkflow.train.generate_param_examples import param_example_fingerprint
 
     RoutingRegistry.get_definition(workflow_path, load_cached=False)
     cache = param_example_cache.ParamExampleCache(workflow_path, mode=param_example_cache.MODE_REUSE)

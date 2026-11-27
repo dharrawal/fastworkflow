@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 
 import fastworkflow
 from fastworkflow.parameters import fill
-from fastworkflow.utils import signatures
+from fastworkflow.parameters import signatures
 
 
 class Note(BaseModel):

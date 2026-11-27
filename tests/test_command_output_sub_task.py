@@ -53,7 +53,7 @@ def extraction_without_a_model(no_model_call_for_parameters, monkeypatch):
     """The seam of tests/test_command_output_framework_marker.py: the commands here take no argument (or carry their
     value in the command text), so the extraction hop returns an empty Input and no model is called (the guard it
     replaces would raise)."""
-    from fastworkflow.utils.signatures import InputForParamExtraction
+    from fastworkflow.parameters.signatures import InputForParamExtraction
 
     monkeypatch.setattr(InputForParamExtraction, "extract_parameters", lambda _self, cls, *a, **k: cls.model_construct())
 

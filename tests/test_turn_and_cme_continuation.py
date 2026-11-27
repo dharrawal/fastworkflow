@@ -18,7 +18,7 @@ import pytest
 
 import fastworkflow
 from fastworkflow import intent_loop
-from fastworkflow import parameter_clarification
+from fastworkflow.parameters import parameter_clarification
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import model_of, park
 from fastworkflow.run_fastapi_mcp import checkpoint
 from fastworkflow.session.session_state_store import SCHEMA_VERSION

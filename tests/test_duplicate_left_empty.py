@@ -25,7 +25,7 @@ from fastworkflow import planning_commands as sc
 from fastworkflow import workflow_agent
 from fastworkflow.parameters import ask
 from fastworkflow.parameters import check as one_guard
-from fastworkflow.utils.signatures import InputForParamExtraction
+from fastworkflow.parameters.signatures import InputForParamExtraction
 
 TUTORIAL = Path(__file__).resolve().parent / "planning_tutorial_workflow"
 

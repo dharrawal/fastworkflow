@@ -108,7 +108,7 @@ def validate(input_model: type, values: Mapping[str, Any], *, command_text: str,
 
     import fastworkflow
     from fastworkflow.parameters.rules import pattern_refusal
-    from fastworkflow.utils.input_validation import ValidationContext, validate_input
+    from fastworkflow.parameters.input_validation import ValidationContext, validate_input
 
     mismatched = [(name, refusal) for name, value in values.items() if name in input_model.model_fields
                   and (refusal := pattern_refusal(name, input_model.model_fields[name], value))]

@@ -30,7 +30,7 @@ import pytest
 import fastworkflow
 from fastworkflow import ModuleType
 from fastworkflow.command_executor import CommandExecutor
-from fastworkflow.utils.signatures import InputForParamExtraction
+from fastworkflow.parameters.signatures import InputForParamExtraction
 from fastworkflow.workflow_agent import _explicit_agent_command
 from fastworkflow.workflow import running_command
 

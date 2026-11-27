@@ -18,8 +18,8 @@ from dspy.utils.exceptions import LMTransportError
 import fastworkflow
 from fastworkflow import planning_commands as sc
 from fastworkflow import no_agent_mode, workflow_agent
-from fastworkflow import parameter_clarification as pcl
-from fastworkflow.parameter_clarification import Extraction, ParameterLoop
+from fastworkflow.parameters import parameter_clarification as pcl
+from fastworkflow.parameters.parameter_clarification import Extraction, ParameterLoop
 from fastworkflow.waiting import KIND_PARAMETERS, Waiting
 from fastworkflow.turn import TurnStatus
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext

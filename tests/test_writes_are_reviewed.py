@@ -25,7 +25,7 @@ from fastworkflow.approval_annotations import REQUIRED_ALWAYS, REQUIRED_UNTIL_DE
 from fastworkflow.approval_binding import Origin, Outcome
 from fastworkflow.review_engine import AWAITING, proposal_of
 from fastworkflow.turn import TurnStatus
-from fastworkflow.utils.signatures import InputForParamExtraction
+from fastworkflow.parameters.signatures import InputForParamExtraction
 from tests.test_approval_binding import (  # noqa: F401 - the real agent on a library copy, and the guards
     _COPY_IGNORE, LIBRARY, _annotate, grant_root, no_live_model, no_model_call_for_parameters, todo)
 from tests.test_parameter_loop import _offline, no_agent  # noqa: F401

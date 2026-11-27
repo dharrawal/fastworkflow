@@ -34,7 +34,7 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow import parameter_clarification
+from fastworkflow.parameters import parameter_clarification
 from fastworkflow.run_fastapi_mcp import checkpoint
 from fastworkflow.run_fastapi_mcp.turns import (
     CREDENTIAL_CONTEXT_KEY,

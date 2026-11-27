@@ -212,7 +212,7 @@ def test_the_second_pass_fixes_the_one_refused_literal_field(extract):
 def _parse(completion: dict, **annotations):
     import json
     import dspy
-    from fastworkflow.utils.signatures import _TextLiteralsAsText
+    from fastworkflow.parameters.signatures import _TextLiteralsAsText
 
     signature = dspy.Signature({"statement": (str, dspy.InputField()),
                                 **{name: (annotation, dspy.OutputField()) for name, annotation in annotations.items()}})

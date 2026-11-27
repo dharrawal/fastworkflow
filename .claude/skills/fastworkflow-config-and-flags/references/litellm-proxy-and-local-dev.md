@@ -94,7 +94,7 @@ two-file contract described in SKILL.md.
 Facts verified 2026-07-09 against v2.22.2 (commit c33b9a5).
 
 - Proxy routing logic: `sed -n '42,69p' fastworkflow/utils/dspy_utils.py`
-- signatures.py bypass: `grep -n "dspy.LM(" fastworkflow/utils/signatures.py`
+- signatures.py bypass: `grep -n "dspy.LM(" fastworkflow/parameters/signatures.py`
 - litellm.completion call sites: `grep -rn "litellm.completion" fastworkflow/ --include="*.py"`
 - Tracked-ness: `git ls-files env/.env passwords/.env .env`
 - gen-env behavior: `sed -n '85,116p' gen-env.sh; grep -n "gen-env" makefile`

@@ -24,7 +24,7 @@ from fastworkflow.mcp_server import FastWorkflowMCPServer
 from fastworkflow.model_pipeline_training import trained_command_labels
 from fastworkflow.plan_frame import TURN_MAX_STEPS_ENV
 from fastworkflow.planning_needs_agent import planning_command_needs_agent, refusal_message
-from fastworkflow.utils.signatures import InputForParamExtraction
+from fastworkflow.parameters.signatures import InputForParamExtraction
 from fastworkflow.workflow_agent import (
     _explicit_agent_command,
     _parameter_fields,

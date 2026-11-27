@@ -1,6 +1,6 @@
 import fastworkflow
 from fastworkflow.workflow import Workflow
-from fastworkflow.utils.signatures import InputForParamExtraction
+from fastworkflow.parameters.signatures import InputForParamExtraction
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
 from fastworkflow.utils.context_utils import list_context_names
 from typing import Any, Dict, Optional

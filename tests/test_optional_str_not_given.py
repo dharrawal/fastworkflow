@@ -19,13 +19,14 @@ from unittest.mock import MagicMock, patch
 import pytest
 from pydantic import BaseModel, Field
 
-from fastworkflow import ModuleType, parameter_clarification
+from fastworkflow import ModuleType
+from fastworkflow.parameters import parameter_clarification
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import (
     NOT_FOUND,
     ParameterExtraction,
 )
-from fastworkflow.utils import signatures
-from fastworkflow.utils.signatures import InputForParamExtraction
+from fastworkflow.parameters import signatures
+from fastworkflow.parameters.signatures import InputForParamExtraction
 
 COMMAND = "People/find_person"
 

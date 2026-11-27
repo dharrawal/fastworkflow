@@ -19,8 +19,8 @@ import pytest
 from dspy.utils import DummyLM
 from pydantic import BaseModel
 
-from fastworkflow.utils import signatures
-from fastworkflow.utils.signatures import (
+from fastworkflow.parameters import signatures
+from fastworkflow.parameters.signatures import (
     NOT_FOUND,
     InputForParamExtraction,
     classify_bracketed_value,

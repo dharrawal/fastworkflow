@@ -14,7 +14,7 @@ import json
 import dspy
 import pytest
 
-from fastworkflow import parameter_clarification as loops
+from fastworkflow.parameters import parameter_clarification as loops
 from fastworkflow import planning_commands as pc
 from fastworkflow import workflow_agent
 from fastworkflow._workflows.plan_metadata_extraction.resolution import PlanResolution

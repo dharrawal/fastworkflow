@@ -16,7 +16,7 @@ import pytest
 from pydantic import BaseModel, Field
 
 import fastworkflow
-from fastworkflow.parameter_clarification import pending
+from fastworkflow.parameters.parameter_clarification import pending
 from fastworkflow._workflows.command_metadata_extraction import parameter_extraction as pe_module
 from fastworkflow._workflows.command_metadata_extraction._commands import wildcard
 from fastworkflow._workflows.command_metadata_extraction.intent_detection import (

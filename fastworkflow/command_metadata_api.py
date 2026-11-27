@@ -1109,7 +1109,7 @@ class CommandMetadataAPI:
         Return a mapping of qualified command name -> {inputs: [...], outputs: [...]} where each param is a dict
         with name, type_str, description, examples.
         """
-        from fastworkflow.utils.signatures import is_required_argument  # signatures imports this module
+        from fastworkflow.parameters.signatures import is_required_argument  # signatures imports this module
 
         directory = CommandDirectory.load(workflow_path)
 

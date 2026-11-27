@@ -19,9 +19,10 @@ from pydantic import BaseModel
 import fastworkflow
 from fastworkflow.observability import tracing
 from fastworkflow.observability.store import ObservabilityStore, SQLiteTraceSink
-from fastworkflow.utils import dspy_utils, signatures
+from fastworkflow.utils import dspy_utils
+from fastworkflow.parameters import signatures
 from fastworkflow.utils.dspy_logger import observe_dspy_host
-from fastworkflow.utils.signatures import NOT_FOUND, InputForParamExtraction
+from fastworkflow.parameters.signatures import NOT_FOUND, InputForParamExtraction
 
 
 @pytest.fixture

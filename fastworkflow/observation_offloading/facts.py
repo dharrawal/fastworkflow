@@ -202,7 +202,7 @@ def workflow_signatures(workflow_folderpath: str) -> dict[str, Any]:
 
 
 def _not_given_sentinels() -> tuple[Any, ...]:
-    from fastworkflow.utils.signatures import INVALID_FLOAT_VALUE, INVALID_INT_VALUE, NOT_FOUND
+    from fastworkflow.parameters.signatures import INVALID_FLOAT_VALUE, INVALID_INT_VALUE, NOT_FOUND
 
     return (NOT_FOUND, INVALID_INT_VALUE, INVALID_FLOAT_VALUE)
 

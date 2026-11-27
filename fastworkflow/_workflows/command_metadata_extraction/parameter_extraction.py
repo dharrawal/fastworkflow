@@ -18,11 +18,13 @@ from fastworkflow.observability.decision_signals import (
     slot_binding_source,
 )
 
-from fastworkflow import no_agent_mode, parameter_clarification, waiting
-from fastworkflow.parameter_clarification import Extraction, ParameterLoop
+from fastworkflow import no_agent_mode, waiting
+from fastworkflow.parameters import parameter_clarification
+from fastworkflow.parameters.parameter_clarification import Extraction, ParameterLoop
 from fastworkflow.parameters import ask, fill, pipeline, read
-from fastworkflow.utils import argument_checks, dspy_utils, signatures
-from fastworkflow.utils.signatures import (
+from fastworkflow.parameters import argument_checks, signatures
+from fastworkflow.utils import dspy_utils
+from fastworkflow.parameters.signatures import (
     InputForParamExtraction,
     MISSING_INFORMATION_ERRMSG,
     NOT_FOUND, PARAMETER_EXTRACTION_ERROR_MSG, _planning_command_of)

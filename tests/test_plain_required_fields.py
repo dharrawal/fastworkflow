@@ -26,7 +26,8 @@ import pytest
 from pydantic import BaseModel, Field
 
 import fastworkflow
-from fastworkflow import ModuleType, command_preview, parameter_clarification, planning_commands
+from fastworkflow import ModuleType, command_preview, planning_commands
+from fastworkflow.parameters import parameter_clarification
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import (
     ParameterExtraction,
 )
@@ -34,8 +35,8 @@ from fastworkflow.command_directory import CommandLoadError
 from fastworkflow.command_executor import CommandExecutor
 from fastworkflow.command_metadata_api import CommandMetadataAPI
 from fastworkflow.command_routing import RoutingDefinition
-from fastworkflow.utils import signatures
-from fastworkflow.utils.signatures import (
+from fastworkflow.parameters import signatures
+from fastworkflow.parameters.signatures import (
     INVALID_FLOAT_VALUE,
     INVALID_INT_VALUE,
     NOT_FOUND,

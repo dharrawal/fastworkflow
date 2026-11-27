@@ -1,4 +1,4 @@
-"""The parameter clarification loop (fix-yu3l.4, ``fastworkflow/parameter_clarification.py``).
+"""The parameter clarification loop (fix-yu3l.4, ``fastworkflow/parameters/parameter_clarification.py``).
 
 One loop asks for the values a planning command still lacks, whoever the caller is: a turn part bound to a planning
 command, a plan the client pinned (``use_plan``), a typed planning call that was refused. The reply RESUMES THE PART
@@ -21,11 +21,11 @@ import pytest
 from pydantic import BaseModel, Field
 
 from fastworkflow import approval_binding, no_agent_mode
-from fastworkflow import parameter_clarification as loops
+from fastworkflow.parameters import parameter_clarification as loops
 from fastworkflow import planning_commands as pc
 from fastworkflow import workflow_agent
 from fastworkflow.approval_binding import Surface
-from fastworkflow.parameter_clarification import ParameterLoop
+from fastworkflow.parameters.parameter_clarification import ParameterLoop
 from fastworkflow.turn import TurnStatus
 from fastworkflow.workflow_agent import build_query_with_next_steps as REAL_BUILD
 from fastworkflow.workflow_agent import load_planning_command_map
@@ -367,7 +367,7 @@ class _ReadsTheText(ScriptedExtractor):
 def no_agent(gated, no_agent_model, no_planner_key, monkeypatch):  # noqa: F811
     """The library context with no agent model, drafting on, and the model seams scripted. ``splits`` and ``matched``
     record every call of the planner's split and of the matcher."""
-    from fastworkflow.utils import signatures
+    from fastworkflow.parameters import signatures
 
     monkeypatch.setenv("FW_DRAFT_ARGUMENTS", "on")
     monkeypatch.setattr(WorkflowExecutionContext, "_agent_dspy_context",
@@ -432,7 +432,7 @@ DUNE_RAN = ("find_book", "Dune")
 
 def _loop(ctx):
     """The parameter question's loop: the one in the turn's waiting record, or None when no question is out."""
-    from fastworkflow.parameter_clarification import ParameterLoop
+    from fastworkflow.parameters.parameter_clarification import ParameterLoop
 
     held = ctx._waiting
     return ParameterLoop.from_state(held.payload["loop"]) if held is not None else None

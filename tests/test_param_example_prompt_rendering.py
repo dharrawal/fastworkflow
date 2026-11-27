@@ -48,7 +48,7 @@ from fastworkflow.train.param_example_cache import (
     run_stable_form,
     set_param_example_cache,
 )
-from fastworkflow.utils.generate_param_examples import (
+from fastworkflow.train.generate_param_examples import (
     _address_free,
     _digested_functions,
     extract_field_details,

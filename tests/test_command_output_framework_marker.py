@@ -12,7 +12,7 @@ import pytest
 import fastworkflow
 from fastworkflow.command_directory import CommandDirectory
 from fastworkflow.command_routing import RoutingRegistry
-from fastworkflow.utils.signatures import InputForParamExtraction
+from fastworkflow.parameters.signatures import InputForParamExtraction
 from tests.test_chat_turn_outputs_contract import _make
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401
 

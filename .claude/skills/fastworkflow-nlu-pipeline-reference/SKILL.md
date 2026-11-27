@@ -590,13 +590,13 @@ grep -n "threshold=0.3" fastworkflow/_workflows/command_metadata_extraction/inte
 grep -n "INTENT_DETECTION" fastworkflow/model_pipeline_training.py
 # DSPy example-gen numbers and the non-filtering return
 grep -n "num_examples=15\|validation_threshold=0.3" fastworkflow/train/__main__.py
-sed -n '604,613p' fastworkflow/utils/generate_param_examples.py
+sed -n '604,613p' fastworkflow/train/generate_param_examples.py
 # Per-role LLM consumers
 grep -rn "get_lm(" fastworkflow/ | grep -v "def get_lm"
 # LLM_RESPONSE_GEN still dead?
 grep -rn "LLM_RESPONSE_GEN" fastworkflow/ --include=*.py
 # BestOfN / LabeledFewShot runtime extraction
-grep -n "BestOfN\|LabeledFewShot\|JSONAdapter" fastworkflow/utils/signatures.py
+grep -n "BestOfN\|LabeledFewShot\|JSONAdapter" fastworkflow/parameters/signatures.py
 # Live thresholds of any trained workflow
 python .claude/skills/fastworkflow-nlu-pipeline-reference/scripts/show_intent_thresholds.py <workflow_dir>
 ```

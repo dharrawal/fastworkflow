@@ -34,7 +34,7 @@
 > working tree. The tree is dirty with in-flight R1/R2/R3/R7 work and
 > `model_pipeline_training.py` and `intent_detection.py` are offset by hundreds of lines.
 > Two exceptions, stated where they occur: `fastworkflow/cache_matching.py` and
-> `fastworkflow/utils/signatures.py` are clean (identical either way), and
+> `fastworkflow/parameters/signatures.py` are clean (identical either way), and
 > `fastworkflow/train/heldout_evaluation.py` is untracked, so its line numbers are
 > working-tree only. `_commands/wildcard.py`'s cited ranges (65–90, 99–124, 140–165) were
 > checked line-by-line and are identical in both.
@@ -819,7 +819,7 @@ sed -n '140,165p' fastworkflow/_workflows/command_metadata_extraction/_commands/
 sed -n '99,124p' fastworkflow/_workflows/command_metadata_extraction/_commands/wildcard.py
 
 # NOT_FOUND is treated as missing, which is what stops the mutating commands
-sed -n '337,341p' fastworkflow/utils/signatures.py
+sed -n '337,341p' fastworkflow/parameters/signatures.py
 
 # The embedding is already computed on every intent-detection turn
 git show 23dbe35:fastworkflow/_workflows/command_metadata_extraction/intent_detection.py | sed -n '116,126p'

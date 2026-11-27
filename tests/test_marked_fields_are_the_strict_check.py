@@ -169,7 +169,7 @@ def test_a_marked_id_field_with_a_pattern_is_a_copy_check_for_the_planning_guard
 # ---------------------------------------------------------------- converted_from_command_text is gone
 
 def test_the_option_key_and_its_readers_are_gone():
-    from fastworkflow import field_options
+    from fastworkflow.parameters import field_options
 
     assert "converted_from_command_text" not in field_options.OPTION_KEYS
     assert not hasattr(field_options, "CONVERTED_FROM_COMMAND_TEXT")
@@ -226,7 +226,7 @@ def test_the_planner_span_attribute_is_null_when_every_unmarked_value_is_written
 # ---------------------------------------------------------------- the extraction prompt: no examples, the pattern
 
 def _descriptions(model: type) -> dict:
-    from fastworkflow.utils.signatures import InputForParamExtraction
+    from fastworkflow.parameters.signatures import InputForParamExtraction
 
     signature = InputForParamExtraction.create_signature_from_pydantic_model(model)
     return {name: field.json_schema_extra["desc"] for name, field in signature.output_fields.items()}

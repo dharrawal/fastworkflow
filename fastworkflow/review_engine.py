@@ -40,7 +40,8 @@ from typing import Any, Callable, ClassVar, Optional, Sequence, Union
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 import fastworkflow
-from fastworkflow import intent_loop, parameter_clarification
+from fastworkflow import intent_loop
+from fastworkflow.parameters import parameter_clarification
 from fastworkflow.observability import tracing
 from fastworkflow.no_agent_mode import _bare, is_yes
 
@@ -2074,7 +2075,7 @@ class ProposalReplyPolicy:
         return {}
 
     def _park_edit_item_slot(self, text: str, slot_question: str, pending_proposed: list) -> None:
-        from fastworkflow.utils.signatures import NOT_FOUND
+        from fastworkflow.parameters.signatures import NOT_FOUND
         from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import park
         from fastworkflow._workflows.plan_metadata_extraction._commands.ProposalReview.edit import Signature as EditSignature
 

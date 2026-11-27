@@ -16,7 +16,7 @@ import pytest
 from pydantic import BaseModel, Field
 
 from fastworkflow import planning_commands as pc
-from fastworkflow.utils.signatures import InputForParamExtraction
+from fastworkflow.parameters.signatures import InputForParamExtraction
 
 COPIED = {"copied_from_command_text": True}
 

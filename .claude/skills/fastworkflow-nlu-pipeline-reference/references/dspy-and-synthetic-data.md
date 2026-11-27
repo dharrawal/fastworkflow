@@ -44,7 +44,7 @@ class with only ancestor 'wildcard' pressure against it.
 
 ## B. DSPy few-shot corpus for parameter extraction (train-time, litellm direct)
 
-`fastworkflow/utils/generate_param_examples.py::generate_dspy_examples`, called per
+`fastworkflow/train/generate_param_examples.py::generate_dspy_examples`, called per
 parameterized command from `train/__main__.py:110-114` with `num_examples=15,
 validation_threshold=0.3` (function defaults are 10 / 0.4 — the call site overrides).
 
@@ -70,7 +70,7 @@ validation_threshold=0.3` (function defaults are 10 / 0.4 — the call site over
 
 ## C. Run-time parameter extraction (real DSPy)
 
-`fastworkflow/utils/signatures.py::InputForParamExtraction.extract_parameters` (:239-313):
+`fastworkflow/parameters/signatures.py::InputForParamExtraction.extract_parameters` (:239-313):
 
 ```
 Pydantic Input model
@@ -166,9 +166,9 @@ python -m fastworkflow.utils.dspy_cache_utils clear-disk --cache-dir /custom/pat
 ## Re-verification
 
 ```bash
-grep -n "temperature\|max_tokens" fastworkflow/train/generate_synthetic.py fastworkflow/utils/generate_param_examples.py
-sed -n '604,613p' fastworkflow/utils/generate_param_examples.py          # non-filtering return still there?
-grep -n "BestOfN\|LabeledFewShot\|JSONAdapter\|according to Dhar" fastworkflow/utils/signatures.py
+grep -n "temperature\|max_tokens" fastworkflow/train/generate_synthetic.py fastworkflow/train/generate_param_examples.py
+sed -n '604,613p' fastworkflow/train/generate_param_examples.py          # non-filtering return still there?
+grep -n "BestOfN\|LabeledFewShot\|JSONAdapter\|according to Dhar" fastworkflow/parameters/signatures.py
 grep -n "class .*Signature\|ChainOfThought\|get_lm" fastworkflow/build/genai_postprocessor.py
 grep -n "classes={}" fastworkflow/refine/__main__.py
 ```

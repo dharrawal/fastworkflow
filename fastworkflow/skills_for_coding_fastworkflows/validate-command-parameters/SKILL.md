@@ -205,14 +205,14 @@ where the application mints them. Do not move the format into a validator.
 ## Resolve a value against live keys
 
 A name the user types from memory ("Jon Smyth") rarely matches stored data exactly. Resolve it in a model
-validator with `DatabaseValidator.fuzzy_match` (`fastworkflow.utils.signatures`): a typo is corrected in
+validator with `DatabaseValidator.fuzzy_match` (`fastworkflow.parameters.signatures`): a typo is corrected in
 place, a near miss comes back as "did you mean" suggestions, and a value nothing comes near is accepted for
 the command body to judge. (`db_lookup`, a `json_schema_extra` key or a `Signature.db_lookup` method, is retired
 and fails the load.) The field needs no special key. This is the shipped `messaging_app_4` command
 `ChatRoom/set_current_user`:
 
 ```python
-from fastworkflow.utils.signatures import DatabaseValidator
+from fastworkflow.parameters.signatures import DatabaseValidator
 
         @model_validator(mode="after")
         def user_name_is_in_the_room(self, info):

@@ -26,9 +26,9 @@ from typing import Any, Dict, List, Optional, Union, get_args, get_origin
 from pydantic import BaseModel
 from pydantic_core import PydanticUndefined
 
-from fastworkflow.field_options import COMMAND_TEXT_AFTER_COMMAND_NAME
+from fastworkflow.parameters.field_options import COMMAND_TEXT_AFTER_COMMAND_NAME
 from fastworkflow.parameters.rules import is_union
-from fastworkflow.utils.input_validation import bound_fields, field_checked_class
+from fastworkflow.parameters.input_validation import bound_fields, field_checked_class
 
 
 def unwrap_optional(field_type):
@@ -76,7 +76,7 @@ def fill(extractor, params_class: type, command_name: str, folderpath: Optional[
     *extractor* is an ``InputForParamExtraction`` that holds the request text (``extractor.command``), or None, and
     then one is made for *text*. With a *note* the model reads the text with the note after it; the extractor's own
     text is put back afterwards, even when the call raises, because validation reads the request from there."""
-    from fastworkflow.utils.signatures import InputForParamExtraction
+    from fastworkflow.parameters.signatures import InputForParamExtraction
 
     if extractor is None:
         extractor = InputForParamExtraction(command=with_note(text or "", note))

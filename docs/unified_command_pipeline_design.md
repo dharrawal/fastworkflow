@@ -133,7 +133,7 @@ The loop is the existing parameter stage, lifted out of the CME command so that 
 already knows the command can enter it:
 
 ```
-ParameterClarification  (fastworkflow/parameter_clarification.py)
+ParameterClarification  (fastworkflow/parameters/parameter_clarification.py)
   open(command, values, missing, invalid, request_text) -> question, parameter_request
   read(reply) -> answer | accept | abort | misunderstood | wait | different_command
   merge(reply) -> values kept, the reply's values added, gaps recomputed

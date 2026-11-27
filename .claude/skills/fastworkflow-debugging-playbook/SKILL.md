@@ -143,7 +143,7 @@ time, verify `.beads/issues.jsonl` after — bd's `close --reason` silently fail
 
 Mechanics: partial params are stored with NOT_FOUND sentinels via `model_construct` (no validation)
 (`fastworkflow/_workflows/command_metadata_extraction/parameter_extraction.py:93-104`); validation error messages
-embed the `MISSING_INFORMATION_ERRMSG` / `INVALID_INFORMATION_ERRMSG` env-var text (`fastworkflow/utils/signatures.py:634`),
+embed the `MISSING_INFORMATION_ERRMSG` / `INVALID_INFORMATION_ERRMSG` env-var text (`fastworkflow/parameters/signatures.py:634`),
 so changing those env values changes user-facing errors AND any code that matches on them.
 Landmine: the string-splitting recovery helper `_extract_missing_fields` (`parameter_extraction.py:140-160`) is
 **dead code with an arity bug** (3-tuple unpack of `validate_parameters`' 4-tuple return) — it raises ValueError
@@ -151,7 +151,7 @@ if revived; do not call it.
 Agent mode first tries XML-regex extraction (`_extract_parameters_from_xml`, `parameter_extraction.py:296+`) and
 **deliberately rejects** the result when a value equals one of the field's `examples` (anti-parroting,
 `parameter_extraction.py:330-337`); rejected → falls back to DSPy LLM extraction, whose `BestOfN(N=3)` reward
-also scores 0.0 for echoed example values (`fastworkflow/utils/signatures.py`). So an example value that is also a
+also scores 0.0 for echoed example values (`fastworkflow/parameters/signatures.py`). So an example value that is also a
 *legitimate* input can never be extracted in agent mode — pick example values that are not real data.
 Loop-breaker in deterministic mode: type `abort` (or `you misunderstood`) — these escape hatches are matched by
 exact/fuzzy utterance only, never by the classifier. Agent exhaustion caps at `max_iters=25`

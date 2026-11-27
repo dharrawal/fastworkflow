@@ -252,7 +252,7 @@ def run_plan(command, case: dict) -> dict:
 def run_exec(case: dict, commands: dict | None = None) -> dict:
     """``check_extracted_values`` and ``ExtractionCheck.apply`` of one execution-command case (on one of
     ``EXEC_MODELS``, or, for kind ``exec_input``, on the ``Input`` of a planning command of the table)."""
-    from fastworkflow.utils import argument_checks
+    from fastworkflow.parameters import argument_checks
 
     model = commands[case["command"]].input_model if case["kind"] == "exec_input" else EXEC_MODELS[case["model"]]
     params = model.model_construct(**case["values"])

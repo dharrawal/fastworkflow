@@ -96,7 +96,7 @@ def test_path_a_the_extractor_reads_the_whole_message_and_the_guards_accept_the_
     """The only reader of the reply is the extractor, called on the message the re-run builds. A scripted extractor
     stands in for the model: it returns what a careful one would, the text after the label."""
     command, _ = _suspend_on_refusal(todo, monkeypatch)
-    from fastworkflow.utils.signatures import InputForParamExtraction
+    from fastworkflow.parameters.signatures import InputForParamExtraction
 
     queries = []
 

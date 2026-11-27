@@ -28,7 +28,7 @@ class ScriptedExtractor(DummyLM):
 def script_extractor(monkeypatch, *answers: dict) -> ScriptedExtractor:
     """Make the shared extractor answer *answers* in order (each a dict of the planning command's fields; a
     ``reasoning`` is added when missing). Returns the scripted LM."""
-    from fastworkflow.utils import signatures
+    from fastworkflow.parameters import signatures
 
     lm = ScriptedExtractor([{"reasoning": "scripted", **answer} for answer in answers])
     original = signatures.dspy_utils.get_lm

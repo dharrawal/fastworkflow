@@ -213,7 +213,7 @@ def test_an_execution_commands_own_examples_key_is_not_read_as_a_misspelt_exampl
 def _extraction_prompt(model) -> list[dict]:
     """The messages the parameter extractor sends for *model* (no model call): the signature the extractor builds
     (``InputForParamExtraction.extract_parameters``) formatted by its adapter."""
-    from fastworkflow.utils import signatures
+    from fastworkflow.parameters import signatures
 
     signature = signatures.InputForParamExtraction.create_signature_from_pydantic_model(
         model, pc.option_sentences(model), pc.classifier_alone_fields(model))
@@ -375,4 +375,4 @@ def test_no_runtime_module_reads_the_declarations():
         if lookup.search(path.read_text(encoding="utf-8")):
             readers.add(relative)
     # workflow_vocabulary's payload.get("words") reads its own cache file, unrelated to classifier_confirms
-    assert readers == {"field_options.py", "planning_commands.py", "utils/workflow_vocabulary.py"}, readers
+    assert readers == {"parameters/field_options.py", "planning_commands.py", "parameters/workflow_vocabulary.py"}, readers

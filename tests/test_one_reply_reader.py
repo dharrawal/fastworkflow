@@ -21,7 +21,8 @@ import fastworkflow
 from dspy.utils import DummyLM
 from types import SimpleNamespace
 
-from fastworkflow import intent_loop, no_agent_mode, parameter_clarification, waiting, workflow_agent
+from fastworkflow import intent_loop, no_agent_mode, waiting, workflow_agent
+from fastworkflow.parameters import parameter_clarification
 from fastworkflow._workflows.command_metadata_extraction import parameter_reply
 from fastworkflow.parameters import read, reply as replies
 from fastworkflow.turn import TurnStatus

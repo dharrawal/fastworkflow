@@ -15,9 +15,10 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow import no_agent_mode, parameter_clarification as loops
+from fastworkflow import no_agent_mode
+from fastworkflow.parameters import parameter_clarification as loops
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import ParameterExtraction, park
-from fastworkflow.utils.signatures import INVALID_FLOAT_VALUE, NOT_FOUND
+from fastworkflow.parameters.signatures import INVALID_FLOAT_VALUE, NOT_FOUND
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 
 HELLO = str(Path(__file__).parent.joinpath("hello_world_workflow").resolve())

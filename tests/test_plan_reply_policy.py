@@ -8,7 +8,8 @@ import pytest
 from dspy.utils import DummyLM
 
 import fastworkflow
-from fastworkflow import intent_loop, parameter_clarification, waiting
+from fastworkflow import intent_loop, waiting
+from fastworkflow.parameters import parameter_clarification
 from fastworkflow import review_engine as re_
 from fastworkflow import review_proposals
 from fastworkflow.review_engine import CONFIRMED, DECLINED, REVISED
@@ -187,7 +188,7 @@ def test_item_slot_then_answered(gated, monkeypatch, planner):
 
 
 def _enter_drop_item_slot(gated):
-    from fastworkflow.utils.signatures import NOT_FOUND
+    from fastworkflow.parameters.signatures import NOT_FOUND
 
     routing = fastworkflow.RoutingRegistry.get_definition(gated.ctx._plan_workflow.folderpath)
     params_class = routing.get_command_class(DROP, fastworkflow.ModuleType.COMMAND_PARAMETERS_CLASS)
@@ -430,7 +431,7 @@ def test_compound_drop_edit_is_one_organization_triggers_edit_reader(
 def test_slot_whole_plan_confirm_clears_edit_slot(gated, monkeypatch, planner):
     from fastworkflow._workflows.plan_metadata_extraction._commands.ProposalReview.edit import Signature as EditSignature
     from fastworkflow.review_engine import reply_to_proposal
-    from fastworkflow.utils.signatures import NOT_FOUND
+    from fastworkflow.parameters.signatures import NOT_FOUND
 
     _no_writes(monkeypatch)
     record = _open_review_two_step(gated, monkeypatch)

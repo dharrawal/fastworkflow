@@ -595,11 +595,11 @@ _LAZY_ATTRS = {
         "fastworkflow.workflow_execution_context",
         "CommandCancelledError",
     ),
-    "FieldOptions": ("fastworkflow.field_options", "FieldOptions"),
-    "CopiedOptions": ("fastworkflow.field_options", "CopiedOptions"),
-    "RecordNamedOptions": ("fastworkflow.field_options", "RecordNamedOptions"),
-    "ConfirmsOptions": ("fastworkflow.field_options", "ConfirmsOptions"),
-    "UiOptions": ("fastworkflow.field_options", "UiOptions"),
+    "FieldOptions": ("fastworkflow.parameters.field_options", "FieldOptions"),
+    "CopiedOptions": ("fastworkflow.parameters.field_options", "CopiedOptions"),
+    "RecordNamedOptions": ("fastworkflow.parameters.field_options", "RecordNamedOptions"),
+    "ConfirmsOptions": ("fastworkflow.parameters.field_options", "ConfirmsOptions"),
+    "UiOptions": ("fastworkflow.parameters.field_options", "UiOptions"),
 }
 
 __all__ = (

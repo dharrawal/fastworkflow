@@ -9,7 +9,8 @@ import pytest
 
 import fastworkflow
 from fastworkflow import intent_loop, waiting
-from fastworkflow import approval_binding, parameter_clarification
+from fastworkflow import approval_binding
+from fastworkflow.parameters import parameter_clarification
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import model_of, park
 from fastworkflow.review_engine import open_review
 from fastworkflow.review_proposals import SubTask, SubTaskProposal

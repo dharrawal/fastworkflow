@@ -25,7 +25,8 @@ import dspy
 import pytest
 
 from fastworkflow import approval_binding as ab
-from fastworkflow import intent_loop, no_agent_mode, parameter_clarification, workflow_agent
+from fastworkflow import intent_loop, no_agent_mode, workflow_agent
+from fastworkflow.parameters import parameter_clarification
 from fastworkflow import planning_commands as pc
 from fastworkflow import waiting as waiting_module
 from fastworkflow.chat_session import ChatSession
@@ -205,7 +206,7 @@ def test_a_parts_value_question_asked_while_it_runs_is_the_parameters_kind(todo,
 def no_param_model(monkeypatch):
     """The review tests' guard (tests/test_cancel_pending_review.py), asked for by name so it does not apply to every test
     here: the parameter-extraction model is never reached."""
-    from fastworkflow.utils.signatures import InputForParamExtraction
+    from fastworkflow.parameters.signatures import InputForParamExtraction
 
     def refuse(self, *args, **kwargs):
         raise AssertionError(f"the parameter-extraction model was called for {self.command!r}")

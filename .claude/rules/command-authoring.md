@@ -140,7 +140,7 @@ class Signature:
             return self                        # else: accept
 ```
 
-`DatabaseValidator` is `fastworkflow.utils.signatures.DatabaseValidator`. `workflow.record` is the record this command acts on. The three outcomes:
+`DatabaseValidator` is `fastworkflow.parameters.signatures.DatabaseValidator`. `workflow.record` is the record this command acts on. The three outcomes:
 
 | `fuzzy_match` result | what the validator does | what the framework records |
 |---|---|---|

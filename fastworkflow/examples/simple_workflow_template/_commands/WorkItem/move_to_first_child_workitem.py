@@ -1,5 +1,5 @@
 import fastworkflow
-from fastworkflow.utils.signatures import NOT_FOUND
+from fastworkflow.parameters.signatures import NOT_FOUND
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
 from pydantic import BaseModel, Field, model_validator
 from typing import Optional

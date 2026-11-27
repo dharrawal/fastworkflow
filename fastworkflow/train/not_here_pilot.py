@@ -251,7 +251,7 @@ def cache_report(folder: str) -> dict:
     )
     from fastworkflow.train.determinism import get_training_seed
     from fastworkflow.utils import dspy_utils
-    from fastworkflow.utils.generate_param_examples import extract_field_details, param_example_fingerprint
+    from fastworkflow.train.generate_param_examples import extract_field_details, param_example_fingerprint
 
     cmd_dir = prepare_registry(folder)
     seed = get_training_seed()

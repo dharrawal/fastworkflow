@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow import parameter_clarification
+from fastworkflow.parameters import parameter_clarification
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import round_ordinal
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 

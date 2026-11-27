@@ -26,9 +26,9 @@ from pydantic import BaseModel, Field
 import fastworkflow
 from fastworkflow import planning_commands as sc
 from fastworkflow import workflow_agent
-from fastworkflow.utils import signatures
-from fastworkflow.utils import workflow_vocabulary as wv
-from fastworkflow.utils.signatures import InputForParamExtraction
+from fastworkflow.parameters import signatures
+from fastworkflow.parameters import workflow_vocabulary as wv
+from fastworkflow.parameters.signatures import InputForParamExtraction
 
 TESTS = Path(__file__).resolve().parent
 TODO = TESTS / "todo_list_workflow"

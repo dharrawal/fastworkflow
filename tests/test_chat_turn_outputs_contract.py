@@ -23,7 +23,7 @@ import pytest
 import fastworkflow
 from fastworkflow.command_routing import RoutingRegistry
 from fastworkflow.mcp_server import command_schema_listing
-from fastworkflow.utils.signatures import InputForParamExtraction
+from fastworkflow.parameters.signatures import InputForParamExtraction
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401
 

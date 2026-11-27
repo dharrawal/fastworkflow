@@ -28,7 +28,7 @@ from fastworkflow import planning_commands as pc
 from fastworkflow import workflow_agent
 from fastworkflow._workflows.command_metadata_extraction import parameter_extraction
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import extract_arguments
-from fastworkflow.utils import signatures
+from fastworkflow.parameters import signatures
 
 TUTORIAL = Path(__file__).parent / "planning_tutorial_workflow"
 WAIT = 20

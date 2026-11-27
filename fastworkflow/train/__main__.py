@@ -15,7 +15,8 @@ from colorama import Fore, Style
 import fastworkflow
 from fastworkflow.utils.env import read_env_files
 from fastworkflow.utils.logging import logger
-from fastworkflow.utils import dspy_utils, python_utils, workflow_vocabulary
+from fastworkflow.utils import dspy_utils, python_utils
+from fastworkflow.parameters import workflow_vocabulary
 from fastworkflow import ModuleType
 from fastworkflow import model_pipeline_training
 from fastworkflow.model_pipeline_training import (
@@ -27,7 +28,7 @@ from fastworkflow.model_pipeline_training import (
     set_active_artifact_version,
     GLOBAL_CONTEXT_FOLDER,
 )
-from fastworkflow.utils.generate_param_examples import generate_dspy_examples, missing_value_example
+from fastworkflow.train.generate_param_examples import generate_dspy_examples, missing_value_example
 from fastworkflow.command_directory import CommandDirectory, get_cached_command_directory
 from fastworkflow.command_routing import RoutingDefinition, RoutingRegistry
 from fastworkflow.command_context_model import CommandContextModel

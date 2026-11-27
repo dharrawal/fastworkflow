@@ -11,8 +11,8 @@ from typing import List, Optional
 import pytest
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from fastworkflow.utils import signatures
-from fastworkflow.utils.signatures import (
+from fastworkflow.parameters import signatures
+from fastworkflow.parameters.signatures import (
     INVALID_INT_VALUE,
     InputForParamExtraction,
     is_sentinel_number,

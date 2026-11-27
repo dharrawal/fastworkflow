@@ -55,7 +55,7 @@ executing path today; "dead" = present but unreached.
 
 | Value | Meaning | file:line | Status |
 |---|---|---|---|
-| 3 | `BestOfN` attempts | `fastworkflow/utils/signatures.py:297` | live |
+| 3 | `BestOfN` attempts | `fastworkflow/parameters/signatures.py:297` | live |
 | 1.0 | `BestOfN` reward threshold (i.e., must pass anti-parroting) | `signatures.py:299` | live |
 | 0.2 | `DatabaseValidator.fuzzy_match` difflib cutoff default | `signatures.py:70,96` | live |
 | 0.7 | Levenshtein threshold inside `DatabaseValidator.fuzzy_match` (NOTE: passed to a DISTANCE-thresholded function — 0.7 is very permissive; smells like a similarity/distance confusion, unconfirmed intent) | `signatures.py:86` | live |
@@ -78,6 +78,6 @@ executing path today; "dead" = present but unreached.
 grep -n "0.5129\|alpha = 0.15\|linspace\|threshold=0.3\|0.85\|threshold=0.90\|N=3\|max_retries = 2" \
   fastworkflow/model_pipeline_training.py \
   fastworkflow/_workflows/command_metadata_extraction/intent_detection.py \
-  fastworkflow/utils/signatures.py \
+  fastworkflow/parameters/signatures.py \
   fastworkflow/workflow_execution_context.py
 ```

@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 
 from fastworkflow import planning_commands
 from fastworkflow.parameters import rules
-from fastworkflow.utils import argument_checks
+from fastworkflow.parameters import argument_checks
 
 
 def test_each_rule_has_one_home_and_the_old_aliases_are_gone():

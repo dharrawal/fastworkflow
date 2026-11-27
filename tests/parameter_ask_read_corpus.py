@@ -26,9 +26,9 @@ from typing import List, Literal, Optional
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 import fastworkflow
-from fastworkflow import parameter_clarification as pcl
+from fastworkflow.parameters import parameter_clarification as pcl
 from fastworkflow import planning_commands as pc
-from fastworkflow.parameter_clarification import Extraction
+from fastworkflow.parameters.parameter_clarification import Extraction
 from fastworkflow.parameters import check as one_guard
 from fastworkflow.parameters.read import Slot
 from tests import parameter_check_corpus as corpus
@@ -282,8 +282,8 @@ INT_NF = -9223372036854775807
 
 
 def exec_wording(tmp: Path, commands: dict):
-    from fastworkflow.utils import signatures
-    from fastworkflow.utils.signatures import InputForParamExtraction
+    from fastworkflow.parameters import signatures
+    from fastworkflow.parameters.signatures import InputForParamExtraction
 
     out = TABLE["wording_exec"]
     folder = str(tmp / "tutorial")
@@ -376,7 +376,7 @@ def frame_cases(tmp: Path):
     from fastworkflow import ModuleType
     from fastworkflow._workflows.command_metadata_extraction import parameter_extraction as pe
     from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import ParameterExtraction
-    from fastworkflow.utils.signatures import InputForParamExtraction
+    from fastworkflow.parameters.signatures import InputForParamExtraction
 
     out = TABLE["frame"]
     n = 0

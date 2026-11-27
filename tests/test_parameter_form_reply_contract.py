@@ -26,7 +26,7 @@ from fastworkflow._workflows.command_metadata_extraction.parameter_extraction im
     ParameterExtraction,
 )
 from fastworkflow.command_routing import RoutingRegistry
-from fastworkflow.utils.signatures import InputForParamExtraction
+from fastworkflow.parameters.signatures import InputForParamExtraction
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 
 TESTS = Path(__file__).parent

@@ -156,7 +156,7 @@ class Checked:
     def extraction(self):
         """The gaps as the one result contract (``parameter_clarification.Extraction``): the values kept, the names
         missing, the ones refused with why."""
-        from fastworkflow.parameter_clarification import Extraction
+        from fastworkflow.parameters.parameter_clarification import Extraction
 
         return Extraction(values=dict(self.values),
                           missing=tuple(g.name for g in self.gaps if g.state == MISSING),
@@ -189,7 +189,7 @@ def state_of_why(why: str) -> str:
     """``MISSING`` for a refusal that reads as the value not being given (a placeholder, a pronoun, a vocabulary
     word), else ``INVALID`` (as ``planning_commands`` words the question)."""
     from fastworkflow import planning_commands as pc
-    from fastworkflow.utils.workflow_vocabulary import KIND_WORD_WHY
+    from fastworkflow.parameters.workflow_vocabulary import KIND_WORD_WHY
 
     return MISSING if why in (PLACEHOLDER_WHY, pc.PRONOUN_WHY, KIND_WORD_WHY) else INVALID
 
@@ -200,20 +200,20 @@ def is_marked(field_info: Any) -> bool:
     """Whether a field carries ``copied_from_command_text`` or ``record_named_in_command_text`` (any form of the
     option): the one explicit strict check. Nothing else (a ``Field(pattern=...)``, a description example, the type)
     makes a value be compared with the request."""
-    from fastworkflow.field_options import COPIED_FROM_COMMAND_TEXT, RECORD_NAMED_IN_COMMAND_TEXT
+    from fastworkflow.parameters.field_options import COPIED_FROM_COMMAND_TEXT, RECORD_NAMED_IN_COMMAND_TEXT
 
     extra = field_extra(field_info)
     return COPIED_FROM_COMMAND_TEXT in extra or RECORD_NAMED_IN_COMMAND_TEXT in extra
 
 
 def is_str_field(field_info: Any) -> bool:
-    from fastworkflow.utils.signatures import is_optional_str_field
+    from fastworkflow.parameters.signatures import is_optional_str_field
 
     return field_info.annotation is str or is_optional_str_field(field_info)
 
 
 def is_int_field(field_info: Any) -> bool:
-    from fastworkflow.utils.signatures import _numeric_kind
+    from fastworkflow.parameters.signatures import _numeric_kind
 
     annotation = field_info.annotation
     if annotation is bool or (isinstance(annotation, type) and issubclass(annotation, Enum)):
@@ -226,7 +226,7 @@ def is_int_field(field_info: Any) -> bool:
 def is_given_value(value: Any, default: Any) -> bool:
     """Whether *value* of a planning argument is a value the extractor gave: not its way of saying "not given" (the
     ``NOT_FOUND`` text, the ``<UNKNOWN>`` marker, its "not given" number) and not the argument's default."""
-    from fastworkflow.utils.signatures import NOT_FOUND, is_sentinel_number, is_unknown_marker
+    from fastworkflow.parameters.signatures import NOT_FOUND, is_sentinel_number, is_unknown_marker
 
     if isinstance(value, str) and (is_unknown_marker(value) or value.strip() == NOT_FOUND):
         return False
@@ -240,7 +240,7 @@ def is_given_value(value: Any, default: Any) -> bool:
 
 def is_given(field_info: Any, value: Any) -> bool:
     """Whether *value* is a value the extractor gave, not its way of saying "not given"."""
-    from fastworkflow.utils.signatures import NOT_FOUND, _is_filled, is_unknown_marker
+    from fastworkflow.parameters.signatures import NOT_FOUND, _is_filled, is_unknown_marker
 
     if isinstance(value, str) and (is_unknown_marker(value) or value.strip() in ("", "None", NOT_FOUND)):
         return False
@@ -269,7 +269,7 @@ def _execution_str(name: str, value: Any, request: str, out: Checked) -> None:
     verdict, ``utils.signatures.classify_bracketed_value``, which ``validate_parameters`` and a plan's check also read),
     only punctuation. Nothing is compared with the request here."""
     from fastworkflow import planning_commands as pc
-    from fastworkflow.utils.signatures import NOT_FOUND, classify_bracketed_value, unwrap_quoted_value
+    from fastworkflow.parameters.signatures import NOT_FOUND, classify_bracketed_value, unwrap_quoted_value
 
     def refuse(why: str, code: str) -> None:
         out.gaps.append(Gap(name, INVALID, code, why, value, f"{name}={value!r} {why}"))
@@ -333,7 +333,7 @@ def not_written_fields(model: type, values: Mapping[str, Any], request: Optional
     ``ground_rule`` reads it, an ``int`` a number ``written_numbers`` does not find). Refuses nothing and calls no model;
     a field the extractor did not give, a ``Literal`` and a marked field are not looked at. The one function of both
     kinds of command: an execution check reads it on the extracted values, a planning call on its checked arguments."""
-    from fastworkflow.utils.signatures import is_sentinel_number
+    from fastworkflow.parameters.signatures import is_sentinel_number
 
     if not request or not request.strip():
         return []
@@ -377,8 +377,8 @@ def check_plan(command, raw: dict, request: str, verdicts: Optional[dict] = None
     The rules are those documented on ``planning_commands.check_arguments``; a required argument the guards refuse
     is ``Checked.stop`` (a ``Gap``: ``call`` says the check finds no such argument in the request at all)."""
     from fastworkflow import planning_commands as pc
-    from fastworkflow.utils.signatures import is_sentinel_number
-    from fastworkflow.utils.workflow_vocabulary import KIND_WORD_WHY, is_kind_word, is_pronoun_phrase
+    from fastworkflow.parameters.signatures import is_sentinel_number
+    from fastworkflow.parameters.workflow_vocabulary import KIND_WORD_WHY, is_kind_word, is_pronoun_phrase
 
     out = Checked()
 

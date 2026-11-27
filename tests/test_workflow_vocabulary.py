@@ -13,7 +13,7 @@ import pytest
 from fastworkflow.command_directory import compute_commands_source_fingerprint
 from fastworkflow.train import artifact_versioning
 from fastworkflow.train.__main__ import _prune_stale_artifacts
-from fastworkflow.utils import workflow_vocabulary as wv
+from fastworkflow.parameters import workflow_vocabulary as wv
 
 TUTORIAL = Path(__file__).resolve().parent / "planning_tutorial_workflow"
 

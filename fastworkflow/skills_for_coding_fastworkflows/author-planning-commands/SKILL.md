@@ -205,7 +205,7 @@ method that reads and fills no facts runs flat, as one plan.
 Each option is a key in a field's `json_schema_extra`, written with plain pydantic `Field(...)`
 (`fastworkflow.planning.FieldOptions` types them for an IDE). The key names the behaviour; its value is
 `True` or a dict of that key's own options. The same keys work on an execution command's `Input`
-(`fastworkflow.field_options`). An unknown key, a value that is neither `True` nor a dict of known
+(`fastworkflow.parameters.field_options`). An unknown key, a value that is neither `True` nor a dict of known
 options, a key on a type it does not apply to, two keys that conflict, or a retired spelling (`in_request`,
 `verify`, `positional`, `from`, `subject`, `means`, `strip`) fails the load, naming the key to write.
 
@@ -504,7 +504,7 @@ strings work too; the helpers only make the wording exact.
 ## How the chat draws an `Output`: names never decide, hints do
 
 A field's name never decides how it is drawn. Type and shape give the plain default; everything else is a
-`ui` hint you declare in `Field(json_schema_extra={"ui": {...}})` (`fastworkflow.field_options.UiOptions`
+`ui` hint you declare in `Field(json_schema_extra={"ui": {...}})` (`fastworkflow.parameters.field_options.UiOptions`
 documents each):
 
 | Hint | Controls |

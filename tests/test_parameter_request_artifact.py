@@ -30,7 +30,7 @@ from fastworkflow._workflows.command_metadata_extraction.parameter_extraction im
     extraction_of,
 )
 from fastworkflow.command_executor import _wildcard_command_output
-from fastworkflow.utils.signatures import (
+from fastworkflow.parameters.signatures import (
     INVALID_FLOAT_VALUE,
     INVALID_INT_VALUE,
     NOT_FOUND,

@@ -79,7 +79,7 @@ def no_live_model(monkeypatch):
 def no_model_call_for_parameters(monkeypatch):
     """Guard, not a stub: the deterministic name=value path binds these commands. If the model boundary is
     reached, the test fails here rather than calling out."""
-    from fastworkflow.utils.signatures import InputForParamExtraction
+    from fastworkflow.parameters.signatures import InputForParamExtraction
 
     def _refuse(self, *args, **kwargs):
         raise AssertionError(f"the parameter-extraction model was called for {self.command!r}")

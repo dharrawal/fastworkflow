@@ -1,7 +1,7 @@
 """Argument checks on an execution command's LLM parameter extraction (fix-qjf4).
 
 The checks a planning command's typed call gets (``planning_commands.check_arguments``) also run on
-the values the LLM extractor gives an execution command (``fastworkflow.utils.argument_checks``): a
+the values the LLM extractor gives an execution command (``fastworkflow.parameters.argument_checks``): a
 ``str`` value must be written in the request and takes the request's spelling, a placeholder is
 refused, and an ``int`` must be a
 number the request writes. A refused value makes the extractor run once more with the refusal
@@ -30,9 +30,9 @@ from pydantic import BaseModel, Field
 import fastworkflow
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import ParameterExtraction
 from fastworkflow.parameters import check as one_guard, rules
-from fastworkflow.utils import signatures
-from fastworkflow.utils.argument_checks import check_extracted_values
-from fastworkflow.utils.signatures import NOT_FOUND
+from fastworkflow.parameters import signatures
+from fastworkflow.parameters.argument_checks import check_extracted_values
+from fastworkflow.parameters.signatures import NOT_FOUND
 
 TUTORIAL = str(Path(__file__).parent.joinpath("planning_tutorial_workflow").resolve())
 RETAIL = str(Path(__file__).parent.parent.joinpath("fastworkflow", "examples", "retail_workflow").resolve())
@@ -352,7 +352,7 @@ def test_the_one_guard_does_not_read_the_agents_command_word_as_the_request():
     word an agent's text starts with (``fill.without_own_command_word``), so 'find', spelled only inside
     ``find_member``, is not written in it (whole words: "find" is bounded by the "_" of the command word)."""
     from fastworkflow import planning_commands as pc
-    from fastworkflow.utils.signatures import InputForParamExtraction
+    from fastworkflow.parameters.signatures import InputForParamExtraction
 
     class Query(BaseModel):
         query: str = Field(description="words of the member's name", json_schema_extra=COPIED)

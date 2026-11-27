@@ -81,7 +81,7 @@ def run_command(workflow: fastworkflow.Workflow, command_name: str, command: str
         return generator(workflow, command, None)
     # Checked field by field, as a binding is (bound_fields: no model validators, so a validator's lookup does
     # not rewrite a value the test set): the Input is what the response generator receives.
-    from fastworkflow.utils.input_validation import bound_fields
+    from fastworkflow.parameters.input_validation import bound_fields
 
     filled = parameters_class.model_construct(**bound_fields(parameters_class, parameters))
     return generator(workflow, command, filled)

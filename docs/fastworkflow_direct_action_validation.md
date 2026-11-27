@@ -36,7 +36,7 @@ constructor:
 and only the `create()` factory resolves it from the routing definition:
 
 ```python
-# fastworkflow/utils/signatures.py -- InputForParamExtraction.create()
+# fastworkflow/parameters/signatures.py -- InputForParamExtraction.create()
         input_for_param_extraction_class = subject_command_routing_definition.get_command_class(
             subject_command_name, ModuleType.INPUT_FOR_PARAM_EXTRACTION_CLASS)
 ```
@@ -45,7 +45,7 @@ So on the direct-action path that attribute stayed `None`, and
 `validate_parameters` took its early return:
 
 ```python
-# fastworkflow/utils/signatures.py -- InputForParamExtraction.validate_parameters()
+# fastworkflow/parameters/signatures.py -- InputForParamExtraction.validate_parameters()
         if is_valid:
             if not (
                 self.input_for_param_extraction_class and \
