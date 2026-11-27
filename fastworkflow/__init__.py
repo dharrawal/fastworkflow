@@ -9,7 +9,9 @@ def _stop_litellm_loading_a_dotenv_file() -> None:
     own env files, so fastworkflow turns that load off. A ``LITELLM_MODE`` the user set is left as it is; when litellm
     was imported before fastworkflow, its load has already happened and this can only say so."""
     _os.environ.setdefault("LITELLM_MODE", "PRODUCTION")
-    if "litellm" in _sys.modules and _os.environ["LITELLM_MODE"] == "PRODUCTION":
+    litellm = _sys.modules.get("litellm")
+    # litellm records the mode it was imported under; anything but PRODUCTION means it ran its .env load.
+    if litellm is not None and getattr(litellm, "litellm_mode", "DEV") != "PRODUCTION":
         import logging
         logging.getLogger("fastWorkflow").warning(
             "litellm was imported before fastworkflow, so it may already have loaded a .env file into the process "
