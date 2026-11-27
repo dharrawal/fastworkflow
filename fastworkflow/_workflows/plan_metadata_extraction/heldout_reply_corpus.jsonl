@@ -34,3 +34,43 @@
 {"text": "correction: the copy is large print", "label": "edit"}
 {"text": "fix step 3 so it uses email not phone", "label": "edit"}
 {"text": "change step 1 goal to renew the card", "label": "edit"}
+{"text": "Also change step 2 to a short joke", "label": "edit"}
+{"text": "DrChrono onboarding status", "label": "vague"}
+{"text": "I don't know", "label": "vague"}
+{"text": "I don't know whether IT Support is a unit or a group; use your best judgment", "label": "edit"}
+{"text": "No, that is one name. Make it a single step for 'Kline and Sons Ltd' and drop the second step.", "label": "edit"}
+{"text": "Not just people: I want the kinds of records on file in the directory", "label": "edit"}
+{"text": "Please remove step 2's status filter.", "label": "edit"}
+{"text": "Remove step 2; 'Sons Ltd' is part of the name in step 1, not a separate entity.", "label": "drop"}
+{"text": "Steps 3 and 4 repeat steps 1 and 2. Please remove steps 3 and 4; everything else is fine.", "label": "drop"}
+{"text": "This is one recertification request. Step 1 already covers it all, so please drop steps 2, 3 and 4 and keep only step 1.", "label": "drop"}
+{"text": "Yes, but also list which findings are driving her risk", "label": "edit"}
+{"text": "apply the same overview fix to each step", "label": "edit"}
+{"text": "asdf", "label": "vague"}
+{"text": "cancel the third one", "label": "drop"}
+{"text": "change step 2 to a shorter joke", "label": "edit"}
+{"text": "cut step 3 down to five results", "label": "edit"}
+{"text": "fine, but drop the last one", "label": "drop"}
+{"text": "go back and change step 2", "label": "edit"}
+{"text": "hell no", "label": "decline"}
+{"text": "hmm", "label": "vague"}
+{"text": "hmm not sure", "label": "vague"}
+{"text": "hold on", "label": "vague"}
+{"text": "in step 1 make the branch Central and drop step 2", "label": "edit"}
+{"text": "just do it", "label": "confirm"}
+{"text": "look up step 1", "label": "look_up"}
+{"text": "make it about trains instead", "label": "edit"}
+{"text": "make it better somehow", "label": "vague"}
+{"text": "make step 2 shorter; use the library", "label": "edit"}
+{"text": "make the joke shorter", "label": "edit"}
+{"text": "nah, it's fine, go ahead", "label": "confirm"}
+{"text": "no, change the second one to weekly", "label": "edit"}
+{"text": "skip step 2 if there are no results", "label": "edit"}
+{"text": "something feels off", "label": "vague"}
+{"text": "stop after step 2", "label": "drop"}
+{"text": "unclear one", "label": "vague"}
+{"text": "unclear two", "label": "vague"}
+{"text": "use Library/count_books", "label": "edit"}
+{"text": "use book_by_title for the second part", "label": "edit"}
+{"text": "we do not need the joke", "label": "drop"}
+{"text": "what do you think?", "label": "vague"}

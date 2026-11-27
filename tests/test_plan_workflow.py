@@ -168,6 +168,7 @@ def test_held_out_corpus_labels_are_valid_commands():
     by_label: dict[str, list[str]] = {}
     for row in rows:
         by_label.setdefault(row["label"], []).append(row["text"])
+    # ``vague``: a reply that asks for nothing the review can do; the right answer is to ask again.
     assert set(by_label) == {
         "confirm",
         "decline",
@@ -175,11 +176,14 @@ def test_held_out_corpus_labels_are_valid_commands():
         "add",
         "look_up",
         "edit",
+        "vague",
     }
     assert all(len(texts) >= 6 for texts in by_label.values())
     seeds = _plain_utterance_seeds()
+    every_seed = set().union(*seeds.values())
     for row in rows:
-        assert row["text"].strip().lower() not in seeds[row["label"]]
+        text = row["text"].strip().lower()
+        assert text not in (every_seed if row["label"] == "vague" else seeds[row["label"]]), row["text"]
 
 
 def _proposal_review_model_dir() -> str:
@@ -199,6 +203,15 @@ def _predict_command_short_name(router, text: str) -> str:
     return label.split("/")[-1] if "/" in label else label
 
 
+def _answers_right(router, row: dict) -> bool:
+    """A command reply is right when the head's top answer is its command. A ``vague`` reply is right when the
+    head does not act on it: it is not confident, or its answer is the vague-reply class."""
+    if row["label"] != "vague":
+        return _predict_command_short_name(router, row["text"]) == row["label"]
+    labels, details = router.predict_with_details(row["text"])
+    return not details.get("confident") or (labels and labels[0].split("/")[-1] == "wildcard")
+
+
 @pytest.mark.requires_plan_head
 def test_trained_head_scores_held_out_corpus():
     from fastworkflow.intent.router import CommandRouter
@@ -209,14 +222,13 @@ def test_trained_head_scores_held_out_corpus():
     rows = _load_held_out_corpus()
 
     per_class: dict[str, list[bool]] = {name: [] for name in (
-        "confirm", "decline", "drop", "add", "look_up", "edit"
+        "confirm", "decline", "drop", "add", "look_up", "edit", "vague"
     )}
     for row in rows:
-        predicted = _predict_command_short_name(router, row["text"])
-        per_class[row["label"]].append(predicted == row["label"])
+        per_class[row["label"]].append(_answers_right(router, row))
 
     rates = {label: (sum(hits) / len(hits) if hits else 0.0) for label, hits in per_class.items()}
-    overall = sum(row["label"] == _predict_command_short_name(router, row["text"]) for row in rows) / len(rows)
+    overall = sum(sum(hits) for hits in per_class.values()) / len(rows)
 
     # Shipped head: majority of held-out replies should route to the right command.
     assert overall >= 0.70, f"held-out overall={overall:.3f}, per-class={rates}"
