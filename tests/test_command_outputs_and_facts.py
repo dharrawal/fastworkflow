@@ -27,7 +27,7 @@ from fastworkflow.observation_offloading import (
     command_run_record,
 )
 from fastworkflow.observation_offloading.facts import _join_list, _page_key
-from fastworkflow.observation_offloading.agent import build_compacting_step
+from fastworkflow.agent.tool_agent import build_compacting_step
 from fastworkflow.observation_offloading.labels import alias_line
 from fastworkflow.observation_offloading.state import (
     note_command_run,

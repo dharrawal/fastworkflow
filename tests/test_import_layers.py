@@ -51,8 +51,6 @@ NOT_CHECKED = ("examples", "_workflows", "skills_for_coding_fastworkflows")
 KNOWN_EXCEPTIONS = {
     ("fastworkflow.parameters.signatures", "fastworkflow.planning.planning_commands"):
         "the planning-argument gap code moves into parameters/ (later)",
-    ("fastworkflow.observation_offloading.agent", "fastworkflow.agent.react"):
-        "the offloading wiring of the ReAct loop moves to agent/ (later)",
 }
 
 

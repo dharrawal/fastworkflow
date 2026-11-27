@@ -17,7 +17,7 @@ import pytest
 
 import fastworkflow
 from fastworkflow.observability import tracing
-from fastworkflow.observation_offloading.agent import (
+from fastworkflow.agent.tool_agent import (
     build_compacting_step,
     build_tool_agent,
 )
@@ -690,7 +690,7 @@ class PerTurnScope(unittest.TestCase):
         turn = {"key": "turn-1"}
         step = build_compacting_step(object(), selected_archive=archive)
         texts = {}
-        with patch("fastworkflow.observation_offloading.agent.scope_for_host",
+        with patch("fastworkflow.agent.tool_agent.scope_for_host",
                    side_effect=lambda host: self._scope(turn["key"])):
             for turn["key"] in ("turn-1", "turn-2"):
                 text = f"{turn['key']} dump\n" + ("row\n" * 3_000)
@@ -747,10 +747,10 @@ class HookIsolation(unittest.TestCase):
             "observation_0": "x" * 30_000,
         }
         with patch(
-            "fastworkflow.observation_offloading.agent.scope_for_host",
+            "fastworkflow.agent.tool_agent.scope_for_host",
             return_value=self.scope,
         ), patch(
-            "fastworkflow.observation_offloading.agent.compact_trajectory",
+            "fastworkflow.agent.tool_agent.compact_trajectory",
             side_effect=ValueError("broken compaction"),
         ):
             self.assertTrue(step(0, trajectory))
@@ -779,7 +779,7 @@ class HookIsolation(unittest.TestCase):
             step = build_compacting_step(SimpleNamespace(workflow_tool_agent=agent),
                                          selected_archive=self.archive)
             view = dict(trajectory)
-            with patch("fastworkflow.observation_offloading.agent.scope_for_host",
+            with patch("fastworkflow.agent.tool_agent.scope_for_host",
                        return_value=self.scope), \
                  patch("fastworkflow.observation_offloading.context_budget.trajectory_max_bytes", return_value=40_000):
                 step(5, view)

@@ -204,7 +204,7 @@ produces. Each name remains an optional tuning override.
 
 Offloading has no on/off switch. A turn runs in one ReAct loop until the agent
 selects `finish` or the iteration ceiling is reached (default 25 steps,
-`DEFAULT_MAX_ITERS` in `observation_offloading/agent.py`). The one evidence
+`DEFAULT_MAX_ITERS` in `agent/tool_agent.py`). The one evidence
 setting is `FW_OFFLOAD_EVIDENCE_REDACTION`: `on` (the default) or `off`. See
 *Retention, redaction and known limits*.
 

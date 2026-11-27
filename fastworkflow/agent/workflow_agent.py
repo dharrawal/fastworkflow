@@ -54,7 +54,7 @@ from fastworkflow.core.context_navigation import home_contexts as context_homes
 from fastworkflow.engine.suspension import AskUserSuspend
 from fastworkflow.agent.chat_adapter import CommandsSystemPreludeAdapter
 from fastworkflow.utils.dspy_logger import watch_cut_off_replies
-from fastworkflow.observation_offloading.agent import build_tool_agent
+from fastworkflow.agent.tool_agent import build_tool_agent
 from fastworkflow.observation_offloading.search import search_memory as search_observation
 from fastworkflow.observation_offloading.labels import annotated_observation
 from fastworkflow.observation_offloading.archive import command_run_record

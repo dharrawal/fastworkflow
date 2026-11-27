@@ -28,7 +28,7 @@ from fastworkflow.observability import tracing
 from fastworkflow.observability import store as obs
 from fastworkflow.observation_offloading import archive as archive_module
 from fastworkflow.observation_offloading import state as offload_state
-from fastworkflow.observation_offloading.agent import build_tool_agent
+from fastworkflow.agent.tool_agent import build_tool_agent
 from fastworkflow.observation_offloading.archive import (
     RuntimeHandleArchive,
     RuntimeHandleScope,

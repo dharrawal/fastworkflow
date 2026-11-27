@@ -28,7 +28,7 @@ import dspy
 import fastworkflow
 from fastworkflow.session import state_paths
 from fastworkflow.observability import tracing
-from fastworkflow.observation_offloading.agent import (
+from fastworkflow.agent.tool_agent import (
     build_tool_agent,
     open_handle_archive,
 )
