@@ -75,10 +75,12 @@ def count_llm_calls_cut_at_limit(spans: Iterable[Mapping[str, Any]]) -> int:
     return sum(1 for span in spans if llm_call_cut_at_limit(span))
 
 
-SPAN_COMMAND_EXECUTE = "fw.command.execute"
-SPAN_AGENT_TOOL_CALL = "fw.agent.tool_call"
-SPAN_ASK_USER = "fw.ask_user"
-SPAN_NLU_INTENT = "fw.nlu.intent"
+# The span names read here (``tracing.SPAN_COMMAND``, ``SPAN_QUESTION``, ``SPAN_INTENT``), restated so that reading a
+# stored record does not import the tracing machinery (``tests/test_span_tree_readers.py`` pins them). A store written
+# before span contract 63 is not read.
+SPAN_COMMAND = "fw.command"
+SPAN_QUESTION = "fw.question"
+SPAN_INTENT = "fw.intent"
 
 # decision_signals.SignalKind member for the classifier's top-1 minus top-2
 # probability; the polarity table there says higher is more confident.
@@ -123,7 +125,7 @@ def execution_ledger(
     Joined on `command_call_id` from two sources that the substrate keeps on
     purpose in two tiers (turn.py, "Additive turn-level capture"): the turn
     record's `execution_records` refs (durable skeleton: id, parent, ordinal,
-    span_id) and the trace's `fw.command.execute` spans (best-effort detail:
+    span_id) and the trace's `fw.command` spans (best-effort detail:
     name, context, status, timing, and the `child_calls` ledger of span-less
     inner hops). A dispatch known to either appears once.
 
@@ -207,7 +209,7 @@ def execution_ledger(
         if _text_or_none(ref.get("span_id")):
             entry["span_id"] = ref["span_id"]
 
-    execute_spans = [s for s in span_list if s.get("name") == SPAN_COMMAND_EXECUTE]
+    execute_spans = [s for s in span_list if s.get("name") == SPAN_COMMAND]
     for span in execute_spans:
         attributes = _span_attributes(span)
         call_id = _text_or_none(attributes.get("command_call_id"))
@@ -235,23 +237,23 @@ def execution_ledger(
         if entry["span_recorded"] or not entry["span_id"]:
             continue
         span = by_span_id.get(entry["span_id"])
-        if span is not None and span.get("name") == SPAN_COMMAND_EXECUTE:
+        if span is not None and span.get("name") == SPAN_COMMAND:
             apply_span(entry, span)
 
-    # Whether a dispatch produced an ask-user entry: an fw.ask_user span whose
+    # Whether a dispatch produced an ask-user entry: an fw.question span whose
     # ancestry reaches that dispatch's execute span. One raised outside any
     # dispatch (the agent loop asking, which is where the trial's all sat) is
     # counted on the turn instead, never attributed to a row by guesswork.
     asked_outside = 0
     for span in span_list:
-        if span.get("name") != SPAN_ASK_USER:
+        if span.get("name") != SPAN_QUESTION:
             continue
         cursor = span.get("parent_span_id")
         owner: Optional[str] = None
         hops = 0
         while cursor and cursor in by_span_id and hops < 10_000:
             parent = by_span_id[cursor]
-            if parent.get("name") == SPAN_COMMAND_EXECUTE:
+            if parent.get("name") == SPAN_COMMAND:
                 owner = _text_or_none(_span_attributes(parent).get("command_call_id"))
                 break
             cursor = parent.get("parent_span_id")
@@ -309,11 +311,11 @@ def turn_decision_signals(spans: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     """The turn's intent-resolution chips, from what the NLU spans recorded.
 
     `intent_margin_min` is the smallest `classifier-topk-margin` among the
-    turn's `fw.nlu.intent` decisions -- the least confident resolution -- and
+    turn's `fw.intent` decisions -- the least confident resolution -- and
     None when no decision carried one (an exact-prefix match records
     `signals_absent_reason: deterministic-resolution` and no number, which is
     not confidence 1.0 and not low confidence either). `asked_user` counts
-    `fw.ask_user` spans.
+    `fw.question` spans.
     """
     margins: list[float] = []
     intent_decisions = 0
@@ -322,7 +324,7 @@ def turn_decision_signals(spans: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     for span in spans:
         name = span.get("name")
         attributes = _span_attributes(span)
-        if name == SPAN_NLU_INTENT:
+        if name == SPAN_INTENT:
             uncertainty = _mapping_attr(attributes.get("decision_uncertainty"))
             if uncertainty is None:
                 continue
@@ -339,7 +341,7 @@ def turn_decision_signals(spans: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
                     found = True
             if not found:
                 decisions_without_margin += 1
-        elif name == SPAN_ASK_USER:
+        elif name == SPAN_QUESTION:
             asked += 1
     return {
         "intent_margin_min": min(margins) if margins else None,

@@ -13,8 +13,8 @@ import json
 
 import dspy
 
-from fastworkflow import tracing
-from fastworkflow.policy_decision import (
+from fastworkflow.observability import tracing
+from fastworkflow.policy.policy_decision import (
     ContractFacts,
     DecisionPhase,
     DecisionTable,
@@ -23,8 +23,8 @@ from fastworkflow.policy_decision import (
     PolicyOutcome,
     PolicyRow,
 )
-from fastworkflow.policy_runtime import AgentPolicy, policy_of
-from fastworkflow.utils.react import fastWorkflowReAct
+from fastworkflow.policy.policy_runtime import AgentPolicy, policy_of
+from fastworkflow.agent.react import fastWorkflowReAct
 
 SIDE = frozenset({DecisionPhase.BEFORE_SIDE_EFFECT})
 ASK = frozenset({DecisionPhase.AFTER_OBSERVATION})
@@ -238,9 +238,9 @@ def test_policy_steps_are_traced_within_the_step_contract(monkeypatch):
     host = SimpleNamespace(trace_sink=sink, current_turn_key="turn-1", trace_span_stack=[])
     with tracing.host_scope(host):
         agent.forward(user_query="close T-1")
-    steps = [s for s in sink.spans if s.name == tracing.SPAN_AGENT_STEP]
+    steps = [s for s in sink.spans if s.name == tracing.SPAN_STEP]
     assert len(steps) == 5
-    contract = tracing.SPAN_CONTRACTS[tracing.SPAN_AGENT_STEP].attributes
+    contract = tracing.SPAN_CONTRACTS[tracing.SPAN_STEP].attributes
     for span in steps:
         assert set(span.attributes) - tracing.ENVELOPE_ATTRIBUTES <= contract
     by_source = {s.attributes.get("policy_source"): s.attributes for s in steps}

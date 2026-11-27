@@ -5,7 +5,7 @@ itself. Two such aborts in a row return the same text, and the guard used to
 refuse the third, leaving the session in a stale parameter round.
 """
 
-from fastworkflow import workflow_agent
+from fastworkflow.agent import workflow_agent
 from tests.test_multi_command_refusal import initialized_fastworkflow, session  # noqa: F401
 from tests.test_repeat_block import agent, responses, run_step  # noqa: F401
 

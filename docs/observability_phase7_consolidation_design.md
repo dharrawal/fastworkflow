@@ -149,7 +149,7 @@ Phase-A behavior instead of taxing every turn).
 ### 2.5 Labeling and topic lookup on the new store
 
 - `generate_topic_and_summary` (pure LLM call) moves from
-  `conversation_store.py` to `fastworkflow/conversation_labeling.py`
+  `conversation_store.py` to `fastworkflow/session/conversation_labeling.py`
   unchanged, with its timeout plumbing.
 - Turn summaries for labeling read from the turns table
   (`conversation_summary` column) instead of legacy turn records.

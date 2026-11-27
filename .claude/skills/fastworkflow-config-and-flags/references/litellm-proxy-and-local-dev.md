@@ -44,7 +44,7 @@ LITELLM_PROXY_API_KEY=<proxy key>
   directly, not `get_lm`. Whether `litellm.completion` honors a `litellm_proxy/` prefix without
   an explicit `api_base` has not been tested here — treat as open.
 - **`run` still demands `LITELLM_API_KEY_SYNDATA_GEN`** even in all-proxy setups
-  (file-presence probe, `run/__main__.py:131-132`). Put a dummy value in the passwords file.
+  (file-presence probe, `run_cli/__main__.py:131-132`). Put a dummy value in the passwords file.
 - **Bedrock note:** `train` only warns on the missing SYNDATA key ("OK if this is Bedrock",
   `train/__main__.py:276-277`); AWS credentials flow through boto3 (optional `aws` poetry
   group, `pyproject.toml`), outside the env-file system entirely.
@@ -94,7 +94,7 @@ two-file contract described in SKILL.md.
 Facts verified 2026-07-09 against v2.22.2 (commit c33b9a5).
 
 - Proxy routing logic: `sed -n '42,69p' fastworkflow/utils/dspy_utils.py`
-- signatures.py bypass: `grep -n "dspy.LM(" fastworkflow/utils/signatures.py`
+- signatures.py bypass: `grep -n "dspy.LM(" fastworkflow/parameters/signatures.py`
 - litellm.completion call sites: `grep -rn "litellm.completion" fastworkflow/ --include="*.py"`
 - Tracked-ness: `git ls-files env/.env passwords/.env .env`
 - gen-env behavior: `sed -n '85,116p' gen-env.sh; grep -n "gen-env" makefile`

@@ -11,10 +11,11 @@ from types import SimpleNamespace
 import pytest
 from pydantic import BaseModel, Field, model_validator
 
-from fastworkflow import planning, planning_commands
+from fastworkflow import planning
+from fastworkflow.planning import planning_commands
 from fastworkflow.planning import (StepFormError, command_inputs_for_steps, count,
                                    count_and_names_read, row_id_field, run)
-from fastworkflow.planning_phases import CODE_MAX_PAGES, Placeholder
+from fastworkflow.planning.planning_phases import CODE_MAX_PAGES, Placeholder
 
 
 class OpenBookInput(BaseModel):
@@ -22,8 +23,10 @@ class OpenBookInput(BaseModel):
 
 
 class DeclaredIdInput(BaseModel):
-    """The id is the field named by from_command_output, not the one required str field."""
-    label: str = Field(description="a label")
+    """The id is the field named by from_command_output, not the other str field. That field has a default: a second
+    REQUIRED input would make run(named=) a load error, since a step that opens the row by name passes nothing else and
+    code could never run it (the load-check sweep)."""
+    label: str = Field(default="", description="a label")
     item_ref: str = Field(description="the item", json_schema_extra={"from_command_output": "find.refs"})
 
 
@@ -159,7 +162,7 @@ def test_a_planning_command_input_validator_that_needs_the_context_says_so_witho
     # guard is applied before that, at the load point (planning_command_from_parts).
     with pytest.raises(planning_commands.PlanningCommandFormatError):
         planning_commands.command_from_module("guarded", module, "_commands/guarded.py")
-    from fastworkflow.utils.input_validation import _CONTEXT_GUARD
+    from fastworkflow.parameters.input_validation import _CONTEXT_GUARD
 
     validators = GuardedInput.__pydantic_decorators__.model_validators
     assert validators and all(getattr(dec.func, _CONTEXT_GUARD, False) for dec in validators.values())
@@ -213,3 +216,59 @@ def test_a_removed_name_is_not_an_attribute_of_the_module():
 def test_the_removed_names_are_not_exported():
     assert not {"pick", "full_list", "listed", "num"} & set(planning.__all__)
     assert {"count", "count_and_names_read"} <= set(planning.__all__)
+
+
+# A value that could be misread is written quoted, and every reader gets the same value back (fix-ftdl.5.1)
+
+class _FindInput(BaseModel):
+    query: str = Field(description="the title")
+
+
+_MISREADABLE = ["When Harry Met Sally", "Only Fools and Horses", "Gone if needed", "Something Else",
+                "Ender's Game", 'Say "hi" now', "Ann Lee", "Only"]
+
+
+@pytest.mark.parametrize("value", _MISREADABLE)
+def test_run_quotes_a_value_the_step_parser_could_misread_and_code_runs_it(value):
+    from fastworkflow.observation_offloading import finish_check
+    from fastworkflow.planning.planning_phases import plan_code_steps
+
+    text = run("find_book", query=value)
+    (step,) = finish_check.parse_plan(f"1. {text}", ["find_book"], [])
+    assert step.kind == finish_check.KIND_COMMAND
+    assert step.arguments == {"query": finish_check.plain_value(value)}
+    ((_, command, reason),) = plan_code_steps(f"1. {text}", ["find_book"], [], lambda name: [_FindInput])
+    assert command is not None, reason
+
+
+@pytest.mark.parametrize("value", _MISREADABLE)
+def test_run_named_quotes_a_name_the_step_parser_could_misread_and_code_reads_it_back(value):
+    from fastworkflow.observation_offloading import finish_check
+
+    text = run("open_book", named=value)
+    (step,) = finish_check.parse_plan(f"1. {text}", ["open_book"], [])
+    assert step.kind == finish_check.KIND_COMMAND
+    assert finish_check.match_name(str(text)) == value
+
+
+def test_a_value_that_holds_both_quotes_is_written_as_it_is():
+    assert run("find_book", query="""a "b" 'c'""") == """find_book query=a "b" 'c'"""
+
+
+def test_the_template_grid_and_preview_text_carry_the_quoted_form():
+    text = run("find_book", query="When Harry Met Sally")
+    assert text == 'find_book query="When Harry Met Sally"'
+    assert run("find_book", query=planning.Placeholder("input.title")) == "find_book query=<input.title>"
+
+
+# run(named=): the row id is found by the runtime's rule (fix-ftdl.5.2)
+
+class _ShelfInput(BaseModel):
+    shelf_code: str = Field(description="the shelf")
+
+
+def test_a_required_str_field_that_is_not_id_named_is_not_a_row_id():
+    assert row_id_field(_ShelfInput) is None
+    with command_inputs_for_steps(_sigs(open_shelf=_ShelfInput)):
+        with pytest.raises(StepFormError, match="declare the producer of its id field with from_command_output"):
+            run("open_shelf", named="A1")

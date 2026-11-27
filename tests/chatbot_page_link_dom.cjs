@@ -1,6 +1,6 @@
 /* The address bar names the page on screen: every move writes the fragment,
    and every fragment written opens the same page on a fresh load. Inside a
-   turn a level is named by its span, or by position where it has none. */
+   turn a level is named by its span; a position names one too. */
 const assert = require('node:assert/strict');
 const {JSDOM, VirtualConsole, CookieJar} = require(process.argv[2] + '/node_modules/jsdom');
 const base = process.argv[3];
@@ -56,13 +56,16 @@ async function open(hash, options) {
     'the library opened without a token in the URL');
   await p.close();
 
-  // Moving through a turn writes each level's name.
+  // Moving through a turn writes each level's name (every level of a turn is a span).
   p = await open('#turn=crumb-turn');
   await p.until(() => p.heading().includes('climb the crumbs'), 'the turn');
   assert.equal(p.hash(), '#turn=crumb-turn');
-  p.row('Execution').click();
-  await p.until(() => p.heading().startsWith('Execution'), 'Execution');
-  assert.equal(p.hash(), '#turn=crumb-turn&span=crumb-exec');
+  p.row('Run').click();
+  await p.until(() => p.heading().startsWith('Run'), 'Run');
+  assert.equal(p.hash(), '#turn=crumb-turn&span=crumb-run');
+  p.row('Part 1').click();
+  await p.until(() => p.heading().startsWith('Part 1'), 'Part 1');
+  assert.equal(p.hash(), '#turn=crumb-turn&span=crumb-part');
   p.row('Step 1').click();
   await p.until(() => p.heading().startsWith('Step 1'), 'Step 1');
   assert.equal(p.hash(), '#turn=crumb-turn&span=crumb-step-1');
@@ -70,15 +73,14 @@ async function open(hash, options) {
     .find(b => b.textContent === 'climb the crumbs').click();
   await p.until(() => p.heading().includes('climb the crumbs'), 'the turn again');
   assert.equal(p.hash(), '#turn=crumb-turn');
-  p.row('Planning').click();
-  await p.until(() => p.heading().startsWith('Planning'), 'Planning');
-  assert.equal(p.hash(), '#turn=crumb-turn&level=0', 'a level with no span is named by position');
+  p.row('Run').click();
+  await p.until(() => p.heading().startsWith('Run'), 'Run again');
 
   // The copy button hands over the fragment, never the token in front of it.
   const copy = p.d.getElementById('copyLinkBtn');
   assert.equal(copy.style.display, '', 'Copy link shows in debug mode');
   copy.click();
-  await p.until(() => p.d.getElementById('noticeStack').textContent.includes('#turn=crumb-turn&level=0'),
+  await p.until(() => p.d.getElementById('noticeStack').textContent.includes('#turn=crumb-turn&span=crumb-run'),
     'the copied link');
   assert.ok(!p.d.getElementById('noticeStack').textContent.includes('token'));
 
@@ -87,7 +89,7 @@ async function open(hash, options) {
   assert.equal(p.hash(), '#test');
   assert.equal(copy.style.display, 'none');
   p.d.getElementById('modeDebug').click();
-  assert.equal(p.hash(), '#turn=crumb-turn&level=0');
+  assert.equal(p.hash(), '#turn=crumb-turn&span=crumb-run');
 
   // A fragment pasted into a live page opens its page.
   p.w.location.hash = 'turn=crumb-turn&span=crumb-step-2';
@@ -95,31 +97,17 @@ async function open(hash, options) {
   assert.equal(p.hash(), '#turn=crumb-turn&span=crumb-step-2');
   await p.close();
 
-  // Each of those names opens its level on a fresh load.
+  // Each of those names opens its level on a fresh load; a position names a level too.
   p = await open('#turn=crumb-turn&span=crumb-step-1');
   await p.until(() => p.heading().startsWith('Step 1'), 'Step 1 by span');
   assert.equal(p.hash(), '#turn=crumb-turn&span=crumb-step-1');
   await p.close();
-  p = await open('#turn=crumb-turn&level=0');
-  await p.until(() => p.heading().startsWith('Planning'), 'Planning by position');
+  p = await open('#turn=crumb-turn&level=0.0');
+  await p.until(() => p.heading().startsWith('Part 1'), 'Part 1 by position');
   await p.close();
   p = await open('#turn=crumb-turn&level=7.3');
   await p.until(() => p.detail.textContent.includes('level 7.3'), 'the missing-level notice');
   assert.ok(p.heading().includes('climb the crumbs'), 'a missing level leaves the turn open at its top');
-  await p.close();
-
-  // Steps inferred from an older recording have no span: their position names them.
-  p = await open('#turn=legacy-turn');
-  await p.until(() => p.heading().includes('an older recording'), 'the legacy turn');
-  p.row('Execution').click();
-  await p.until(() => p.heading().startsWith('Execution'), 'legacy Execution');
-  p.row('Step 2').click();
-  await p.until(() => p.heading().startsWith('Step 2'), 'legacy Step 2');
-  const legacyLink = p.hash();
-  assert.match(legacyLink, /^#turn=legacy-turn&level=\d+\.\d+$/);
-  await p.close();
-  p = await open(legacyLink);
-  await p.until(() => p.heading().startsWith('Step 2'), 'legacy Step 2 by position');
   await p.close();
 
   // Rail records are named the way the recording names them, not by their

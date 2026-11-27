@@ -2,7 +2,7 @@
 import dspy
 from dspy.utils.exceptions import AdapterParseError
 
-from fastworkflow.utils.react import fastWorkflowReAct
+from fastworkflow.agent.react import fastWorkflowReAct
 
 
 def a_tool(command: str) -> str:

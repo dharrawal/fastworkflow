@@ -6,11 +6,9 @@ from ...application.user import User
 
 
 class Context:
-    state_version = 1
+    inherits = ["*"]
 
-    @classmethod
-    def get_parent(cls, record: User) -> None:
-        return None
+    state_version = 1
 
     @classmethod
     def get_state(cls, record: User) -> dict[str, Any]:

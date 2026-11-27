@@ -17,7 +17,7 @@ import dspy
 import pytest
 from litellm import ContextWindowExceededError
 
-from fastworkflow.answer_rehydration import (
+from fastworkflow.observation_offloading.answer_rehydration import (
     ANSWER_REHYDRATION_MAX_BYTES_ENV,
     DEFAULT_MAX_BYTES,
     KIND_LABEL,
@@ -42,7 +42,7 @@ from fastworkflow.observation_offloading.state import (
     reset_observation_state,
     snapshot_events,
 )
-from fastworkflow.utils.react import fastWorkflowReAct
+from fastworkflow.agent.react import fastWorkflowReAct
 
 # The budgets derive from the agent model's window; pin it to the reference.
 pytestmark = pytest.mark.usefixtures("reference_agent_window")
@@ -391,7 +391,7 @@ class ExtractHook(unittest.TestCase):
         trajectory = self.fixture.trajectory()
         recorder = Recorder()
         self.agent.extract = recorder
-        with mock.patch("fastworkflow.answer_rehydration.rehydrate",
+        with mock.patch("fastworkflow.observation_offloading.answer_rehydration.rehydrate",
                         side_effect=RuntimeError("no archive")):
             self.agent._extract_prediction(trajectory, user_query="q")
         self.assertEqual(len(recorder.calls), 1)

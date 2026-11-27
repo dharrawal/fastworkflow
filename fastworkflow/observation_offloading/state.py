@@ -64,6 +64,17 @@ def archive_for_path(db_path: str) -> RuntimeHandleArchive:
         return _archives_by_path.setdefault(key, created)
 
 
+def mark_pruned(db_path: str) -> None:
+    """Record that *db_path* is pruned (or about to be) by this process.
+
+    A trace sink calls this where it prunes at startup, so the first agent
+    build does not prune the same database again inside the user's first turn.
+    """
+    key = os.path.abspath(os.path.expanduser(str(db_path)))
+    with _lock:
+        _pruned_paths.add(key)
+
+
 def prune_once(db_path: str) -> bool:
     """Prune the observability database at *db_path*, at most once per process.
 
@@ -72,9 +83,12 @@ def prune_once(db_path: str) -> bool:
     it: a context built with ``tracing.NoOpTraceSink()`` would grow its offload
     tables without bound. The agent builds a new archive object per agent, so
     the guard is per PATH, or every build would re-prune a large database on
-    its first turn. Where a sink already pruned at startup this second pass
-    finds nothing to delete. Returns whether this call ran the prune; a failure
-    is logged and never raised, because an agent must still be built.
+    its first turn. A trace sink that prunes at startup marks its path with
+    ``mark_pruned``, and then this returns False without pruning: a large
+    store would otherwise be pruned a second time, slowly, while the user
+    waits for the first turn. With no sink on the path this prunes once.
+    Returns whether this call ran the prune; a failure is logged and never
+    raised, because an agent must still be built.
     """
     key = os.path.abspath(os.path.expanduser(str(db_path)))
     with _lock:
@@ -97,7 +111,7 @@ def observability_db_path(host: Any) -> str:
     The session's bound app workflow first, then its active workflow: the same
     database ``build_tool_agent`` opens for the turn's observations.
     """
-    from fastworkflow import state_paths
+    from fastworkflow.session import state_paths
 
     app_workflow = getattr(host, "app_workflow", None)
     getter = getattr(host, "get_active_workflow", None)
@@ -120,7 +134,7 @@ def durable_archive(selected_archive: Any = None) -> Any:
     if selected_archive is not None:
         return selected_archive
     try:
-        from fastworkflow import tracing
+        from fastworkflow.observability import tracing
 
         host = tracing.current_host()
         if host is not None:
@@ -169,7 +183,7 @@ def scope_for_host(host: Any) -> RuntimeHandleScope:
     ``build_tool_agent`` resolves the same scope for the ReAct loop; a scope
     computed two ways would be two scopes the moment either changed.
     """
-    from fastworkflow import tracing
+    from fastworkflow.observability import tracing
 
     channel_id = str(tracing.get_channel_id(host) or "unbound")
     turn_key = str(tracing.get_turn_key(host) or channel_id)
@@ -187,7 +201,7 @@ def default_scope() -> RuntimeHandleScope:
 
 def _current_agent() -> Any:
     """The ReAct agent running this command, when there is one."""
-    from fastworkflow import tracing
+    from fastworkflow.observability import tracing
 
     host = tracing.current_host()
     if host is None:
@@ -205,7 +219,7 @@ def current_scope() -> RuntimeHandleScope:
     The turn scope of the session the command runs under, derived from the trace
     host; the process default outside a session.
     """
-    from fastworkflow import tracing
+    from fastworkflow.observability import tracing
 
     host = tracing.current_host()
     if host is not None:

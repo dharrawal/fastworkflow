@@ -8,7 +8,7 @@ mode is visible.
 import os
 import unittest
 
-from fastworkflow import tracing
+from fastworkflow.observability import tracing
 from fastworkflow.observation_offloading import state
 from fastworkflow.observation_offloading.state import (
     current_execute_alias,

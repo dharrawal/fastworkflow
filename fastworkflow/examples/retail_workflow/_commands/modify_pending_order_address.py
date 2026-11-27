@@ -2,7 +2,7 @@ from typing import List
 
 import fastworkflow
 from pydantic import BaseModel, Field, ConfigDict, model_validator
-from fastworkflow.workflow import Workflow
+from fastworkflow.core.workflow import Workflow
 
 from ..retail_data import load_data
 from ..tools.modify_pending_order_address import ModifyPendingOrderAddress
@@ -12,20 +12,24 @@ class Signature:
     """Modify pending order address"""
     class Input(BaseModel):
         order_id: str = Field(
+            json_schema_extra={"from_command_output": "get_user_details.order_ids"},
             description="The order ID to modify",
-            json_schema_extra={"from_command_output": "get_user_details"},
             pattern=r"^(#?[\w\d]+)$",
             examples=["#W0000000"],
         )
-        address1: str = Field(description="First line of address", examples=["123 Main St"])
-        address2: str = Field(description="Second line of address", examples=["Apt 1"])
-        city: str = Field(description="City name", examples=["San Francisco"])
+        address1: str = Field(description="First line of address", examples=["123 Main St"],
+                              json_schema_extra={"copied_from_command_text": True})
+        address2: str = Field(description="Second line of address", examples=["Apt 1"],
+                              json_schema_extra={"copied_from_command_text": True})
+        city: str = Field(description="City name", examples=["San Francisco"],
+                              json_schema_extra={"copied_from_command_text": True})
         state: str = Field(
             description="State code",
             pattern=r"^([A-Z]{2})$",
             examples=["CA"],
         )
-        country: str = Field(description="Country name", examples=["USA"])
+        country: str = Field(description="Country name", examples=["USA"],
+                              json_schema_extra={"copied_from_command_text": True})
         zip: str = Field(
             description="ZIP code",
             pattern=r"^(\d{5})$",
@@ -59,6 +63,7 @@ class Signature:
         from fastworkflow.train.generate_synthetic import generate_diverse_utterances
         return generate_diverse_utterances(utterances_obj.plain_utterances, command_name)
 
+@fastworkflow.writes
 class ResponseGenerator:
     def __call__(self, workflow: Workflow, command: str, command_parameters: Signature.Input) -> Signature.Output:
         output = self._process_command(workflow, command_parameters)

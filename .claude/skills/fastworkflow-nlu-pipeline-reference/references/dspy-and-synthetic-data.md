@@ -44,7 +44,7 @@ class with only ancestor 'wildcard' pressure against it.
 
 ## B. DSPy few-shot corpus for parameter extraction (train-time, litellm direct)
 
-`fastworkflow/utils/generate_param_examples.py::generate_dspy_examples`, called per
+`fastworkflow/train/generate_param_examples.py::generate_dspy_examples`, called per
 parameterized command from `train/__main__.py:110-114` with `num_examples=15,
 validation_threshold=0.3` (function defaults are 10 / 0.4 — the call site overrides).
 
@@ -70,7 +70,7 @@ validation_threshold=0.3` (function defaults are 10 / 0.4 — the call site over
 
 ## C. Run-time parameter extraction (real DSPy)
 
-`fastworkflow/utils/signatures.py::InputForParamExtraction.extract_parameters` (:239-313):
+`fastworkflow/parameters/signatures.py::InputForParamExtraction.extract_parameters` (:239-313):
 
 ```
 Pydantic Input model
@@ -106,8 +106,9 @@ Agent-mode fast path (`_workflows/command_metadata_extraction/parameter_extracti
 - If agentic (`run_as_agent` set, not an `/`-forced assistant command), regex-extract
   `<field>value</field>` XML first (:65-80, :296-357). ALL fields must be found and none
   may equal a `Field(examples=)` value (:327-337), else fall back to the DSPy path.
-- On a clarification re-entry (stored params present), the user's bare reply is slotted
-  into the sentinel-valued fields by comma-splitting — no LLM at all (:360-411).
+- On a clarification re-entry (stored params present), the user's reply is read in code by the one reply
+  reader (`parameters/read.py`): `name: value` lines, the whole reply when one value is open, comma parts in order
+  only when the count matches the open values and each part fits — no LLM at all.
 
 Agent-level `AdapterParseError` (DSPy couldn't parse the LLM's structured output) retry:
 whole agent call retried up to 2 attempts (`workflow_execution_context.py:696-707`).
@@ -165,9 +166,9 @@ python -m fastworkflow.utils.dspy_cache_utils clear-disk --cache-dir /custom/pat
 ## Re-verification
 
 ```bash
-grep -n "temperature\|max_tokens" fastworkflow/train/generate_synthetic.py fastworkflow/utils/generate_param_examples.py
-sed -n '604,613p' fastworkflow/utils/generate_param_examples.py          # non-filtering return still there?
-grep -n "BestOfN\|LabeledFewShot\|JSONAdapter\|according to Dhar" fastworkflow/utils/signatures.py
+grep -n "temperature\|max_tokens" fastworkflow/train/generate_synthetic.py fastworkflow/train/generate_param_examples.py
+sed -n '604,613p' fastworkflow/train/generate_param_examples.py          # non-filtering return still there?
+grep -n "BestOfN\|LabeledFewShot\|JSONAdapter\|according to Dhar" fastworkflow/parameters/signatures.py
 grep -n "class .*Signature\|ChainOfThought\|get_lm" fastworkflow/build/genai_postprocessor.py
 grep -n "classes={}" fastworkflow/refine/__main__.py
 ```

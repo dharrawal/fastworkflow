@@ -24,16 +24,6 @@ def hello_world_workflow_path():
 
 
 @pytest.fixture
-def env_files():
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    env_file = os.path.join(project_root, "env", ".env")
-    passwords_file = os.path.join(project_root, "passwords", ".env")
-    if not os.path.isfile(env_file) or not os.path.isfile(passwords_file):
-        pytest.skip("env files missing for FastAPI tests")
-    return env_file, passwords_file
-
-
-@pytest.fixture
 def app_module(hello_world_workflow_path, env_files, tmp_path):
     env_file, passwords_file = env_files
     sys.argv = [
@@ -78,8 +68,7 @@ def test_cancel_pending_endpoint(app_module):
     async def setup_pending():
         runtime = await app_module.session_manager.get_session(channel_id)
         assert runtime is not None
-        runtime.execution_context._awaiting_user = True
-        runtime.execution_context._pending_clarification_request = "clarify?"
+        runtime.execution_context._ask_agent_question("clarify?")
         app_module.session_manager.session_state_store.save(
             channel_id,
             runtime.execution_context.serialize_state(channel_id=channel_id),
@@ -104,8 +93,7 @@ def test_invoke_agent_while_awaiting_without_suspended_is_409(app_module):
         runtime = await app_module.session_manager.get_session(channel_id)
         assert runtime is not None
         ctx = runtime.execution_context
-        ctx._awaiting_user = True
-        ctx._pending_clarification_request = "clarify?"
+        ctx._ask_agent_question("clarify?")
         ctx._ensure_agent_initialized()
         if ctx._workflow_tool_agent is not None:
             ctx._workflow_tool_agent.clear_suspension()
@@ -135,9 +123,7 @@ def test_cold_rehydrate_after_cache_evict(app_module):
         )
         runtime = await app_module.session_manager.get_session(channel_id)
         ctx = runtime.execution_context
-        ctx._awaiting_user = True
-        ctx._suspended_user_message = "original"
-        ctx._pending_clarification_request = "Pick one?"
+        ctx._ask_agent_question("Pick one?", "original")
         app_module.session_manager.session_state_store.save(
             channel_id, ctx.serialize_state(channel_id=channel_id)
         )
@@ -151,6 +137,6 @@ def test_cold_rehydrate_after_cache_evict(app_module):
         )
         runtime2 = await app_module.session_manager.get_session(channel_id)
         assert runtime2.execution_context.awaiting_user
-        assert runtime2.execution_context._pending_clarification_request == "Pick one?"
+        assert runtime2.execution_context.waiting.question == "Pick one?"
 
     asyncio.run(setup_and_check())

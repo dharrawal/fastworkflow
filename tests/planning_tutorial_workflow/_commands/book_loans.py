@@ -1,13 +1,13 @@
 """book_loans: the book the request names and who has it on loan.
 
-Reuses the phases book_by_title shares (_book_phases.BookPhases): __phases__ places them and the
+Reuses the phases book_by_title shares (_shared/book_phases.py, BookPhases): __phases__ places them and the
 new loans phase in order, and __result__ extends the shared answer with super().
 """
 from pydantic import BaseModel, Field
 
 from fastworkflow.planning import count_and_names_read, run
 
-from ._book_phases import BookPhases
+from ._shared.book_phases import BookPhases
 from .list_loans import Signature as ListLoans
 
 

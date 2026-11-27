@@ -6,7 +6,7 @@ kinds of proof.
 
 *What is recorded* is checked against real components (testing_rules.mdc): the
 trained ``fastworkflow/examples/hello_world`` workflow drives the real matching
-layers, the real ``find_best_matches`` scores real candidates, and the real
+layers, the real ``intent_clarification.misspelt`` scores real candidates, and the real
 embedding cache is exercised with the real DistilBERT pipeline. The assembling
 functions are pure functions of the capture bag, so most tiers can be covered
 without a model at all — which is the point of building them that way.
@@ -20,7 +20,7 @@ recorder has to read facts to shape a record. What may never happen is a capture
 value. A ``x is None`` presence check cannot express a threshold and is allowed;
 ``<``, ``>``, ``==`` and bare truthiness can, and are not.
 
-The polarity trap has its own test. ``find_best_matches`` returns a normalized
+The polarity trap has its own test. ``intent_clarification.misspelt`` returns a normalized
 Levenshtein DISTANCE where lower is a better match, while architecture §6.6.1
 names the kind ``fuzzy-score``. A consumer that reads the direction off the name
 inverts every curve drawn from it, so the direction is asserted here against real
@@ -38,7 +38,8 @@ import pytest
 from dotenv import dotenv_values
 
 import fastworkflow
-from fastworkflow import tracing
+from fastworkflow.observability import tracing
+from fastworkflow.intent import intent_loop
 from fastworkflow._workflows.command_metadata_extraction import intent_detection
 from fastworkflow._workflows.command_metadata_extraction import parameter_extraction
 from fastworkflow._workflows.command_metadata_extraction.intent_detection import (
@@ -56,27 +57,27 @@ from fastworkflow._workflows.command_metadata_extraction.intent_detection import
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import (
     slot_binding_uncertainty,
 )
-from fastworkflow.command_executor import CommandExecutor
+from fastworkflow.engine.command_executor import CommandExecutor
+from tests.test_nlu_span_emission import CLASSIFIER_REQUEST
 from fastworkflow.observability.decision_signals import (
     SIGNAL_DOMAINS,
     SLOT_BINDING_SOURCES,
     DecisionUncertainty,
     classifier_confidence,
 )
-from fastworkflow.nlu_labels import PARAMETER_VALUE_LABEL, WILDCARD_LABEL
-from fastworkflow.utils.fuzzy_match import find_best_matches
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.intent.nlu_labels import PARAMETER_VALUE_LABEL, WILDCARD_LABEL
+from fastworkflow.intent.intent_clarification import misspelt
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 HELLO_WORLD = str(
     Path(__file__).parent.parent / "fastworkflow" / "examples" / "hello_world"
 )
 
-# The five layers `_predict_impl` can attribute a resolution to, plus the "nothing
+# The four layers the intent loop can attribute a resolution to, plus the "nothing
 # claimed it" case that leaves the attribute unset.
 MATCHER_LAYERS = (
     "exact_prefix",
     "fuzzy_prematch",
-    "embedding_cache",
     "classifier",
     "clarification_default",
     None,
@@ -87,7 +88,7 @@ MATCHER_LAYERS = (
 def initialized_fastworkflow():
     env = dotenv_values("fastworkflow/examples/fastworkflow.env")
     fastworkflow.init(dict(env))
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     RoutingRegistry.clear_registry()
     yield
@@ -117,7 +118,7 @@ class RecordingTraceSink:
 def hello_ctx():
     # `is_workflow_trained`, not "___command_info exists": an untrained
     # scaffold already has that directory (3.3 port adaptation).
-    from fastworkflow.model_pipeline_training import is_workflow_trained
+    from fastworkflow.intent.router import is_workflow_trained
 
     if not is_workflow_trained(HELLO_WORLD)[0]:
         pytest.skip("hello_world is not trained on this machine")
@@ -137,7 +138,7 @@ def hello_ctx():
 
 # The recorder wrappers skip their work when no span was opened; a real one stands
 # in wherever the test is about what gets recorded rather than about that skip.
-_ANY_SPAN = tracing.Span(span_id="test", trace_id="test", name=tracing.SPAN_NLU_INTENT)
+_ANY_SPAN = tracing.Span(span_id="test", trace_id="test", name=tracing.SPAN_INTENT)
 
 
 def _kinds(uncertainty: DecisionUncertainty) -> list[str]:
@@ -159,18 +160,14 @@ def test_fuzzy_distance_polarity_is_measured_not_assumed():
     """A better match produces a LOWER value, through the real matcher.
 
     The bead's polarity trap: the contract kind is `fuzzy-score` but the number is
-    a distance. Asserting this against real `find_best_matches` output rather than
+    a distance. Asserting this against real `misspelt` output (the name layer's matcher, bd fix-ftdl.9) rather than
     against a hand-written constant is what makes it catch a future inversion at
     the emitter.
     """
     candidates = ["add_two_numbers", "what_can_i_do", "you_misunderstood"]
 
-    exact, exact_distance = find_best_matches(
-        "what_can_i_do", candidates, threshold=_FUZZY_PREMATCH_MAX_DISTANCE
-    )
-    typo, typo_distance = find_best_matches(
-        "what_can_i_du", candidates, threshold=_FUZZY_PREMATCH_MAX_DISTANCE
-    )
+    exact, exact_distance = misspelt("what_can_i_do", candidates)
+    typo, typo_distance = misspelt("what_can_i_du", candidates)
     assert exact == ["what_can_i_do"]
     assert typo == ["what_can_i_do"]
     assert exact_distance < typo_distance, "the better match must score lower"
@@ -193,26 +190,20 @@ def test_fuzzy_distance_polarity_is_measured_not_assumed():
 def test_fuzzy_threshold_is_a_maximum_and_is_recorded_beside_the_distance(hello_ctx):
     """A distance with no threshold beside it cannot be binned.
 
-    Also pins what the threshold means: `find_best_matches` admits a match at or
+    Also pins what the threshold means: `misspelt` admits a match at or
     below it and returns ([], None) above, so it is a maximum on a distance, not a
     minimum on a score.
     """
     candidates = ["add_two_numbers"]
-    _matched, close = find_best_matches(
-        "add_two_number", candidates, threshold=_FUZZY_PREMATCH_MAX_DISTANCE
-    )
+    _matched, close = misspelt("add_two_number", candidates)
     assert close <= _FUZZY_PREMATCH_MAX_DISTANCE
 
-    rejected, distance = find_best_matches(
-        "completely_different_text",
-        candidates,
-        threshold=_FUZZY_PREMATCH_MAX_DISTANCE,
-    )
+    rejected, distance = misspelt("completely_different_text", candidates)
     assert rejected == [] and distance is None
 
     ctx, sink = hello_ctx
     CommandExecutor.invoke_command(ctx, "what can i do")
-    span = sink.named(tracing.SPAN_NLU_INTENT)[-1]
+    span = sink.named(tracing.SPAN_INTENT)[-1]
     assert span.attributes["matcher_layer"] == "fuzzy_prematch"
     assert span.attributes["fuzzy_threshold"] == _FUZZY_PREMATCH_MAX_DISTANCE
     assert span.attributes["fuzzy_distance"] <= _FUZZY_PREMATCH_MAX_DISTANCE
@@ -233,13 +224,6 @@ def _trace_for(matcher_layer):
             "fuzzy_distance": 0.125,
             "fuzzy_threshold": _FUZZY_PREMATCH_MAX_DISTANCE,
             "candidate_count": 2,
-        }
-    if matcher_layer == "embedding_cache":
-        return {
-            "matcher_layer": "embedding_cache",
-            "cache_similarity": 0.91,
-            "cache_similarity_threshold": 0.85,
-            "candidate_count": 1,
         }
     if matcher_layer == "classifier":
         return {
@@ -319,17 +303,8 @@ def test_classifier_tier_carries_confidence_and_a_producer_version():
     assert "classifier-topk-margin" not in _kinds(uncertainty)
 
 
-def test_embedding_cache_reports_an_uncapturable_measurement_honestly():
-    """The cosine similarity decided this, and §6.6.1's SignalKind enum has no
-    member for it — so the structured record says "not-instrumented" rather than
-    silently looking like a decision nobody measured."""
-    uncertainty = command_identity_uncertainty(_trace_for("embedding_cache"))
-    assert uncertainty.signals == ()
-    assert uncertainty.signals_absent_reason == "not-instrumented"
-
-
 def test_unmatched_utterance_records_zero_candidates_and_missing_evidence():
-    """No matcher claimed it. find_best_matches discards the distance above its
+    """No matcher claimed it. misspelt discards the distance above its
     threshold, so the one measurement taken is not recoverable here."""
     uncertainty = command_identity_uncertainty(_trace_for(None))
     assert uncertainty.candidate_count == 0
@@ -393,9 +368,10 @@ def test_suppression_is_exactly_what_the_ambiguity_prompt_does():
         == ESCALATION_OUTCOME_SUPPRESSED_BY_AMBIGUITY
     )
     assert CommandNamePrediction.escalation_signals_in(predictions) == [WILDCARD_LABEL]
-    message = CommandNamePrediction._formulate_ambiguous_command_error_message(
-        predictions, run_as_agent=True
-    )
+    from fastworkflow.intent import intent_clarification
+
+    offered = [{"name": name} for name in intent_loop._usable(predictions, set())]
+    message = intent_clarification.plan_choice_question("x", offered, ambiguous=True, for_agent=True)
     assert WILDCARD_LABEL not in message
     assert "add_two_numbers" in message
 
@@ -404,12 +380,7 @@ def test_honored_escalation_resolves_to_no_local_command():
     """`honored` claims the parent-chain walk is reached; the walk is driven by
     `command_name=None`, so that is what the resolver must return."""
     assert escalation_outcome_of([WILDCARD_LABEL]) == ESCALATION_OUTCOME_HONORED
-    assert (
-        CommandNamePrediction.resolve_fully_qualified_command_name(
-            WILDCARD_LABEL, {"add_two_numbers": "add_two_numbers"}
-        )
-        is None
-    )
+    assert intent_loop._usable([WILDCARD_LABEL], set()) == []
 
 
 # ----------------------------------------------------------------------
@@ -585,87 +556,45 @@ class TestRoutingIsUnchanged:
             "add_two_numbers <first_num>5</first_num><second_num>3</second_num>",
         )
         assert out.success
-        span = sink.named(tracing.SPAN_NLU_INTENT)[-1]
-        assert span.attributes["matcher_layer"] == "exact_prefix"
-        assert span.attributes["command_name"] == "add_two_numbers"
-        assert span.attributes["resolved"] is True
-        assert span.attributes["ambiguous"] is False
+        # An exact name decides nothing (no model, no question): no fw.intent is written, and the command's own
+        # span says how it was resolved (span contract v63, bd fix-qjne.34).
+        assert sink.named(tracing.SPAN_INTENT) == []
+        span = sink.named(tracing.SPAN_COMMAND)[-1]
+        assert span.command_name == "add_two_numbers"
+        assert span.attributes["resolved_by"] == "exact_name"
+        assert span.attributes["success"] is True
 
     def test_fuzzy_prematch_still_routes_to_what_can_i_do(self, hello_ctx):
         ctx, sink = hello_ctx
         CommandExecutor.invoke_command(ctx, "what can i do")
-        span = sink.named(tracing.SPAN_NLU_INTENT)[-1]
+        span = sink.named(tracing.SPAN_INTENT)[-1]
         assert span.attributes["matcher_layer"] == "fuzzy_prematch"
         assert span.attributes["command_name"] == "IntentDetection/what_can_i_do"
         assert span.attributes["is_cme_command"] is True
 
-    def test_embedding_cache_lookup_is_unchanged_by_asking_for_details(
-        self, hello_ctx
-    ):
-        """The one call this change altered in another module's API.
-
-        `cache_match(..., return_details=True)` must pick the same label as the
-        plain call and still answer None on a miss, or the embedding-cache tier
-        routes differently. Real store, real DistilBERT embeddings, real matcher.
-        """
-        from fastworkflow.cache_matching import cache_match, store_utterance_cache
-        from fastworkflow.model_pipeline_training import CommandRouter
-
-        pipeline = CommandRouter(
-            f"{HELLO_WORLD}/___command_info/*"
-        ).modelpipeline
-        cache_path = str(
-            Path(HELLO_WORLD) / "___convo_info" / f"sigtest-{uuid.uuid4().hex}.sqlite3"
-        )
-        try:
-            store_utterance_cache(
-                cache_path, "add five and three", "add_two_numbers", pipeline
-            )
-            plain = cache_match(cache_path, "add five and three", pipeline, 0.85)
-            detailed = cache_match(
-                cache_path, "add five and three", pipeline, 0.85, return_details=True
-            )
-            assert plain == "add_two_numbers"
-            assert detailed[0] == plain
-            assert 0.85 <= detailed[1] <= 1.0
-            # A miss stays falsy, which is what the walrus in `_predict_impl` tests.
-            assert (
-                cache_match(
-                    cache_path,
-                    "totally unrelated wording about umbrellas",
-                    pipeline,
-                    0.999,
-                    return_details=True,
-                )
-                is None
-            )
-        finally:
-            Path(cache_path).unlink(missing_ok=True)
-
-
 class TestSpansCarryTheRecords:
     def test_intent_span_carries_a_decision_uncertainty(self, hello_ctx):
+        # An exact name writes no fw.intent (v63), so the written decision here is a fuzzy match, which measured a
+        # distance; the exact name's deterministic record is pinned by
+        # test_exact_prefix_is_deterministic_and_states_no_confidence.
         ctx, sink = hello_ctx
-        CommandExecutor.invoke_command(
-            ctx,
-            "add_two_numbers <first_num>5</first_num><second_num>3</second_num>",
-        )
-        span = sink.named(tracing.SPAN_NLU_INTENT)[-1]
+        CommandExecutor.invoke_command(ctx, "what can i do")
+        span = sink.named(tracing.SPAN_INTENT)[-1]
+        assert span.attributes["matcher_layer"] == "fuzzy_prematch"
         recorded = span.attributes["decision_uncertainty"]
         assert recorded["decision_kind"] == "command-identity"
-        assert recorded["signals_absent_reason"] == "deterministic-resolution"
-        assert recorded["signals"] == []
+        assert recorded["signals_absent_reason"] is None
+        assert {signal["kind"] for signal in recorded["signals"]} >= {"fuzzy-score"}
         # Re-parses into the contract, so what lands on the span is not a
         # look-alike dict that would fail validation on the way back in.
-        assert DecisionUncertainty(**recorded).candidate_count == 1
+        assert DecisionUncertainty(**recorded).candidate_count >= 1
 
+    @pytest.mark.usefixtures("no_planner_key")
     def test_intent_span_always_carries_an_escalation_outcome(self, hello_ctx):
         ctx, sink = hello_ctx
         CommandExecutor.invoke_command(ctx, "what can i do")
-        CommandExecutor.invoke_command(
-            ctx, "please compute the total of five plus three"
-        )
-        spans = sink.named(tracing.SPAN_NLU_INTENT)
+        CommandExecutor.invoke_command(ctx, CLASSIFIER_REQUEST)
+        spans = sink.named(tracing.SPAN_INTENT)
         assert spans
         for span in spans:
             assert span.attributes["escalation_outcome"] in ESCALATION_OUTCOMES
@@ -678,14 +607,13 @@ class TestSpansCarryTheRecords:
             == ESCALATION_OUTCOME_NOT_EVALUATED
         )
 
+    @pytest.mark.usefixtures("no_planner_key")
     def test_classifier_span_carries_a_confidence_signal(self, hello_ctx):
         ctx, sink = hello_ctx
-        CommandExecutor.invoke_command(
-            ctx, "please compute the total of five plus three"
-        )
+        CommandExecutor.invoke_command(ctx, CLASSIFIER_REQUEST)
         spans = [
             s
-            for s in sink.named(tracing.SPAN_NLU_INTENT)
+            for s in sink.named(tracing.SPAN_INTENT)
             if s.attributes.get("matcher_layer") == "classifier"
         ]
         assert spans, "classifier layer never ran"
@@ -702,12 +630,15 @@ class TestSpansCarryTheRecords:
         )
 
     def test_param_extraction_span_carries_a_slot_binding_record(self, hello_ctx):
+        # A typed call whose values are all valid decides nothing and writes no fw.parameters (v63); an invalid
+        # typed value is a decision (a refusal, no model call), so its extraction is written.
         ctx, sink = hello_ctx
         CommandExecutor.invoke_command(
             ctx,
-            "add_two_numbers <first_num>5</first_num><second_num>3</second_num>",
+            "add_two_numbers <first_num>abc</first_num><second_num>3</second_num>",
         )
-        span = sink.named(tracing.SPAN_NLU_PARAM_EXTRACTION)[-1]
+        span = sink.named(tracing.SPAN_PARAMETERS)[-1]
+        assert span.attributes["invalid_fields"] == ["first_num"]
         recorded = DecisionUncertainty(**span.attributes["decision_uncertainty"])
         assert recorded.decision_kind == "slot-binding"
         source = _signal(recorded, "slot-binding-source")
@@ -730,15 +661,14 @@ _CONTRACT_NAMES = frozenset({
     "slot_binding_source",
 })
 
-# The assembling functions and the locals that hold their output, plus the two raw
-# measurements this change stopped discarding. Named explicitly rather than
+# The assembling functions and the locals that hold their output, plus the raw
+# measurement this change stopped discarding. Named explicitly rather than
 # inferred, so that renaming one and leaving this list alone fails the presence
 # check below instead of silently emptying the rule.
 _CAPTURED_VALUE_NAMES = frozenset({
     "_recorded_command_identity_uncertainty",
     "_recorded_slot_binding_uncertainty",
-    "best_distance",
-    "cache_similarity",
+    "distance",
     "command_identity_uncertainty",
     "escalation_outcome_of",
     "signals",
@@ -746,11 +676,12 @@ _CAPTURED_VALUE_NAMES = frozenset({
     "uncertainty",
 })
 
-_GUARDED_MODULES = (intent_detection, parameter_extraction)
+# intent_loop is where the command-identity decision is made now (the CME's span assembly stays in intent_detection).
+_GUARDED_MODULES = (intent_detection, intent_loop, parameter_extraction)
 
 # The functions that decide where a message goes. Nothing they contain may come
 # from the signals contract at all.
-_ROUTING_FUNCTIONS = ("_predict_impl", "_extract_impl")
+_ROUTING_FUNCTIONS = ("_predict_impl", "_extract_impl", "resolve", "_by_name", "_chain")
 
 # `is` / `is not` against None asks whether a record exists; it cannot express a
 # threshold. Every other comparison can.

@@ -9,7 +9,7 @@ import threading
 
 import pytest
 
-from fastworkflow import state_paths
+from fastworkflow.session import state_paths
 from fastworkflow.observability import store as obs
 from fastworkflow.experiment.runner import (
     ExperimentController,

@@ -15,10 +15,11 @@ from unittest.mock import MagicMock
 import pytest
 
 import fastworkflow
+from fastworkflow.intent import intent_loop
 from tests.test_turn_result_capture import no_review_gate  # noqa: F401 - the review gate is off for these turns
-from fastworkflow.utils.react import NoSuspendedAgentStateError
-from fastworkflow.workflow_agent import _ask_user_tool
-from fastworkflow.workflow_execution_context import (
+from fastworkflow.engine.suspension import NoSuspendedAgentStateError
+from fastworkflow.agent.workflow_agent import _ask_user_tool
+from fastworkflow.engine.workflow_execution_context import (
     CommandCancelledError,
     WorkflowExecutionContext,
 )
@@ -44,7 +45,7 @@ def todo_workflow_path() -> str:
 @pytest.fixture
 def initialized_fastworkflow(monkeypatch):
     fastworkflow.init({})
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     monkeypatch.setattr(
         WorkflowExecutionContext,
@@ -74,12 +75,17 @@ def test_process_message_agent_mode_mocked_agent(
     mock_agent.return_value = mock_result
 
     monkeypatch.setattr(
-        "fastworkflow.workflow_agent.build_query_with_next_steps",
+        "fastworkflow.agent.workflow_agent.build_query_with_next_steps",
         lambda user_query, session, **kwargs: user_query,
     )
     monkeypatch.setattr(
-        "fastworkflow.workflow_agent._what_can_i_do",
+        "fastworkflow.agent.workflow_agent._what_can_i_do",
         lambda session: "commands",
+    )
+    # The planner's split (the model-backed seam before the parts are resolved): one part. With no planner model
+    # the splitter raises; before, a developer's .env that litellm loaded into the process supplied one.
+    monkeypatch.setattr(
+        "fastworkflow.agent.workflow_agent.split_into_subtasks", lambda user_query, **kwargs: [user_query]
     )
     monkeypatch.setattr(ctx, "_ensure_agent_initialized", lambda: None)
     monkeypatch.setattr(
@@ -139,12 +145,17 @@ def test_process_message_converts_ask_user_cancel_to_output(
         raise CommandCancelledError("ask_user requires a user_message_queue")
 
     monkeypatch.setattr(
-        "fastworkflow.workflow_agent.build_query_with_next_steps",
+        "fastworkflow.agent.workflow_agent.build_query_with_next_steps",
         lambda user_query, session, **kwargs: user_query,
     )
     monkeypatch.setattr(
-        "fastworkflow.workflow_agent._what_can_i_do",
+        "fastworkflow.agent.workflow_agent._what_can_i_do",
         lambda session: "commands",
+    )
+    # The planner's split (the model-backed seam before the parts are resolved): one part. With no planner model
+    # the splitter raises; before, a developer's .env that litellm loaded into the process supplied one.
+    monkeypatch.setattr(
+        "fastworkflow.agent.workflow_agent.split_into_subtasks", lambda user_query, **kwargs: [user_query]
     )
     monkeypatch.setattr(ctx, "_ensure_agent_initialized", lambda: None)
     _set_agents(ctx, failing_agent)
@@ -164,12 +175,17 @@ def _make_agent_ctx(initialized_fastworkflow, todo_workflow_path, monkeypatch):
     ctx.bind_app_workflow(wf)
 
     monkeypatch.setattr(
-        "fastworkflow.workflow_agent.build_query_with_next_steps",
+        "fastworkflow.agent.workflow_agent.build_query_with_next_steps",
         lambda user_query, session, with_agent_inputs_and_trajectory=False, **kwargs: user_query,
     )
     monkeypatch.setattr(
-        "fastworkflow.workflow_agent._what_can_i_do",
+        "fastworkflow.agent.workflow_agent._what_can_i_do",
         lambda session: "commands",
+    )
+    # The planner's split (the model-backed seam before the parts are resolved): one part. With no planner model
+    # the splitter raises; before, a developer's .env that litellm loaded into the process supplied one.
+    monkeypatch.setattr(
+        "fastworkflow.agent.workflow_agent.split_into_subtasks", lambda user_query, **kwargs: [user_query]
     )
     monkeypatch.setattr(ctx, "_ensure_agent_initialized", lambda: None)
     monkeypatch.setattr(
@@ -202,7 +218,7 @@ def test_run_agent_threads_planning_context_to_planner(
         return user_query
 
     monkeypatch.setattr(
-        "fastworkflow.workflow_agent.build_query_with_next_steps",
+        "fastworkflow.agent.workflow_agent.build_query_with_next_steps",
         capturing_planner,
     )
 
@@ -212,7 +228,7 @@ def test_run_agent_threads_planning_context_to_planner(
     monkeypatch.setattr(
         ctx,
         "_call_agent_with_retry",
-        # **kwargs absorbs the fw.agent.execute trace parameters (trace_input,
+        # **kwargs absorbs the agent loop's trace parameters (trace_input,
         # resumed) this test does not care about.
         lambda agent_call, lm=None, **kwargs: SimpleNamespace(final_answer="done"),
     )
@@ -277,7 +293,7 @@ def test_topology_b_resume_parity_steps(
         return "replanned observation"
 
     monkeypatch.setattr(
-        "fastworkflow.workflow_agent._post_ask_user_response",
+        "fastworkflow.agent.workflow_agent._post_ask_user_response",
         tracking_post,
     )
 
@@ -339,7 +355,7 @@ def test_awaiting_user_without_suspended_raises_conflict(
 ):
     """fix-quw: desynced awaiting_user must not become a bare RuntimeError/500."""
     ctx, _wf = _make_agent_ctx(initialized_fastworkflow, todo_workflow_path, monkeypatch)
-    ctx._awaiting_user = True
+    ctx._ask_agent_question("which one?")
     mock_agent = MagicMock()
     mock_agent.export_suspended.return_value = None
     _set_agents(ctx, mock_agent)
@@ -371,10 +387,8 @@ def test_cancel_pending_clears_awaiting_user(
 
 @pytest.mark.parametrize(
     "stage",
-    [
-        fastworkflow.NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION,
-        fastworkflow.NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION,
-    ],
+    [{"request": "frobnicate the widget", "ambiguous": True}, {"request": "frobnicate the widget", "misunderstood": True}],
+    ids=["ambiguity", "misunderstanding"],
 )
 def test_intent_clarification_reply_reaches_agent_unchanged_after_abort(
     initialized_fastworkflow,
@@ -387,8 +401,8 @@ def test_intent_clarification_reply_reaches_agent_unchanged_after_abort(
     No second LLM rewrites or answers it, and the agent is not told to ask the
     user: the reply already lists the commands to choose from.
     """
-    from fastworkflow.command_executor import CommandExecutor
-    from fastworkflow.workflow_agent import _execute_workflow_query
+    from fastworkflow.engine.command_executor import CommandExecutor
+    from fastworkflow.agent.workflow_agent import _execute_workflow_query
 
     ctx = WorkflowExecutionContext(run_as_agent=True)
     wf = fastworkflow.Workflow.create(
@@ -402,11 +416,10 @@ def test_intent_clarification_reply_reaches_agent_unchanged_after_abort(
     def fake_invoke(cls, session, command: str):
         calls.append(command)
         if command.split("/")[-1] == "abort":
-            ctx.cme_workflow.context["NLU_Pipeline_Stage"] = (
-                fastworkflow.NLUPipelineStage.INTENT_DETECTION)
+            intent_loop.clear(ctx.cme_workflow.context)
             response = "Command aborted"
         else:
-            ctx.cme_workflow.context["NLU_Pipeline_Stage"] = stage
+            intent_loop.store(ctx.cme_workflow.context, dict(stage))
             response = nlu_reply
         return fastworkflow.CommandOutput(
             command_name=command,
@@ -424,8 +437,7 @@ def test_intent_clarification_reply_reaches_agent_unchanged_after_abort(
     assert observation == f"{nlu_reply}\nCommand aborted"
     assert calls[0] == "frobnicate the widget"
     assert [c.split("/")[-1] for c in calls[1:]] == ["abort"]
-    assert ctx.cme_workflow.context["NLU_Pipeline_Stage"] == (
-        fastworkflow.NLUPipelineStage.INTENT_DETECTION)
+    assert intent_loop.waiting_for(ctx.cme_workflow.context) is None
     assert "ask_user" not in observation
 
 
@@ -447,7 +459,7 @@ def test_topology_a_cli_ask_user_blocks_with_queue(
     )
 
     monkeypatch.setattr(
-        "fastworkflow.workflow_agent.build_query_with_next_steps",
+        "fastworkflow.agent.workflow_agent.build_query_with_next_steps",
         lambda user_query, session, with_agent_inputs_and_trajectory=False, **kwargs: (
             f"replanned:{user_query}"
         ),
@@ -492,7 +504,7 @@ def test_topology_a_cli_ask_user_pairs_output_with_trace_sentinel(
     )
 
     monkeypatch.setattr(
-        "fastworkflow.workflow_agent.build_query_with_next_steps",
+        "fastworkflow.agent.workflow_agent.build_query_with_next_steps",
         lambda user_query, session, with_agent_inputs_and_trajectory=False, **kwargs: (
             f"replanned:{user_query}"
         ),

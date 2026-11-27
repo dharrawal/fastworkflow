@@ -216,26 +216,9 @@ is worth one cheap identity check per eviction.
 ### 4.4 The workflow-context projection
 
 Everything above is about command-context **objects**. The `workflow.context` **dict** persists by
-default. An author extends or overrides that through one optional module, `_commands/_serialization.py`
-— a `_`-prefixed file, which the command scanner already ignores
-(`command_directory.py:218-270`), so it introduces no collision:
-
-```python
-class Serialization:
-    state_version = 1
-
-    @classmethod
-    def get_workflow_state(cls, workflow) -> dict[str, Any] | fastworkflow.Ephemeral:
-        """Override the default projection of workflow.context entirely."""
-
-    @classmethod
-    def redact(cls, workflow_context: dict[str, Any]) -> dict[str, Any]:
-        """Extend the framework's default redaction (see §6)."""
-```
-
-Both are optional and neither warns when absent, because the default (persist-all, redacted) is the
-accepted behaviour rather than a gap. This is the "extend or override" half of requirement 1; the
-`Context` pair is the half that unpins the session.
+default (JSON-native values, the request's credential never). The optional `_commands/_serialization.py`
+module this section once proposed (a `Serialization` class to override the projection or extend the
+redaction) was never built, and its unused loader was removed (bd fix-ftdl.7.17): there is no such module.
 
 ---
 
@@ -360,7 +343,7 @@ and not the exposure. Real protection means envelope encryption with a key from 
 secret manager, which is infrastructure fastWorkflow should integrate with rather than mandate. Reusing
 the JWT signing key would also be wrong — it couples two concerns and widens that key's blast radius.
 
-An optional author-facing `encrypt` / `decrypt` extension point on `Serialization` is a reasonable way
+An optional author-facing `encrypt` / `decrypt` extension point is a reasonable way
 to offer this without owning key management. It belongs with the redaction work in `fix-cj4`, not here,
 because both answer the same question — what to do about sensitive values an author has chosen to
 persist — and should be designed together rather than in two passes.
@@ -427,6 +410,28 @@ memory-bounds design. Alongside it, `pinned_sessions` becomes a metric, because 
 workflows pinned is the steady state and a rate-limited warning is suppressed exactly when it matters
 most. Never log state, context values or credentials.
 
+**What an author gains by implementing `get_state` (operator view).** A pinned session is never evicted, so a
+server that serves many channels grows with every channel it has ever seen, because the live-session cap is only a
+target. `POST /end_session` lets a client release a pinned channel explicitly (its in-memory state is dropped), but
+only a `get_state` hook lets the server do it for you: the session is checkpointed, evicted when idle and restored
+on the next call, with its state intact. The server logs one startup WARNING naming the context classes that have no
+hook, and `GET /probes/readyz?sessions=true` reports how many live sessions are pinned.
+
+**The bound for a workflow with no hook (2026-11).** A pinned session is not exempt from the memory bound.
+`MAX_LIVE_SESSIONS_HARD` (default 4 x the soft target) is a hard ceiling on live sessions, enforced where a session is
+created or reloaded (`ChannelSessionManager.admit_new_session`): at the ceiling the server first checkpoints and
+releases an idle evictable session, then expires an idle pinned session, and otherwise refuses the request with 503 +
+`Retry-After`. Expiry is only allowed while the live count is above `MAX_LIVE_SESSIONS`, so a deployment within its
+soft target loses nothing. A pinned session idle past `PINNED_SESSION_IDLE_TTL_SECONDS` (1800) expires; one with a
+pending question after `PROTECTED_SESSION_IDLE_TTL_SECONDS` (86400), and its question is discarded like
+`end_session(discard_pending)`; a session with a lease or a running turn never does, and neither does a channel bound
+to a registered experiment attempt (the attempt claim lives on the session; it counts toward the ceiling). What the
+channel loses is exactly what dropping a pinned session loses: the context object tree, the current-context
+pointer and run-time changes to the workflow context. Conversation history and finished turns are rebuilt from the
+observability store. The loss is never silent: the next session on that channel carries `session_notice`
+(`context_dropped`) once, in its first turn result and in `/initialize`. A `get_state` hook is still the only way to
+keep the state across an eviction, and it is what stops the ceiling from ever being the thing that decides.
+
 ---
 
 ## 9. Failure modes
@@ -486,7 +491,7 @@ Adjudicated 2026-08-05. Recorded here so implementation does not relitigate them
 | 2 | Locator handling | **Separate `get_locator` / `find_by_locator` pair**, with the serialize-time identity self-check. |
 | 3 | Version mismatch | **Author owns migration.** `from_state` receives the stored version. On refusal: quarantine the snapshot, ERROR, and **fail the request with 500** so the caller sees the loss instead of an amnesiac session; the retry proceeds cold. Not a process crash (§5.1). Ships with the authoring guidance in §6.1. |
 | 4 | Redaction | **Out of scope**, deferred to `fix-cj4`, together with an optional `encrypt`/`decrypt` extension point. Author responsibility documented (§6.2). `http_bearer_token` is **excluded** — not as an exception to this decision, but because non-negotiable rule 2 already forbids persisting request-scoped credentials, and it is re-supplied on every authenticated request. Encrypting it instead was considered and rejected: it would preserve a value that is stale by construction. |
-| 5 | Workflow projection | **New optional module type** `_commands/_serialization.py`. |
+| 5 | Workflow projection | Proposed as a new optional module `_commands/_serialization.py`; never built, and its unused loader was removed (bd fix-ftdl.7.17). |
 
 The three norms in §6.2 are approved as author-facing best practice and are published in `README.md`
 under *Production deployment → Handling secrets and PII*, alongside a factual statement of what reaches

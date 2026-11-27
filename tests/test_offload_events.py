@@ -23,11 +23,12 @@ from pathlib import Path
 import dspy
 
 import fastworkflow
-from fastworkflow import state_paths, tracing
+from fastworkflow.session import state_paths
+from fastworkflow.observability import tracing
 from fastworkflow.observability import store as obs
 from fastworkflow.observation_offloading import archive as archive_module
 from fastworkflow.observation_offloading import state as offload_state
-from fastworkflow.observation_offloading.agent import build_tool_agent
+from fastworkflow.agent.tool_agent import build_tool_agent
 from fastworkflow.observation_offloading.archive import (
     RuntimeHandleArchive,
     RuntimeHandleScope,
@@ -37,7 +38,7 @@ from fastworkflow.observation_offloading.state import (
     reset_observation_state,
     snapshot_events,
 )
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 REDACTION_ENV = archive_module.REDACTION_ENV
 

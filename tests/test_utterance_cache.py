@@ -212,7 +212,6 @@ def _fingerprint(**overrides):
         "num_personas": 2,
         "utterances_per_persona": 2,
         "personas_per_batch": 1,
-        "model": "mistral/mistral-small-latest",
         "completion_fn": None,
         "persona_dataset_loader": None,
     }
@@ -223,7 +222,6 @@ def _fingerprint(**overrides):
         kwargs["num_personas"],
         kwargs["utterances_per_persona"],
         kwargs["personas_per_batch"],
-        kwargs["model"],
         completion_fn=kwargs["completion_fn"],
         persona_dataset_loader=kwargs["persona_dataset_loader"],
     )
@@ -321,7 +319,6 @@ def test_fingerprint_is_stable_for_identical_inputs():
         pytest.param({"num_personas": 3}, id="num-personas"),
         pytest.param({"utterances_per_persona": 3}, id="utterances-per-persona"),
         pytest.param({"personas_per_batch": 2}, id="personas-per-batch"),
-        pytest.param({"model": "openai/gpt-4o-mini"}, id="model"),
         pytest.param(
             {"completion_fn": RecordingCompletion()}, id="completion-backend"
         ),
@@ -340,6 +337,18 @@ def test_fingerprint_changes_when_a_generation_input_changes(override):
     assert _fingerprint(**override).variant_key != _fingerprint().variant_key
 
 
+def test_the_generator_model_is_not_a_fingerprint_input(monkeypatch):
+    """bd fix-ygxo: utterances written by one model are reused under another, so changing LLM_SYNDATA_GEN (or the
+    model it falls back to) never regenerates them."""
+    monkeypatch.setitem(fastworkflow._env_vars, "LLM_SYNDATA_GEN", "mistral/mistral-small-latest")
+    before = _fingerprint()
+    monkeypatch.setitem(fastworkflow._env_vars, "LLM_SYNDATA_GEN", "openai/gpt-4o-mini")
+    after = _fingerprint()
+
+    assert before.variant_key == after.variant_key
+    assert "model" not in before.inputs
+
+
 def test_fingerprint_covers_the_prompt_building_source():
     """A prompt edit must invalidate; the digest of the generator source is how."""
     baseline = _fingerprint()
@@ -349,7 +358,6 @@ def test_fingerprint_covers_the_prompt_building_source():
         num_personas=2,
         utterances_per_persona=2,
         personas_per_batch=1,
-        model="mistral/mistral-small-latest",
         generator_source_digest="a-different-prompt",
     )
     assert changed.variant_key != baseline.variant_key
@@ -364,7 +372,6 @@ def test_fingerprint_covers_the_api_base_without_storing_it():
         num_personas=2,
         utterances_per_persona=2,
         personas_per_batch=1,
-        model="m",
         api_base="https://internal-proxy.example.invalid/v1",
     )
     without_base = compute_fingerprint(
@@ -373,7 +380,6 @@ def test_fingerprint_covers_the_api_base_without_storing_it():
         num_personas=2,
         utterances_per_persona=2,
         personas_per_batch=1,
-        model="m",
     )
     assert with_base.variant_key != without_base.variant_key
     assert "internal-proxy" not in json.dumps(with_base.inputs)
@@ -823,7 +829,6 @@ def test_the_cached_prefix_is_rebuilt_from_live_seeds_not_from_the_cache(
     _generate()
 
     fingerprint = _fingerprint(
-        model=fastworkflow.get_env_var("LLM_SYNDATA_GEN"),
         completion_fn=RecordingCompletion(),
         persona_dataset_loader=_local_persona_dataset,
     )

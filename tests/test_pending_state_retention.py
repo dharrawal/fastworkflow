@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from fastworkflow.session_state_store import (
+from fastworkflow.session.session_state_store import (
     SAVED_AT_KEY,
     DiskSessionStateStore,
     PendingRetentionPolicy,
@@ -250,8 +250,8 @@ def test_the_periodic_reaper_reads_only_fields_its_outcomes_actually_have():
     from dataclasses import fields as dataclass_fields
     from pathlib import Path
 
-    from fastworkflow.checkpoint_store import ReapReport
-    from fastworkflow.session_state_store import PendingReapOutcome
+    from fastworkflow.session.checkpoint_store import ReapReport
+    from fastworkflow.session.session_state_store import PendingReapOutcome
 
     known = {f.name for f in dataclass_fields(ReapReport)}
     known |= {f.name for f in dataclass_fields(PendingReapOutcome)}

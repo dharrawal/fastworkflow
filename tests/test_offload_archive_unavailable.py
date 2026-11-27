@@ -26,8 +26,9 @@ from types import SimpleNamespace
 import dspy
 
 import fastworkflow
-from fastworkflow import state_paths, tracing
-from fastworkflow.observation_offloading.agent import (
+from fastworkflow.session import state_paths
+from fastworkflow.observability import tracing
+from fastworkflow.agent.tool_agent import (
     build_tool_agent,
     open_handle_archive,
 )
@@ -42,7 +43,7 @@ from fastworkflow.observation_offloading.state import (
     reset_observation_state,
     snapshot_events,
 )
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 NOT_A_DATABASE = b"this file is not a sqlite database\n" * 8
 

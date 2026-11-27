@@ -22,9 +22,9 @@ import pytest
 from dotenv import dotenv_values
 
 import fastworkflow
-from fastworkflow import tracing
-from fastworkflow.command_executor import CommandExecutor
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.observability import tracing
+from fastworkflow.engine.command_executor import CommandExecutor
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 
 HELLO_WORLD = str(
@@ -34,12 +34,20 @@ MESSAGING_APP = str(
     Path(__file__).parent.parent / "fastworkflow" / "examples" / "messaging_app_4"
 )
 
+#: A request no prefix or fuzzy layer claims, so the local classifier decides (confidently, 0.78 on hello_world's
+#: trained model), with the command's values given as XML so the turn's parameter extraction is the agent-mode regex.
+#: Run with ``no_planner_key``: with a planner key the remote decision model decides first (layer "matcher") and the
+#: turn goes on into a live parameter-extraction call.
+CLASSIFIER_REQUEST = (
+    "please compute the total of five plus three <first_num>5</first_num><second_num>3</second_num>"
+)
+
 
 @pytest.fixture(scope="module", autouse=True)
 def initialized_fastworkflow():
     env = dotenv_values("fastworkflow/examples/fastworkflow.env")
     fastworkflow.init(dict(env))
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     RoutingRegistry.clear_registry()
     yield
@@ -85,40 +93,36 @@ def hello_ctx():
 
 class TestIntentSpan:
     def test_exact_prefix_layer(self, hello_ctx):
+        """An exact name with no model and no question decided nothing (bd fix-qjne.34 decision b, on every path): no
+        fw.intent is written, and the command's fw.command span says how it was resolved."""
         ctx, sink = hello_ctx
         out = CommandExecutor.invoke_command(
             ctx,
             "add_two_numbers <first_num>5</first_num><second_num>3</second_num>",
         )
         assert out.success
-        span = sink.named(tracing.SPAN_NLU_INTENT)[-1]
-        assert span.status == "ok"
-        assert span.attributes["matcher_layer"] == "exact_prefix"
-        assert span.attributes["command_name"] == "add_two_numbers"
-        assert span.attributes["resolved"] is True
-        assert span.attributes["ambiguous"] is False
-        assert span.attributes["stage"] == "INTENT_DETECTION"
-        # Nested under the enclosing fw.command.execute span via the stack.
-        assert span.parent_span_id is not None
+        assert sink.named(tracing.SPAN_INTENT) == []
+        command = sink.named(tracing.SPAN_COMMAND)[-1]
+        assert command.status == "ok" and command.command_name == "add_two_numbers"
+        assert command.attributes["resolved_by"] == "exact_name"
 
     def test_fuzzy_prematch_layer(self, hello_ctx):
         ctx, sink = hello_ctx
         CommandExecutor.invoke_command(ctx, "what can i do")
-        span = sink.named(tracing.SPAN_NLU_INTENT)[-1]
+        span = sink.named(tracing.SPAN_INTENT)[-1]
         assert span.attributes["matcher_layer"] == "fuzzy_prematch"
         assert span.attributes["command_name"] == "IntentDetection/what_can_i_do"
         assert span.attributes["is_cme_command"] is True
 
+    @pytest.mark.usefixtures("no_planner_key")
     def test_classifier_layer_carries_confidence_and_threshold(self, hello_ctx):
         ctx, sink = hello_ctx
         # A phrasing no prefix/fuzzy layer claims: the classifier must decide,
         # and its numbers must land on the span whether or not it is confident.
-        CommandExecutor.invoke_command(
-            ctx, "please compute the total of five plus three"
-        )
+        CommandExecutor.invoke_command(ctx, CLASSIFIER_REQUEST)
         spans = [
             s
-            for s in sink.named(tracing.SPAN_NLU_INTENT)
+            for s in sink.named(tracing.SPAN_INTENT)
             if s.attributes.get("matcher_layer") == "classifier"
         ]
         assert spans, "classifier layer never ran"
@@ -138,31 +142,25 @@ class TestIntentSpan:
 
 class TestParamExtractionSpan:
     def test_xml_extraction_valid(self, hello_ctx):
+        """Typed values read in code, all valid, no model call: the extraction decided nothing, so no fw.parameters is
+        written (bd fix-qjne.34 decision b); fw.command carries how the values were read and that they were valid."""
         ctx, sink = hello_ctx
         CommandExecutor.invoke_command(
             ctx,
             "add_two_numbers <first_num>5</first_num><second_num>3</second_num>",
         )
-        span = sink.named(tracing.SPAN_NLU_PARAM_EXTRACTION)[-1]
-        assert span.status == "ok"
-        assert span.command_name == "add_two_numbers"
-        assert span.attributes["extraction_method"] == "xml_regex"
-        assert span.attributes["retry_round"] is False
-        assert span.attributes["parameters_valid"] is True
-        # add_two_numbers declares no Input validator, so the validation step did not run
-        # (ran=False is the honest fact). The facts are still emitted; a command with a
-        # validator reports ran=True (test_validation_hook_outcomes_are_structured).
-        assert span.attributes["validation_hook"]["ran"] is False
-        assert span.attributes["validation_hook"]["is_valid"] is True
+        assert sink.named(tracing.SPAN_PARAMETERS) == []
+        command = sink.named(tracing.SPAN_COMMAND)[-1]
+        assert command.attributes["parameters_read_by"] == "typed"
+        assert command.attributes["parameters_valid"] is True
 
     def test_key_value_extraction_valid(self, hello_ctx):
-        # ``name=value`` is parsed in code, not by the LLM (fix-hia1.10): the method
-        # stays the deterministic regex one (an LLM fallback would record "llm").
+        # ``name=value`` is parsed in code, not by the LLM (fix-hia1.10): read as typed values, no span of its own.
         ctx, sink = hello_ctx
         CommandExecutor.invoke_command(ctx, "add_two_numbers first_num=5 second_num=3")
-        span = sink.named(tracing.SPAN_NLU_PARAM_EXTRACTION)[-1]
-        assert span.attributes["extraction_method"] == "xml_regex"
-        assert span.attributes["parameters_valid"] is True
+        assert sink.named(tracing.SPAN_PARAMETERS) == []
+        command = sink.named(tracing.SPAN_COMMAND)[-1]
+        assert command.attributes["parameters_read_by"] == "typed" and command.attributes["parameters_valid"] is True
 
 
 class TestStructuredValidationDiagnostics:
@@ -171,12 +169,12 @@ class TestStructuredValidationDiagnostics:
     trained model is needed."""
 
     def _validator_for(self, workflow, command_name):
-        from fastworkflow.utils.signatures import InputForParamExtraction
+        from fastworkflow.parameters.signatures import InputForParamExtraction
 
         return InputForParamExtraction.create(workflow, command_name, "")
 
     def test_missing_fields_are_structured(self):
-        from fastworkflow.command_routing import RoutingRegistry
+        from fastworkflow.core.command_routing import RoutingRegistry
 
         wf = fastworkflow.Workflow.create(
             HELLO_WORLD, workflow_id_str=f"nluspan-miss-{uuid.uuid4().hex}"
@@ -199,7 +197,7 @@ class TestStructuredValidationDiagnostics:
         # The fuzzy user lookup is the workflow's validate_extracted_parameters hook (fix-3rsq.one-hook), so its
         # outcome is the validation_hook diagnostic: ran, is_valid, changed_fields (the value it rewrote in place)
         # and refused_fields (the fields it refused, with suggestions in the message). No db_lookup events.
-        from fastworkflow.command_routing import RoutingRegistry
+        from fastworkflow.core.command_routing import RoutingRegistry
 
         wf = fastworkflow.Workflow.create(
             MESSAGING_APP, workflow_id_str=f"nluspan-db-{uuid.uuid4().hex}"
@@ -261,7 +259,7 @@ class TestStructuredValidationDiagnostics:
         assert "db_lookup" not in diagnostics
 
     def test_diagnostics_none_changes_nothing(self):
-        from fastworkflow.command_routing import RoutingRegistry
+        from fastworkflow.core.command_routing import RoutingRegistry
 
         wf = fastworkflow.Workflow.create(
             HELLO_WORLD, workflow_id_str=f"nluspan-none-{uuid.uuid4().hex}"
@@ -339,7 +337,7 @@ class TestHostScope:
         # Deep sites outside any host_scope must silently no-op.
         assert tracing.current_host() is None
         span = tracing.start_span(
-            tracing.current_host(), tracing.SPAN_NLU_INTENT, attributes={"x": 1}
+            tracing.current_host(), tracing.SPAN_INTENT, attributes={"x": 1}
         )
         assert span is None
         tracing.end_span(None, span)  # no-op, no raise

@@ -20,20 +20,20 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
 import fastworkflow
-from fastworkflow import serialization_hooks
-from fastworkflow.checkpoint_store import (
+from fastworkflow.session import serialization_hooks
+from fastworkflow.session.checkpoint_store import (
     PROTOCOL_VERSION,
     CheckpointIdentity,
     CheckpointRecord,
     CheckpointStoreError,
     ChannelCheckpointStore,
 )
-from fastworkflow.serialization_hooks import ProjectionOutcome
-from fastworkflow.state_serialization import StateEncodingError
+from fastworkflow.session.serialization_hooks import ProjectionOutcome
+from fastworkflow.session.state_serialization import StateEncodingError
 from fastworkflow.utils.logging import logger
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from fastworkflow.session_state_store import SessionStateStore
+    from fastworkflow.session.session_state_store import SessionStateStore
 
     from .utils import ChannelRuntime
 
@@ -81,7 +81,7 @@ def fleet_protocol_floor() -> int:
 
 
 def get_checkpoint_dir(workflow_path: str) -> str:
-    from fastworkflow import state_paths
+    from fastworkflow.session import state_paths
     return state_paths.checkpoints_dir(workflow_path)
 
 
@@ -94,7 +94,7 @@ def deployment_id() -> str:
 
 def workflow_fingerprint(workflow_path: str) -> str:
     """Namespace component that changes when the workflow's commands change."""
-    from fastworkflow.command_directory import compute_commands_source_fingerprint
+    from fastworkflow.core.command_directory import compute_commands_source_fingerprint
 
     try:
         return compute_commands_source_fingerprint(workflow_path)
@@ -118,6 +118,12 @@ class Eligibility:
     evictable: bool
     reason: str
     projection: Optional[serialization_hooks.ContextProjection] = None
+
+    @property
+    def declared(self) -> bool:
+        """Pinned because the author declared it (``get_state`` returned ``fastworkflow.EPHEMERAL``)."""
+        return (self.projection is not None
+                and self.projection.outcome is serialization_hooks.ProjectionOutcome.DECLARED_EPHEMERAL)
 
 
 def assess(
@@ -335,15 +341,60 @@ def restore(
     return runtime_section
 
 
-def warn_pinned_once(channel_id: str, workflow_path: str, reason: str) -> None:
-    """One line per (workflow, reason). Pinned is a steady state, not an event."""
-    key = (workflow_path, reason)
+def warn_pinned_once(channel_id: str, workflow_path: str, eligibility: Eligibility) -> None:
+    """One line per (workflow, reason). Pinned is a steady state, not an event. A session the author declared
+    ephemeral is not warned about: a declared choice is not a problem (bd fix-ftdl.7.17)."""
+    if eligibility.declared:
+        return
+    key = (workflow_path, eligibility.reason)
     if key in _pin_warned:
         return
     _pin_warned.add(key)
     logger.warning(
         f"Channel {channel_id} cannot be checkpointed and will not be evicted: "
-        f"{reason}"
+        f"{eligibility.reason}"
+    )
+
+
+def contexts_without_state_hook(workflow_path: str) -> list[str]:
+    """Context classes of a workflow that have no ``get_state`` hook, read statically (nothing is instantiated).
+
+    A session whose current or root context is one of these is pinned: never evicted, so never bounded.
+    Whether a given session holds one is only known at run time, so this lists every context the workflow
+    declares that an object can be; a context that declares ``get_state`` (returning a dict or
+    ``fastworkflow.EPHEMERAL``) is not listed, nor one declared ``occupiable = False`` (no object is ever of it, so
+    it is never the saved object; bd fix-ftdl.7.17). Returns [] when the workflow's contexts cannot be read (the
+    startup warning is advisory).
+    """
+    try:
+        context_model = fastworkflow.CommandContextModel.load(workflow_path)
+        names = sorted(
+            name for name in context_model._command_contexts
+            if name not in ("*", "IntentDetection")
+        )
+        missing = []
+        for name in names:
+            hooks = context_model.get_context_class(name, fastworkflow.ModuleType.CONTEXT_CLASS)
+            if hooks is not None and getattr(hooks, "occupiable", None) is False:
+                continue
+            if hooks is None or not hasattr(hooks, "get_state"):
+                missing.append(name)
+        return missing
+    except Exception as exc:  # noqa: BLE001 - advisory only; never block startup
+        logger.debug(f"Could not list contexts without a get_state hook ({type(exc).__name__}: {exc})")
+        return []
+
+
+def startup_pinning_warning(workflow_path: str) -> Optional[str]:
+    """The one-line startup warning for a workflow with contexts that lack ``get_state``, or None."""
+    missing = contexts_without_state_hook(workflow_path)
+    if not missing:
+        return None
+    return (
+        f"context class(es) {', '.join(missing)} have no get_state hook, so a session holding one of them "
+        "is pinned and will never be evicted (the live-session cap is only a target). Implement get_state / "
+        "from_state in _commands/<Context>/_<Context>.py, or return fastworkflow.EPHEMERAL to declare it "
+        "deliberate; clients can release a channel with POST /end_session."
     )
 
 

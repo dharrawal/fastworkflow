@@ -237,7 +237,7 @@ class GenAIPostProcessor:
     def __init__(self):
         """Initialize the post-processor with DSPy configuration."""
         # Get model and API key from FastWorkflow environment
-        self.lm = dspy_utils.get_lm("LLM_COMMAND_METADATA_GEN", "LITELLM_API_KEY_COMMANDMETADATA_GEN", max_tokens=2000)
+        self.lm = dspy_utils.get_lm("LLM_COMMAND_METADATA_GEN", max_tokens=2000)
         
         # Initialize DSPy modules (reuse from original)
         self.field_generator = FieldMetadataGenerator()

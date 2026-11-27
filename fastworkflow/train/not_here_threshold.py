@@ -41,7 +41,7 @@ import math
 import sys
 from typing import Any, Iterable, Optional, Sequence
 
-from fastworkflow.nlu_labels import WILDCARD_LABEL, is_non_routable, label_of
+from fastworkflow.intent.nlu_labels import WILDCARD_LABEL, is_non_routable, label_of
 from fastworkflow.train import not_here_step1 as step1
 from fastworkflow.train import score_not_here as scorer
 
@@ -394,7 +394,7 @@ def _crossfit_row(label: str, pick: str, metrics: dict[str, Any], pooled: bool =
 
 def probe_cases(workflow_folderpath: str, cases: Sequence[dict]) -> dict[str, Any]:
     """Run every case through its head's router, keeping the full distribution of the tier used."""
-    from fastworkflow.model_pipeline_training import CommandRouter, get_label_encoder
+    from fastworkflow.intent.router import CommandRouter, get_label_encoder
     from fastworkflow.train import artifact_versioning
 
     version = artifact_versioning.resolve_current_version(workflow_folderpath)

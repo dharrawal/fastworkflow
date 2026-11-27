@@ -16,16 +16,16 @@ import pytest
 from dotenv import dotenv_values
 
 import fastworkflow
-from fastworkflow import state_paths
-from fastworkflow.command_routing import RoutingRegistry
+from fastworkflow.session import state_paths
+from fastworkflow.core.command_routing import RoutingRegistry
 from fastworkflow.observation_offloading.state import (
     archive_for_path,
     observability_db_path,
     reset_observation_state,
     scope_for_host,
 )
-from fastworkflow.session_state_store import DiskSessionStateStore
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.session.session_state_store import DiskSessionStateStore
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 @pytest.fixture(autouse=True)
 def no_review_gate(monkeypatch):

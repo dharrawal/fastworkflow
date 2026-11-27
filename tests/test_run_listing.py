@@ -19,12 +19,13 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow import planning_commands, run_listing, workflow_agent
-from fastworkflow.planning_commands import PlanningCommandInputError
-from fastworkflow.run_listing import (
+from fastworkflow.planning import planning_commands
+from fastworkflow.agent import run_listing, workflow_agent
+from fastworkflow.planning.planning_commands import PlanningCommandInputError
+from fastworkflow.agent.run_listing import (
     COMMAND_SHORTLIST, FULL, FULL_LISTING_MAX_CHARS, ARMS, THRESHOLD, check_planned_arguments,
     listing_arm, planning_candidates, run_listing_text, shortlist_for)
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401 - shared fixture
 
 ROOT = Path(__file__).resolve().parent
@@ -133,7 +134,7 @@ def test_selector_defaults_to_none_restores_the_previous_arm_and_rejects_unknown
 def test_the_production_call_sites_are_byte_identical_with_the_selector_unset(copy_of):
     """With no experiment arm (or FULL), the run's listing is ``_what_can_i_do`` and the planner's is
     ``planner_commands_text``, byte for byte, on all three workflows."""
-    from fastworkflow.workflow_agent import _what_can_i_do, planner_listing_text, sub_task_commands_text
+    from fastworkflow.agent.workflow_agent import _what_can_i_do, planner_listing_text, sub_task_commands_text
 
     assert run_listing.selected_listing_arm() is None
     for app in (_library_in(copy_of, name="identity_library"), copy_of(TODO, "identity_todo"),
@@ -151,7 +152,7 @@ def test_the_production_call_sites_are_byte_identical_with_the_selector_unset(co
 
 
 def test_the_selected_shortlist_arm_routes_both_production_call_sites(copy_of):
-    from fastworkflow.workflow_agent import _what_can_i_do, planner_listing_text, sub_task_commands_text
+    from fastworkflow.agent.workflow_agent import _what_can_i_do, planner_listing_text, sub_task_commands_text
 
     library = _library_in(copy_of, name="routed_library")
     ctx = _ctx_for(library)
@@ -170,7 +171,7 @@ def test_the_selected_shortlist_arm_routes_both_production_call_sites(copy_of):
 def test_the_production_default_is_threshold_and_an_untrained_app_gets_full_above_the_threshold(copy_of, monkeypatch):
     """The production arm is THRESHOLD (fix-3rsq.plan-review.2.10), guarded: a listing above the threshold is still the
     full listing when the workflow has no trained heads (the shortlist would have no trained recall)."""
-    from fastworkflow.workflow_agent import _what_can_i_do, planner_listing_text, sub_task_commands_text
+    from fastworkflow.agent.workflow_agent import _what_can_i_do, planner_listing_text, sub_task_commands_text
 
     library = _library_in(copy_of, name="production_default")
     ctx = _ctx_for(library)
@@ -189,7 +190,7 @@ def test_the_production_default_is_threshold_and_an_untrained_app_gets_full_abov
 
 def test_the_production_threshold_shortlists_a_workflow_with_trained_heads(copy_of, monkeypatch):
     """With the trained heads and no experiment arm, production shortlists above the threshold at both call sites."""
-    from fastworkflow.workflow_agent import _what_can_i_do, planner_listing_text, sub_task_commands_text
+    from fastworkflow.agent.workflow_agent import _what_can_i_do, planner_listing_text, sub_task_commands_text
 
     library = _library_in(copy_of, name="production_threshold_heads")
     ctx = _ctx_for(library)
@@ -238,7 +239,7 @@ def test_has_trained_heads_needs_a_complete_head_folder(copy_of):
 def test_the_threshold_arm_shortlists_above_the_threshold_at_both_call_sites(copy_of, monkeypatch):
     """The THRESHOLD arm (the rule the 10.7 gate may adopt): above FULL_LISTING_MAX_CHARS the command shortlist at both
     call sites. The library's listings are under the real threshold, so it is lowered here."""
-    from fastworkflow.workflow_agent import _what_can_i_do, planner_listing_text, sub_task_commands_text
+    from fastworkflow.agent.workflow_agent import _what_can_i_do, planner_listing_text, sub_task_commands_text
 
     library = _library_in(copy_of, name="threshold_cut")
     ctx = _ctx_for(library)
@@ -294,7 +295,7 @@ def test_a_natural_sub_task_gets_its_command_from_the_trained_heads_alone(copy_o
 def test_head_candidates_keep_the_execution_top_k_as_well_as_the_planning_top_k(copy_of):
     """Round 1's candidates (fix-3rsq.plan-review.2.1): the heads' top-k execution commands are kept, not only the
     planning ones. Real trained heads (the library's, linked in); the split is by kind and never holds a non-command."""
-    from fastworkflow.run_listing import NON_COMMAND_LABELS, head_candidates
+    from fastworkflow.agent.run_listing import NON_COMMAND_LABELS, head_candidates
 
     library = _library_in(copy_of, name="head_candidates_execution")
     _with_trained_heads(library)
@@ -340,10 +341,12 @@ def test_the_global_scope_is_one_line_on_a_shortlist_that_does_not_name_it(copy_
     assert not [line for line in named.split("\n") if line.startswith("Global commands (")]
 
 
-def test_the_threshold_is_7000_and_the_three_example_listings_are_under_it(copy_of):
-    """FULL_LISTING_MAX_CHARS is 7000 (10.15, from the 10.7 measurement): the todo, library and tutorial full listings
-    are each at most it, so production gives each whole. (The real app's listing, 82,055 characters, is above it.)"""
-    assert FULL_LISTING_MAX_CHARS == 7000
+def test_the_threshold_is_8000_and_the_three_example_listings_are_under_it(copy_of):
+    """FULL_LISTING_MAX_CHARS is 8000 (10.15, from the 10.7 measurement, 7000; raised to 8000 by fix-xj0x because the
+    library example with declared input examples is about 7,700 characters, output examples no longer rendered): the
+    todo, library and tutorial full listings are each at most it, so production gives each whole. (The real app's
+    listing, 82,055 characters, is above it.)"""
+    assert FULL_LISTING_MAX_CHARS == 8000
     todo, library = copy_of(TODO, "todo_size"), _library_in(copy_of, name="library_size")
     tutorial = copy_of(TUTORIAL, "tutorial_size")
     for app in (todo, library, tutorial):
@@ -373,7 +376,7 @@ def test_a_large_workflow_is_cut_to_the_shortlist_above_the_threshold(copy_of, m
     full = workflow_agent.planner_commands_text(library)
     command = run_listing_text(library, "run list_member_loans for the member", arm=COMMAND_SHORTLIST)
     assert len(command) < len(full)
-    # THRESHOLD, lowered threshold (the library is 6,516 characters, under the real 7,000): the shortlist
+    # THRESHOLD, lowered threshold (the library is about 7,700 characters, under the real 8,000): the shortlist
     monkeypatch.setattr(run_listing, "FULL_LISTING_MAX_CHARS", 3000)
     with listing_arm(THRESHOLD):
         assert run_listing_text(library, "run list_member_loans for the member") == command
@@ -607,29 +610,18 @@ def test_the_listing_shows_a_planning_commands_template_steps_verbatim(copy_of):
 # The turn's planning-match distribution, and the production arm (10.15 step 2 and 3)
 # ---------------------------------------------------------------------------
 
-def test_without_a_jev_key_the_match_leaves_the_distribution_empty_and_the_listing_is_unchanged(copy_of, monkeypatch):
+def test_without_a_jev_key_the_match_leaves_the_distribution_empty_and_the_listing_is_unchanged(copy_of, no_planner_key):
     """No JEV_API_KEY: no planning match runs, so the turn's distribution stays empty and every listing is as before."""
-    import os
-
-    monkeypatch.delenv("JEV_API_KEY", raising=False)
-    if os.environ.get("JEV_API_KEY"):
-        pytest.skip("a JEV key is configured in this environment")
-    workflow_agent._planning_command_matcher.cache_clear()
     library = _library_in(copy_of, name="no_jev_key")
-    distribution: dict[str, float] = {}
-    template, command = workflow_agent.planner_planning_command_for(
-        "who has Dune on loan", library.folderpath, scopes=("",), distribution=distribution)
-    assert distribution == {} and command is None
     sub_task = "who has Dune on loan"
     assert workflow_agent.planner_listing_text(library, sub_task, planning_probabilities=None) == \
         workflow_agent.planner_commands_text(library)
-    workflow_agent._planning_command_matcher.cache_clear()
 
 
 def test_the_planning_distribution_gathers_the_planning_command_into_the_threshold_listing(copy_of, monkeypatch):
     """The turn's distribution (unsure candidates included) reaches the listing: book_loans, named by no word of the
     sub-task, is on the threshold arm's shortlist with the distribution and not without it."""
-    from fastworkflow.workflow_agent import _what_can_i_do, sub_task_commands_text
+    from fastworkflow.agent.workflow_agent import _what_can_i_do, sub_task_commands_text
 
     library = _library_in(copy_of, name="distribution_gather")
     ctx = _ctx_for(library)
@@ -660,13 +652,13 @@ def test_the_production_arm_is_threshold_and_one_constant_switches_it():
 # ---------------------------------------------------------------------------
 
 def test_the_framework_commands_are_hidden_from_every_run_listing(copy_of):
-    """The framework's planning commands (review_subtasks, review_plan) are system machinery (fix-3rsq.plan-review.1):
+    """The framework's planning commands (review_subtasks) are system machinery (fix-3rsq.plan-review.1):
     the loader has them, and no run's listing names them, under any arm, or gathers them for a sub-task that names one."""
-    from fastworkflow.command_directory import CommandDirectory
+    from fastworkflow.core.command_directory import CommandDirectory
 
     library = _library_in(copy_of, name="framework_hidden")
-    assert "review_plan" in CommandDirectory.load(library.folderpath).map_command_2_metadata   # not vacuous
-    sub_task = "run review_plan on the plan"
+    assert "review_subtasks" in CommandDirectory.load(library.folderpath).map_command_2_metadata   # not vacuous
+    sub_task = "run review_subtasks on the plan"
     assert not {name for name in shortlist_for(library, sub_task) if name.split("/")[-1] in FRAMEWORK_LEAVES}
     texts = [run_listing_text(library, sub_task, arm=FULL),
              run_listing_text(library, sub_task, arm=COMMAND_SHORTLIST),
@@ -676,7 +668,7 @@ def test_the_framework_commands_are_hidden_from_every_run_listing(copy_of):
         assert not any(leaf in text for leaf in FRAMEWORK_LEAVES)
 
 
-FRAMEWORK_LEAVES = frozenset({"review_subtasks", "review_plan"})
+FRAMEWORK_LEAVES = frozenset({"review_subtasks"})
 
 
 def test_a_listing_within_the_threshold_is_given_whole_and_gathers_nothing(copy_of, monkeypatch):

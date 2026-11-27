@@ -16,7 +16,7 @@ Facts verified 2026-07-09 against v2.22.2 (commit c33b9a5). Re-verify the file l
 | `WEC_learning_checklist.md` | Topology A→B migration mastery checklist (`[ ]`/`[~]`/`[x]`, checked only after explain-back) | Living doc; exemplar of the checklist house style |
 | `fastworkflow-article-1.md` | Tutorial 1: intro, hello_world, hand-built messaging_app_1 | Published tutorial series |
 | `fastworkflow-article-2.md` | Tutorial 2: functions → classes/state (`workflow.root_command_context`, `command_context_for_response_generation`) | " |
-| `fastworkflow-article-3.md` | Tutorial 3: inheritance via `context_inheritance_model.json` (`base` key, `*` = available anywhere) | " |
+| `fastworkflow-article-3.md` | Tutorial 3: inheritance via `context_inheritance_model.json` (`base` key, `*` = available anywhere; the file is now a removed spelling, replaced by `inherits` on `class Context`) | " |
 | `fastworkflow-article-4.md` | Tutorial 4: parent-child hierarchies via `_<ClassName>.py` `Context.get_parent` (the hierarchy file is retired), `db_lookup`, `startup_action.json` | " — note line 637 link text/href org mismatch |
 
 ## `docs/` git-tracked design docs
@@ -94,7 +94,7 @@ repo-level `docs/`.
 
 | File | Status |
 |---|---|
-| `.claude/rules/command-authoring.md` | LIVE. Path-scoped frontmatter: `**/_commands/**`, `**/context_inheritance_model.json`. Single-file command pattern, two-key context model entries, NOT_FOUND ask-don't-guess |
+| `.claude/rules/command-authoring.md` | LIVE. Path-scoped frontmatter: `**/_commands/**` (it no longer lists `**/context_inheritance_model.json`, a removed spelling). Single-file command pattern, `inherits`/`parents` on `class Context`, NOT_FOUND ask-don't-guess |
 | `.cursor/rules/testing_rules.mdc` | LIVE, alwaysApply. No mocks, real test workflows, never delete tests without approval |
 | `.cursor/rules/cursor_rules.mdc`, `self_improve.mdc` | Meta-rules about writing Cursor rules; low stakes |
 | `.cursor/rules/taskmaster.mdc`, `dev_workflow.mdc` | STALE but alwaysApply:true — still prescribe Task Master to Cursor sessions, contradicting AGENTS.md. Cleanup pending owner decision |

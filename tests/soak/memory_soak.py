@@ -1364,7 +1364,7 @@ def verify_checkpoint_accounting(paths: Paths, server_tree: str,
     """
     script = (
         "import json, sys\n"
-        "from fastworkflow.checkpoint_store import ChannelCheckpointStore\n"
+        "from fastworkflow.session.checkpoint_store import ChannelCheckpointStore\n"
         "s = ChannelCheckpointStore(sys.argv[1]).stats()\n"
         "print(json.dumps({'total_bytes_physical': s.total_bytes_physical,\n"
         "                  'total_bytes_apparent': s.total_bytes_apparent,\n"

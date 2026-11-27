@@ -22,18 +22,13 @@ No commands in this context.
 
 ## Context Model
 
-The `context_inheritance_model.json` file maps application classes to command contexts, organizing commands by their class.
+The `class Context` of each context's `_commands/<Context>/_<Context>.py` declares the contexts whose commands it also has, `inherits = ["BaseClass1", ...]`, and the contexts its records sit in, `parents = ["Container", ...]` (only when it has `get_parent`). A context that declares neither needs no `_<Context>.py`.
 
 Structure example:
 
-```json
-{
-  "context_name": {
-    "/": ["command1", "command2", ...],
-    "base": ["BaseClass1", ...]
-  },
-  ...
-}
+```python
+class Context:
+    inherits = ["BaseClass1"]
 ```
 
 ### Contexts and Commands

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import os
 from types import SimpleNamespace
-from typing import Optional
+from typing import Literal, Optional
 
 import dspy
 import pytest
@@ -14,9 +14,9 @@ from dotenv import dotenv_values
 from pydantic import BaseModel, Field
 
 import fastworkflow
-from fastworkflow import workflow_agent
-from fastworkflow.utils import signatures
-from fastworkflow.utils.signatures import (
+from fastworkflow.agent import workflow_agent
+from fastworkflow.parameters import signatures
+from fastworkflow.parameters.signatures import (
     FIELD_GIVEN_THRESHOLD, NOT_FOUND, InputForParamExtraction, fields_not_given,
     reset_to_not_given)
 
@@ -110,6 +110,24 @@ def test_the_off_switch_makes_no_call(monkeypatch):
     monkeypatch.setitem(fastworkflow._env_vars, "FW_JEV_FIELD_GIVEN", "OFF")
     assert fields_not_given("show_group_members", Access, {"resource_id": "R1", "filter": "Jane Doe"}) == {}
     assert recorder.calls == []
+
+
+def test_a_value_the_request_writes_is_not_sent_to_jev(monkeypatch):
+    """The request writes "R1" and "Jane" at word boundaries: no model call may overrule the text. A value it does not
+    write ("Jan", inside "Jane"; an allowed member the request only implies) is still asked about."""
+    class Kinds(BaseModel):
+        resource_id: str = Field(description="the resource to check")
+        filter: Optional[str] = Field(default=None, description="Name fragment to narrow the holders")
+        kind: Literal["group", "person", "team"] = Field(default="team", description="the kind")
+
+    recorder = _Recorder({"resource_id": ("not_given", 0.99), "filter": ("not_given", 0.99),
+                          "kind": ("not_given", 0.99)})
+    _use(monkeypatch, recorder)
+    statement = "show the person holders of R1 named Jane"
+    assert fields_not_given(statement, Kinds, {"resource_id": "R1", "filter": "Jane", "kind": "person"}) == {}
+    assert recorder.calls == []
+    got = fields_not_given(statement, Kinds, {"resource_id": "r1", "filter": "Jan", "kind": "group"})
+    assert set(got) == {"filter", "kind"} and recorder.calls and "resource_id" not in recorder.calls
 
 
 def test_a_reset_required_str_is_not_given_and_an_optional_is_none(monkeypatch):

@@ -60,7 +60,8 @@ from fastworkflow.observability.archive_files import (
 )
 from fastworkflow.observability import prompt_slots
 from fastworkflow.observability.feedback import human_feedback_row
-from fastworkflow import state_paths, tracing
+from fastworkflow.session import state_paths
+from fastworkflow.observability import tracing
 from fastworkflow.utils.logging import logger
 
 # v2 (fix-42b): experiments.benchmark_id / benchmark_version /
@@ -830,13 +831,12 @@ class BenchmarkPinIsWriteOnce(ValueError):
 
 
 def _env(name: str, default: str) -> str:
-    """FW_* knob: process env first, then the workflow env file, then default."""
-    value = os.environ.get(name)
-    if value is None or value == "":
-        value = fastworkflow._env_vars.get(name)
-    if value is None or str(value).strip() == "":
+    """FW_* knob under the one precedence rule (``fastworkflow.raw_env_var``: the process, then the workflow env
+    file); unset or blank is *default*."""
+    value = fastworkflow.raw_env_var(name)
+    if value is None or value.strip() == "":
         return default
-    return str(value).strip()
+    return value.strip()
 
 
 _warned_env_values: set[tuple[str, str]] = set()
@@ -896,7 +896,9 @@ _SECRET_PATTERNS = [
     re.compile(r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}"),
 ]
 
-_REDACTED = "[REDACTED]"
+#: The text the store writes in place of a credential it scrubbed (``Redactor``).
+REDACTED = "[REDACTED]"
+_REDACTED = REDACTED
 
 
 class Redactor:
@@ -2881,7 +2883,7 @@ class ObservabilityStore:
             return [dict(r) for r in rows]
 
     def spans_for_turns(
-        self, turn_keys: Iterable[str]
+        self, turn_keys: Iterable[str], *, name: Optional[str] = None
     ) -> dict[str, list[dict[str, Any]]]:
         """`get_spans` for many turns at once: ``{turn_key: [span row, ...]}``.
 
@@ -2897,23 +2899,43 @@ class ObservabilityStore:
         caller never has to distinguish "absent" from "no spans"; duplicate
         keys are collapsed and blank ones dropped. Keys are bound in chunks
         well under SQLite's variable limit, so an arbitrarily long list is
-        safe.
+        safe. With *name*, only the spans of that name are read (bd
+        fix-0iuo.23); every requested key is still present.
         """
         keys = list(dict.fromkeys(key for key in turn_keys if key))
         spans_by_turn: dict[str, list[dict[str, Any]]] = {key: [] for key in keys}
         if not keys:
             return spans_by_turn
+        name_clause, name_params = ("", []) if name is None else (" AND name=?", [name])
         with self._connect() as conn:
             for chunk in _chunked(keys):
                 placeholders = ",".join("?" * len(chunk))
                 rows = conn.execute(
-                    f"SELECT * FROM spans WHERE trace_id IN ({placeholders}) "
-                    "ORDER BY trace_id, start_ns",
-                    chunk,
+                    f"SELECT * FROM spans WHERE trace_id IN ({placeholders})"
+                    f"{name_clause} ORDER BY trace_id, start_ns",
+                    [*chunk, *name_params],
                 ).fetchall()
                 for row in rows:
                     spans_by_turn[row["trace_id"]].append(dict(row))
         return spans_by_turn
+
+    def count_spans_without_turn(self, *, name: Optional[str] = None) -> int:
+        """How many spans belong to no turn: their ``trace_id`` names no row of ``turns``.
+
+        Such spans are never answered by `get_spans` or `spans_for_turns` for a
+        listed turn, so a reader that walks turns can report how many it could
+        not reach (bd fix-0iuo.23). With *name*, only the spans of that name
+        are counted.
+        """
+        name_clause, name_params = ("", []) if name is None else (" AND s.name=?", [name])
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM spans s WHERE NOT EXISTS "
+                "(SELECT 1 FROM turns t WHERE t.turn_key = s.trace_id)"
+                f"{name_clause}",
+                name_params,
+            ).fetchone()
+        return int(row[0])
 
     def iter_spans_for_turn_batches(
         self,
@@ -6423,7 +6445,7 @@ class ObservabilityStore:
                 expired = updated_at < horizon_moment.isoformat()
                 if inactive and (_writer_health_is_clean(health) or expired):
                     conn.execute("DELETE FROM diagnostics WHERE key=?", (key,))
-            conn.execute("PRAGMA incremental_vacuum")
+            conn.execute("PRAGMA incremental_vacuum").fetchall()
             conn.commit()
             # Fold the deletes back into the main file now, so the evidence
             # they removed does not wait there for the next checkpoint.
@@ -6734,7 +6756,7 @@ class ObservabilityStore:
                 deleted["experiments_invalidated"] = invalidated
             conn.commit()
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            conn.execute("PRAGMA incremental_vacuum")
+            conn.execute("PRAGMA incremental_vacuum").fetchall()
             conn.commit()
 
         return deleted
@@ -6773,7 +6795,7 @@ class ObservabilityStore:
                 deleted[table] = conn.execute(f"DELETE FROM {table}").rowcount
             conn.commit()
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            conn.execute("PRAGMA incremental_vacuum")
+            conn.execute("PRAGMA incremental_vacuum").fetchall()
             conn.commit()
 
         return deleted
@@ -6956,6 +6978,15 @@ class SQLiteTraceSink:
         self._writer.start()
         # Opportunistic bounded prune at sink startup [R12]; the writer repeats
         # it every `_PRUNE_INTERVAL_S` (`_maybe_prune`).
+        # Registered first, so the agent build's once-per-path prune
+        # (`observation_offloading.state.prune_once`) does not repeat this one
+        # inside the first turn. Imported here: that module imports this one.
+        try:
+            from fastworkflow.observation_offloading import state as offload_state
+
+            offload_state.mark_pruned(self.store.db_path)
+        except Exception as exc:  # the guard is an optimisation only
+            logger.debug(f"Could not register startup prune: {exc!r}")
         try:
             self.store.prune()
         except Exception as exc:

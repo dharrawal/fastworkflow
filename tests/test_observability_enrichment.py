@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 
-from fastworkflow import tracing
+from fastworkflow.observability import tracing
 from fastworkflow.observability import enrichment
 from fastworkflow.observation_offloading.manifest import (
     install_span_policy,

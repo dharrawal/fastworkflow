@@ -66,7 +66,7 @@ Move each planning command from `_skills/` to `_commands/`:
 | `_skills/<name>.py` | `_commands/<name>.py` |
 | `_skills/<Context>/<name>.py` | `_commands/<Context>/<name>.py` |
 | `_skills/_<helper>.py` | `_commands/_<helper>.py` (or into the context folder that imports it) |
-| `_skills/_split.py` | `_commands/_split.py` |
+| `_skills/_split.py` | `class Context` of `_commands/_workflow.py` (see below) |
 
 A planning command in a context folder moves with its folder: `_skills/<Context>/<name>.py`
 becomes `_commands/<Context>/<name>.py`, and the command is named `<Context>/<name>`. Phase 1
@@ -76,28 +76,35 @@ Files whose names start with `_` are not loaded as commands. A `_` helper moves 
 commands that import it. If two planning commands in different folders use the same helper,
 keep one copy in a `_` module that both can import from.
 
-### The split settings file
+### The workflow settings file
 
-`_commands/_split.py` is the workflow's split settings. Every attribute in it is optional:
+`_commands/_workflow.py` holds the workflow's own settings: the whole workflow is a context with this one settings
+file, and the settings are the class attributes of its `class Context`. Every one is optional:
 
 ```python
 import re
 
-identifier_patterns = [re.compile(r"\bacct_[0-9]+")]
-subject_hints = "An account is a record. Its id looks like acct_<number>."
+
+class Context:
+    identifier_patterns = [re.compile(r"\bacct_[0-9]+")]
+    subject_hints = "An account is a record. Its id looks like acct_<number>."
 ```
 
-It may also have a `class Signature` whose docstring replaces the splitter's instructions.
-Its `Signature.Input` and `Signature.Output` fields can give the splitter's fields a description.
-A field the splitter does not have fails the load.
+It may also declare `split_examples = [("<request>", ["<part 1>", "<part 2>"]), ...]`, the workflow's own
+examples, which replace the splitter's generic ones. The splitter's rules are not replaceable: a `class Signature`
+in `Context` (the older replacement prompt) fails the load, naming `split_examples`. Any other public member of
+`Context` fails the load too (a context hook such as `get_parent` included: the workflow has no parent).
 
-The file may also define plain functions. A planning command can import one from it:
+`_skills/_split.py` and `_commands/_split.py`, where these settings were module attributes, are removed: a workflow
+with a `_split.py` fails to load, naming `_workflow.py`. Move each setting into `class Context` and delete the file.
+
+The file may also define plain functions outside `Context`. A planning command can import one from it:
 
 ```python
-from ._split import order_kind
+from ._workflow import order_kind
 ```
 
-No test in the repository covers a command that imports from `_split.py`. Check this in your
+No test in the repository covers a command that imports from `_workflow.py`. Check this in your
 workflow with a load and `fastworkflow command preview --check` before you rely on it.
 
 ### A workflow that still has `_skills/` fails to load
@@ -109,7 +116,7 @@ _skills/ is no longer read; move these files into _commands/ (first make sure an
 ```
 
 The first sentence is the instruction to follow. The message is the constant
-`PLANNING_COMMANDS_FOLDER_RETIRED` in `fastworkflow/command_directory.py`.
+`PLANNING_COMMANDS_FOLDER_RETIRED` in `fastworkflow/core/command_directory.py`.
 The check runs for the workflow and for each base workflow it inherits from.
 
 ## 3. Fix the imports
@@ -335,7 +342,7 @@ Apps write or import these names. Check the app for each one.
 | `SkillFormatError`, `SkillInputError`, `SkillCallError` | `PlanningCommandFormatError`, `PlanningCommandInputError`, `PlanningCommandCallError`. Only an app that catches them is affected. |
 | `load_skills` | `load_planning_commands` (only an app that calls it) |
 | `PlanGenerator.__call__` | `PlanGenerator.__phases__` (section 5) |
-| `FW_SKILL_PHASE_MAX_STEPS`, `FW_SKILL_FANOUT_MAX_ITEMS`, `FW_SKILL_FACTS_MAX_LIST_ITEMS` | Module constants, `PHASE_MAX_STEPS` (15), `FANOUT_MAX_ITEMS` (10) and `FACTS_MAX_LIST_ITEMS` (100) in `fastworkflow.planning_phases`. The environment settings are no longer read. Remove them from the app's env files. |
+| `FW_SKILL_PHASE_MAX_STEPS`, `FW_SKILL_FANOUT_MAX_ITEMS`, `FW_SKILL_FACTS_MAX_LIST_ITEMS` | Module constants, `PHASE_MAX_STEPS` (15), `FANOUT_MAX_ITEMS` (10) and `FACTS_MAX_LIST_ITEMS` (100) in `fastworkflow.planning.planning_phases`. The environment settings are no longer read. Remove them from the app's env files. |
 | `fact_from`, a `"from"` key on a facts model's field, `facts_from_runs`, `facts_from_archive`, `check_fact_sources`, `check_phase_sources`, `FactSourceError`, `AmbiguousFactSourceError` | Removed. A facts field is typed with a command's `Output` or `Input` (section 12). |
 
 The `fastworkflow.planning` module exports `count`, `do_not_run`, `from_`, `full_list`, `listed`,

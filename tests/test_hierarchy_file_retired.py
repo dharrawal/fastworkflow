@@ -20,11 +20,11 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow.command_context_model import CommandContextModel, get_workflow_info
-from fastworkflow.command_metadata_api import CommandMetadataAPI
-from fastworkflow.command_routing import RoutingDefinition, RoutingRegistry
-from fastworkflow.context_navigation import collect_descend_edges
-from fastworkflow.model_pipeline_training import (
+from fastworkflow.core.command_context_model import CommandContextModel, get_workflow_info
+from fastworkflow.core.command_metadata_api import CommandMetadataAPI
+from fastworkflow.core.command_routing import RoutingDefinition, RoutingRegistry
+from fastworkflow.core.context_navigation import collect_descend_edges
+from fastworkflow.train.model_pipeline_training import (
     INTERNAL_CME_ARM,
     RESERVED_CLASS_ARMS,
     RETIRED_ARMS,

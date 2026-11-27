@@ -36,6 +36,7 @@ class Signature:
 
     class Input(BaseModel):
         query: str = Field(description="words of the title or the author's name",
+                           examples=["Austen", "Dune", "Herbert"],
                            json_schema_extra={"copied_from_command_text": True})
 
 

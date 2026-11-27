@@ -19,8 +19,8 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow.command_routing import RoutingRegistry
-from fastworkflow.model_pipeline_training import (
+from fastworkflow.core.command_routing import RoutingRegistry
+from fastworkflow.train.model_pipeline_training import (
     FLATTENED,
     HEAD_SCOPES,
     RESERVED_CLASS_ARMS,
@@ -39,7 +39,7 @@ from fastworkflow.model_pipeline_training import (
     scoped_head_split,
     trained_command_labels,
 )
-from fastworkflow.nlu_labels import PARAMETER_VALUE_LABEL, WILDCARD_LABEL
+from fastworkflow.intent.nlu_labels import PARAMETER_VALUE_LABEL, WILDCARD_LABEL
 from fastworkflow.train import artifact_versioning, determinism, not_here_pilot
 from fastworkflow.train import selective_training as st
 from fastworkflow.train import utterance_cache
@@ -174,6 +174,32 @@ def test_the_global_head_never_learns_the_startup_command_under_either_layout(tm
     assert _is_action_only(crd.command_directory, "startup")
     picks, _ = not_here_seed_rows(workflow, crd, _labels(workflow, FLATTENED, "*"), 1)
     assert not picks.get("startup")
+
+
+def _rename_startup(tmp_path: Path, name: str) -> str:
+    """A library copy whose startup action is ``begin`` and whose ``startup`` is an ordinary command."""
+    workflow = Path(_copy(tmp_path, name))
+    commands = workflow / "_commands"
+    (commands / "startup.py").rename(commands / "begin.py")
+    (commands / "library_hours.py").rename(commands / "startup.py")
+    (workflow / "startup_action.json").write_text('{"command_name": "begin"}\n', encoding="utf-8")
+    RoutingRegistry.clear_registry()
+    return str(workflow)
+
+
+def test_action_only_is_no_signature_whatever_the_command_is_named(tmp_path):
+    # The startup action named by startup_action.json has no Signature: action-only, under any name.
+    # A command named `startup` that has a Signature and is not the startup action is an ordinary command:
+    # it is a label and a holdout command like any other, as routing already treats it.
+    workflow = _rename_startup(tmp_path, "renamed_startup")
+    crd = RoutingRegistry.get_definition(workflow, load_cached=False)
+    assert {"begin", "startup"} <= own_command_names(crd, "*")
+    assert _is_action_only(crd.command_directory, "begin")
+    assert not _is_action_only(crd.command_directory, "startup")
+    assert "begin" not in _labels(workflow, SCOPED, "*")
+    assert "startup" in _labels(workflow, SCOPED, "*")
+    names = lookup_split_command_names(crd, sorted(st.contexts_for_training(workflow)))
+    assert "startup" in names and "begin" not in names
 
 
 def test_the_global_split_names_skip_planning_and_startup(tmp_path):
@@ -447,14 +473,14 @@ def _glue_run(tmp_path, monkeypatch, scope: str, name: str):
     the held-out removal and the export are the shipped code. ``stop_before_fit`` stops
     before any model is fitted.
     """
-    from fastworkflow.model_pipeline_training import LOOKUP_HOLDOUT_FILENAME, train
+    from fastworkflow.train.model_pipeline_training import LOOKUP_HOLDOUT_FILENAME, train
     from fastworkflow.train import generate_synthetic
     from fastworkflow.train.determinism import (
         ProvenanceRecorder,
         UtteranceProvenance,
         set_provenance_recorder,
     )
-    import fastworkflow.model_pipeline_training as mpt
+    import fastworkflow.train.model_pipeline_training as mpt
 
     workflow_path = str(tmp_path / name)
     shutil.copytree(REPO / "fastworkflow" / "examples" / "messaging_app_4", workflow_path,

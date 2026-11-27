@@ -27,19 +27,19 @@ import pytest
 from fastapi.testclient import TestClient
 
 import fastworkflow
-from fastworkflow.mcp_server import FastWorkflowMCPServer, command_schema_listing
+from fastworkflow.run_fastapi_mcp.mcp_server import FastWorkflowMCPServer, command_schema_listing
 
 HELLO = Path(__file__).resolve().parent / "hello_world_workflow"
 _COPY_IGNORE = shutil.ignore_patterns("___workflow_contexts", "___convo_info", "__pycache__")
 COMMAND_FILE = "_commands/add_two_numbers.py"
-FRAMEWORK_COMMANDS = ("review_plan", "review_proposal", "review_subtasks")
+FRAMEWORK_COMMANDS = ("review_proposal", "review_subtasks")
 
 _HEADER = """import fastworkflow
 from fastworkflow import CommandOutput, CommandResponse
-from fastworkflow.workflow import Workflow
-from fastworkflow.utils.signatures import InputForParamExtraction
+from fastworkflow.core.workflow import Workflow
+from fastworkflow.parameters.signatures import InputForParamExtraction
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
-from fastworkflow.utils.context_utils import list_context_names
+from fastworkflow.core.context_utils import list_context_names
 from typing import Any, Dict, Optional
 from pydantic import BaseModel, Field
 
@@ -114,16 +114,6 @@ def _copy_hello(folder: Path, *, declare_output: bool) -> str:
 
 
 @pytest.fixture
-def env_files():
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    env_file = os.path.join(project_root, "env", ".env")
-    passwords_file = os.path.join(project_root, "passwords", ".env")
-    if not os.path.isfile(env_file) or not os.path.isfile(passwords_file):
-        pytest.skip("env files missing for FastAPI tests")
-    return env_file, passwords_file
-
-
-@pytest.fixture
 def output_workflow(tmp_path):
     return _copy_hello(tmp_path / "hello_output", declare_output=True)
 
@@ -190,7 +180,7 @@ def test_command_schemas_lists_every_listed_command_with_kind_and_schemas(app_mo
     body = resp.json()
     # Every listed command, and nothing else: framework commands and the internal CME workflow's
     # commands (IntentDetection/*, wildcard) are in the directory but hidden.
-    from fastworkflow.command_directory import CommandDirectory
+    from fastworkflow.core.command_directory import CommandDirectory
     cme_root = os.path.realpath(fastworkflow.get_internal_workflow_path("command_metadata_extraction"))
     directory = CommandDirectory.load(output_workflow).map_command_2_metadata
     expected = {
@@ -247,7 +237,7 @@ def test_command_schemas_requires_a_token(app_module):
 
 def test_command_schema_listing_hides_framework_commands(output_workflow, mcp_env):
     listing = command_schema_listing(output_workflow)
-    assert "review_plan" not in listing and "review_subtasks" not in listing
+    assert "review_subtasks" not in listing
     assert "review_proposal" not in listing
 
 

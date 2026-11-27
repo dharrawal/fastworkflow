@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 
 from fastworkflow.planning import phase, run
 
-from ._wording import copies
+from .._shared.wording import copies
 from .find_book import Signature as FindBook
 from .open_book import Signature as OpenBook
 
@@ -28,6 +28,7 @@ class Signature:
 
     class Input(BaseModel):
         author: str = Field(description="the author's name",
+                            examples=["Frank Herbert", "Jane Austen", "Austen"],
                             json_schema_extra={"copied_from_command_text": True})
 
 

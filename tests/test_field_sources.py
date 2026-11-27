@@ -20,12 +20,15 @@ import pytest
 from pydantic import BaseModel, Field
 
 import fastworkflow
-from fastworkflow import ModuleType, planning_commands, command_preview, workflow_agent
-from fastworkflow.command_directory import CommandDirectory, get_cached_command_directory
-from fastworkflow.command_metadata_api import CommandMetadataAPI
-from fastworkflow.command_routing import RoutingRegistry
-from fastworkflow.planning_phases import fill_output
-from fastworkflow.utils.signatures import InputForParamExtraction, parameters_with_unfilled
+from fastworkflow import ModuleType
+from fastworkflow.agent import workflow_agent
+from fastworkflow.planning import planning_commands, command_preview
+from fastworkflow.core.command_directory import CommandDirectory, get_cached_command_directory
+from fastworkflow.core.command_metadata_api import CommandMetadataAPI
+from fastworkflow.core.command_routing import RoutingRegistry
+from fastworkflow.planning.planning_phases import fill_output
+from fastworkflow.parameters.signatures import InputForParamExtraction, not_given_value, parameters_with_unfilled
+from tests.context_declarations import declare_inherits
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIBRARY = os.path.join(ROOT, "fastworkflow", "examples", "library")
@@ -75,23 +78,17 @@ def _build_workflow(
     shutil.copy2(os.path.join(LIBRARY, "startup_action.json"), folder / "startup_action.json")
     shutil.copytree(os.path.join(LIBRARY, "application"), folder / "application")
 
-    with open(os.path.join(LIBRARY, "_commands", "context_inheritance_model.json"),
-              encoding="utf-8") as handle:
-        inheritance = json.load(handle)
-    if extra_inheritance:
-        inheritance.update(extra_inheritance)
-
     commands_dir = folder / "_commands"
     commands_dir.mkdir(parents=True, exist_ok=True)
-    (commands_dir / "context_inheritance_model.json").write_text(
-        json.dumps(inheritance, indent=2) + "\n", encoding="utf-8"
-    )
 
+    # The copied context classes carry the library's inherits declarations
     for rel in (*_COPIED_CONTEXT_CLASSES, *_COPIED_COMMANDS):
         src = os.path.join(LIBRARY, rel)
         dst = folder / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
+    if extra_inheritance:
+        declare_inherits(folder, {name: entry["base"] for name, entry in extra_inheritance.items()})
 
     if extra_commands:
         for cmd_name, code in extra_commands.items():
@@ -124,7 +121,7 @@ def _preview_check(folder: str, out_dir: str, capsys) -> tuple[int, str]:
 
 def test_from_exports_and_field_construction():
     import fastworkflow.planning as planning
-    import fastworkflow.planning_phases as planning_phases
+    import fastworkflow.planning.planning_phases as planning_phases
 
     assert not hasattr(fastworkflow, "from_")
     with pytest.raises(ImportError, match='from_command_output'):
@@ -166,7 +163,7 @@ _COPY_LOAD_ERROR = (
 
 def test_fact_from_is_no_longer_importable():
     import fastworkflow.planning as planning
-    import fastworkflow.planning_phases as planning_phases
+    import fastworkflow.planning.planning_phases as planning_phases
 
     assert not hasattr(planning, "fact_from")
     assert not hasattr(planning_phases, "fact_from")
@@ -257,7 +254,7 @@ class Signature:
 
     class Input(BaseModel):
         book_uid: str = Field(description="the uid of the book to open", json_schema_extra={"from_command_output": ["find_book.book_uids", "Book/show_book.book_uid"]})
-        branch_hint: Optional[str] = Field(default=None, description="hours info", json_schema_extra={"from_command_output": "library_hours"})
+        branch_hint: Optional[str] = Field(default=None, description="hours info", json_schema_extra={"from_command_output": "library_hours.branches"})
 
     class Output(BaseModel):
         book_uid: str = Field(description="the uid")
@@ -279,7 +276,7 @@ class Signature:
 
     class Input(BaseModel):
         book_uid: str = Field(description="the uid", json_schema_extra={"from_command_output": ["Library/find_book.book_uids", "Book/show_book.book_uid"]})
-        hours_note: Optional[str] = Field(default=None, description="hours", json_schema_extra={"from_command_output": "library_hours"})
+        hours_note: Optional[str] = Field(default=None, description="hours", json_schema_extra={"from_command_output": "library_hours.branches"})
 
 
 class PlanGenerator:
@@ -294,10 +291,6 @@ class PlanGenerator:
     )
     res = planning_commands.resolve_field_sources(folder)
     assert res.errors == ()
-    assert len(res.infos) == 2
-    info_msgs = [i.message for i in res.infos]
-    assert any("Input.branch_hint (from 'library_hours'): command-only producer reference" in m for m in info_msgs)
-    assert any("Input.hours_note (from 'library_hours'): command-only producer reference" in m for m in info_msgs)
 
     # Check available_from written onto execution command and planning command Input fields
     open_sig = res.signatures["Library/open_book"]
@@ -306,7 +299,7 @@ class PlanGenerator:
         "Book/show_book.book_uid",
     ]
     assert open_sig.Input.model_fields["branch_hint"].json_schema_extra["available_from"] == [
-        "library_hours"
+        "library_hours.branches"
     ]
 
     inspect_sig = res.signatures["Library/inspect_book"]
@@ -315,7 +308,7 @@ class PlanGenerator:
         "Book/show_book.book_uid",
     ]
     assert inspect_sig.Input.model_fields["hours_note"].json_schema_extra["available_from"] == [
-        "library_hours"
+        "library_hours.branches"
     ]
 
     # Check 3.12 model_to_command map
@@ -323,14 +316,12 @@ class PlanGenerator:
     assert res.model_to_command[open_sig.Output] == "Library/open_book"
     assert res.model_to_command[inspect_sig.Input] == "Library/inspect_book"
 
-    # preview --check succeeds (exit 0) and prints the info line
+    # preview --check succeeds (exit 0); the command-only "info:" line is gone with the bare form
     out_dir = str(tmp_path / "previews")
     command_preview.write_previews(folder, out_dir)
     code, stdout = _preview_check(folder, out_dir, capsys)
     assert code == 0
-    assert "info:" in stdout
-    assert "Input.branch_hint (from 'library_hours')" in stdout
-    assert "Input.hours_note (from 'library_hours')" in stdout
+    assert "info:" not in stdout
 
 
 def test_planning_command_under_commands_gets_producer_missing_output_field_check(tmp_path):
@@ -487,7 +478,7 @@ class ResponseGenerator:
     messages = [e.message for e in res.errors]
     assert any(
         "Input.member_uid (from 'find_member.member_uids'): no command find_member in Book, "
-        "its bases or the global commands; qualify it (Library/find_member)" in m
+        "its bases or the global commands; Library/find_member is in another context. Write the qualified name only when" in m
         for m in messages
     )
     assert any(
@@ -671,11 +662,15 @@ class PlanGenerator:
     )
     with caplog.at_level(logging.ERROR):
         loaded_planning_commands = workflow_agent.load_planning_command_map(folder)
-    # Rule changed by owner decision 2026-10-28 (fix-3rsq.3.8): from_ errors load; --check fails.
-    assert "Book/bad_output_planning_command" in loaded_planning_commands
-    assert "Book/shelf_report" in loaded_planning_commands
-    assert "skipping planning command 'Book/bad_output_planning_command'" not in caplog.text
-    assert "skipping planning command 'Book/shelf_report'" not in caplog.text
+    # One rule for an author's mistake (bd fix-ftdl.2; it was fix-3rsq.3.8: from_ errors load): each command with
+    # one of these errors does not load, is skipped, and is listed by load_problems; --check fails.
+    assert "Book/bad_output_planning_command" not in loaded_planning_commands
+    assert "Book/shelf_report" not in loaded_planning_commands
+    assert "skipping planning command 'Book/bad_output_planning_command'" in caplog.text
+    assert "skipping planning command 'Book/shelf_report'" in caplog.text
+    listed = {p.split(": ", 1)[0] for p in command_preview.load_problems(folder)}
+    assert {"Library/bad_output", "Book/bad_output_planning_command", "Library/bad_missing",
+            "Book/shelf_report"} <= listed
 
     res = planning_commands.resolve_field_sources(folder)
     messages = [e.message for e in res.errors]
@@ -737,9 +732,19 @@ class ResponseGenerator:
     command_preview.write_previews(folder_exec_errs, out_exec)
     code_exec, stdout_exec = _preview_check(folder_exec_errs, out_exec, capsys)
     assert code_exec == 1
-    assert "Signature.Output.author: an Output field cannot declare from_command_output" in stdout_exec
+    # bd fix-qjne.4: a declaration that does not resolve is a load problem, and the load problems are printed
+    # (alone) before the previews' own problems, so the Output-field error is asserted on its own below.
+    assert "Library/bad_missing: " in stdout_exec and "Library/bad_input_only: " in stdout_exec
     assert "Library/find_book has no Output field 'uids'" in stdout_exec
     assert "find_book's query is an Input field; from_command_output names the Output field a value comes from" in stdout_exec
+
+    folder_output_only = _build_workflow(
+        tmp_path, "wf_output_only_error", extra_commands={"Library/bad_output": bad_output_cmd})
+    out_output_only = str(tmp_path / "previews_output_only")
+    command_preview.write_previews(folder_output_only, out_output_only)
+    code_output_only, stdout_output_only = _preview_check(folder_output_only, out_output_only, capsys)
+    assert code_output_only == 1
+    assert "Signature.Output.author: an Output field cannot declare from_command_output" in stdout_output_only
 
 
 def test_type_check_passes_and_failures(tmp_path):
@@ -822,7 +827,8 @@ class ResponseGenerator:
     assert "Library/open_book" in res.skipped_commands
 
 
-def test_hand_written_available_from_loads_planning_command_and_keeps_execution_command_routable(tmp_path, caplog, capsys):
+def test_hand_written_available_from_fails_the_load_of_that_planning_command_and_that_execution_command(
+        tmp_path, caplog, capsys):
     hand_cmd = '''import fastworkflow
 from pydantic import BaseModel, Field
 
@@ -862,16 +868,16 @@ class PlanGenerator:
     )
     with caplog.at_level(logging.ERROR):
         loaded_planning_commands = workflow_agent.load_planning_command_map(folder)
-    # Rule changed by owner decision 2026-10-28 (fix-3rsq.3.8): planning commands with from_ /
-    # available_from errors stay matchable; the error is logged once, not via "skipping planning command".
-    assert "Library/hand_planning_command" in loaded_planning_commands
-    assert "skipping planning command 'Library/hand_planning_command'" not in caplog.text
+    # One rule for an author's mistake (bd fix-ftdl.2; it was fix-3rsq.3.8: stays matchable, logged once): a
+    # hand-written available_from fails the load of that planning command, which is skipped and listed.
+    assert "Library/hand_planning_command" not in loaded_planning_commands
     hand_planning_command_logs = [
         rec for rec in caplog.records
-        if "command 'Library/hand_planning_command':" in rec.getMessage()
+        if "skipping planning command 'Library/hand_planning_command':" in rec.getMessage()
     ]
     assert len(hand_planning_command_logs) == 1
     assert "available_from is written by from_command_output" in hand_planning_command_logs[0].getMessage()
+    assert [p for p in command_preview.load_problems(folder) if p.startswith("Library/hand_planning_command: ")]
 
     res = planning_commands.resolve_field_sources(folder)
     assert {"Library/get_order", "Library/hand_planning_command"} <= res.skipped_commands
@@ -879,13 +885,12 @@ class PlanGenerator:
     assert "available_from" not in (hand_sig.Input.model_fields["book_uid"].json_schema_extra or {})
     messages = [e.message for e in res.errors]
     assert any(
-        'Input.order_id: available_from is written by from_command_output; write "from_command_output": "find_book" '
-        'or "from_command_output": "find_book.<field>"' in m
+        'Input.order_id: available_from is written by from_command_output; write "from_command_output": "find_book.<field>"' in m
         for m in messages
     )
 
-    # Execution command policy: when only an execution command has hand-written available_from,
-    # hydration logs the error once, keeps the command routable, and check_previews fails.
+    # Execution command: hand-written available_from fails the load of that command (bd fix-ftdl.2): hydration logs
+    # the error once, every class fetch raises it, load_problems lists it, and check_previews fails.
     folder_exec_only = _build_workflow(
         tmp_path,
         "wf_hand_exec_only",
@@ -905,9 +910,10 @@ class PlanGenerator:
     ]
     assert len(get_order_logs) == 1
     assert "available_from is written by from_command_output" in get_order_logs[0].getMessage()
-    assert "Library/get_order" in routing_def.get_command_names("Library")
-    param_cls = routing_def.get_command_class("Library/get_order", ModuleType.COMMAND_PARAMETERS_CLASS)
-    assert param_cls is not None
+    with pytest.raises(ValueError, match="available_from is written by from_command_output"):
+        routing_def.get_command_class("Library/get_order", ModuleType.COMMAND_PARAMETERS_CLASS)
+    assert [p for p in command_preview.load_problems(folder_exec_only) if p.startswith("Library/get_order: ")
+            and "available_from is written by from_command_output" in p]
 
     out_dir = str(tmp_path / "previews_exec")
     command_preview.write_previews(folder_exec_only, out_dir)
@@ -917,19 +923,21 @@ class PlanGenerator:
     assert code == 1
     assert "available_from is written by from_command_output" in stdout
 
+    # like any planning command file that does not load, the previews cannot be rendered or checked
     out_dir_both = str(tmp_path / "previews_both")
-    command_preview.write_previews(folder, out_dir_both)
-    problems_both = command_preview.check_previews(folder, out_dir_both)
-    assert any("available_from is written by from_command_output" in p for p in problems_both)
+    with pytest.raises(command_preview.PreviewError, match="available_from is written by from_command_output"):
+        command_preview.write_previews(folder, out_dir_both)
     code_both, stdout_both = _preview_check(folder, out_dir_both, capsys)
     assert code_both == 1
     assert "available_from is written by from_command_output" in stdout_both
 
 
-def test_planning_command_with_from_error_loads_matchable_logs_once_and_preview_check_fails(
+def test_planning_command_with_a_bad_producer_declaration_is_not_loaded_is_a_load_problem_and_preview_check_fails(
     tmp_path, caplog, capsys,
 ):
-    """Planning skill with a bad ``from_`` stays in the registry and ``load_planning_command_map``."""
+    """Owner decision bd fix-qjne.4 (it was: stays matchable, logged once): a planning command whose
+    ``from_command_output`` does not resolve is skipped by ``load_planning_command_map`` and is a
+    ``load_problems`` line; the resolver still reports the error and writes no edge."""
     bad_planning = '''from pydantic import Field
 import fastworkflow
 from pydantic import BaseModel
@@ -954,22 +962,23 @@ class PlanGenerator:
     caplog.clear()
     with caplog.at_level(logging.ERROR):
         loaded = workflow_agent.load_planning_command_map(folder)
-    assert "Library/bad_plan" in loaded
-    assert "skipping planning command 'Library/bad_plan'" not in caplog.text
-    plan_logs = [
-        rec for rec in caplog.records if "command 'Library/bad_plan':" in rec.getMessage()
+    assert "Library/bad_plan" not in loaded
+    skipped_logs = [
+        rec for rec in caplog.records if "skipping planning command 'Library/bad_plan':" in rec.getMessage()
     ]
-    assert len(plan_logs) == 1
-    assert "int does not match" in plan_logs[0].getMessage()
+    assert len(skipped_logs) == 1
+    assert "int does not match" in skipped_logs[0].getMessage()
+    assert [p for p in command_preview.load_problems(folder) if p.startswith("Library/bad_plan: ")
+            and "int does not match" in p]
 
     res = planning_commands.resolve_field_sources(folder)
     bad_sig = res.signatures["Library/bad_plan"]
     assert "available_from" not in (bad_sig.Input.model_fields["book_uid"].json_schema_extra or {})
 
+    # like any planning command file that does not load, the previews cannot be rendered or checked
     out_dir = str(tmp_path / "previews_plan")
-    command_preview.write_previews(folder, out_dir)
-    problems = command_preview.check_previews(folder, out_dir)
-    assert any("int does not match" in p for p in problems)
+    with pytest.raises(command_preview.PreviewError, match="int does not match"):
+        command_preview.write_previews(folder, out_dir)
     code, stdout = _preview_check(folder, out_dir, capsys)
     assert code == 1
     assert "int does not match" in stdout
@@ -1108,8 +1117,7 @@ class ResponseGenerator:
     assert len(res.errors) == 1
     assert res.errors[0].command == "Library/both_cmd"
     assert (
-        'Input.book_uid: available_from is written by from_command_output; write "from_command_output": "find_book" '
-        'or "from_command_output": "find_book.<field>"'
+        'Input.book_uid: available_from is written by from_command_output; write "from_command_output": "find_book.<field>"'
     ) in res.errors[0].message
 
     # Re-running resolve_signature_field_sources on an already-resolved Signature is idempotent
@@ -1125,32 +1133,38 @@ class ResponseGenerator:
 
 
 def test_broken_context_or_workflow_inheritance_models_are_reported_as_problems(tmp_path):
+    # The removed context_inheritance_model.json is a load error naming the file (bd fix-qjne.36), whatever it holds
     folder = _build_workflow(tmp_path, "wf_broken_models")
     ctx_model_path = os.path.join(folder, "_commands", "context_inheritance_model.json")
-    inh_model_path = os.path.join(folder, "workflow_inheritance_model.json")
     with open(ctx_model_path, "w", encoding="utf-8") as fh:
         fh.write("{not valid json")
-    with open(inh_model_path, "w", encoding="utf-8") as fh:
-        fh.write('{"base": ["nonexistent_base_workflow_pkg_xyz"]}')
 
     res = planning_commands.resolve_field_sources(folder)
-    files_with_errors = {e.file for e in res.errors}
-    assert ctx_model_path in files_with_errors
-    assert inh_model_path in files_with_errors
+    assert any(f"{ctx_model_path}: context_inheritance_model.json is removed and not read" in e.message
+               for e in res.errors)
 
-    # When only workflow_inheritance_model.json is broken (context_inheritance_model.json is valid),
+    # A broken workflow_inheritance_model.json is reported on that file, beside the removed file or alone
+    inh_model_path = os.path.join(folder, "workflow_inheritance_model.json")
+    with open(inh_model_path, "w", encoding="utf-8") as fh:
+        fh.write('{"base": ["nonexistent_base_workflow_pkg_xyz"]}')
+    planning_commands.resolve_field_sources.cache_clear()
+    res = planning_commands.resolve_field_sources(folder)
+    assert inh_model_path in {e.file for e in res.errors}
+
+    # When only workflow_inheritance_model.json is broken (the declarations are valid),
     # CommandContextModel.load_base_contexts raises WorkflowInheritanceModelValidationError and
-    # resolve_field_sources reports the error on workflow_inheritance_model.json (not context_inheritance_model.json).
+    # resolve_field_sources reports the error on workflow_inheritance_model.json only.
     folder_inh_only = _build_workflow(tmp_path, "wf_broken_inh_only")
     inh_only_path = os.path.join(folder_inh_only, "workflow_inheritance_model.json")
     with open(inh_only_path, "w", encoding="utf-8") as fh:
         fh.write('{"base": ["nonexistent_base_workflow_pkg_xyz"]}')
-    with pytest.raises(fastworkflow.workflow_inheritance_model.WorkflowInheritanceModelValidationError):
-        fastworkflow.command_context_model.CommandContextModel.load_base_contexts(folder_inh_only)
+    with pytest.raises(fastworkflow.core.workflow_inheritance_model.WorkflowInheritanceModelValidationError):
+        fastworkflow.core.command_context_model.CommandContextModel.load_base_contexts(folder_inh_only)
     res_inh_only = planning_commands.resolve_field_sources(folder_inh_only)
     assert {e.file for e in res_inh_only.errors} == {inh_only_path}
 
-    # Inheritance cycle and unknown base in context_inheritance_model.json are also reported
+    # An inheritance cycle and an unknown base in the inherits declarations are also reported, naming the
+    # context class file that declares them
     folder_cycle = _build_workflow(
         tmp_path,
         "wf_cycle_model",
@@ -1161,7 +1175,7 @@ def test_broken_context_or_workflow_inheritance_models_are_reported_as_problems(
     )
     res_cycle = planning_commands.resolve_field_sources(folder_cycle)
     assert any(
-        e.file == os.path.join(folder_cycle, "_commands", "context_inheritance_model.json")
+        os.path.join(folder_cycle, "_commands", "Book", "_Book.py") in e.message
         and "Inheritance cycle detected" in e.message
         for e in res_cycle.errors
     )
@@ -1173,8 +1187,8 @@ def test_broken_context_or_workflow_inheritance_models_are_reported_as_problems(
     )
     res_unknown = planning_commands.resolve_field_sources(folder_unknown_base)
     assert any(
-        e.file == os.path.join(folder_unknown_base, "_commands", "context_inheritance_model.json")
-        and "Context 'NoSuchBaseContext' not found in model" in e.message
+        os.path.join(folder_unknown_base, "_commands", "Book", "_Book.py") in e.message
+        and "inherits names 'NoSuchBaseContext', which is no context" in e.message
         for e in res_unknown.errors
     )
 
@@ -1280,7 +1294,7 @@ class Signature:
 
     class Input(BaseModel):
         book_uid: str = Field(description="the uid of the book to open", json_schema_extra={"from_command_output": ["find_book.book_uids", "Book/show_book.book_uid"]})
-        branch_hint: Optional[str] = Field(default=None, description="hours info", json_schema_extra={"from_command_output": "library_hours"})
+        branch_hint: Optional[str] = Field(default=None, description="hours info", json_schema_extra={"from_command_output": "library_hours.branches"})
 
     class Output(BaseModel):
         book_uid: str = Field(description="the uid")
@@ -1319,7 +1333,7 @@ class ResponseGenerator:
     assert inputs_by_name["book_uid"]["available_from"] == (
         "['Library/find_book.book_uids', 'Book/show_book.book_uid']"
     )
-    assert inputs_by_name["branch_hint"]["available_from"] == "['library_hours']"
+    assert inputs_by_name["branch_hint"]["available_from"] == "['library_hours.branches']"
 
     # Also check display text used by the agent and planner
     display_text = CommandMetadataAPI.get_command_display_text(
@@ -1329,7 +1343,7 @@ class ResponseGenerator:
         for_agents=True,
     )
     assert "available_from: ['Library/find_book.book_uids', 'Book/show_book.book_uid']" in display_text
-    assert "available_from: ['library_hours']" in display_text
+    assert "available_from: ['library_hours.branches']" in display_text
 
     # Single-command hydration without building full RoutingDefinition first (no import-order dependence)
     folder_single = _build_workflow(
@@ -1392,7 +1406,46 @@ class ResponseGenerator:
     assert res1 is res2
 
 
-def test_execution_command_with_from_error_logs_error_once_leaves_field_unwritten_and_stays_routable(tmp_path, caplog):
+def test_the_command_source_fingerprint_is_exact_and_rescans_only_when_a_directory_changed(tmp_path, monkeypatch):
+    """``intent_loop.choose`` resolves the workflow's commands on every direct action, which fingerprints every command
+    file. The fingerprint keeps what its last scan found and re-stats only those files while no directory changed; an
+    edit in place, an added file and a removed file each still change it, to what a fresh scan computes."""
+    from fastworkflow.core import command_directory
+
+    folder = os.path.abspath(_build_workflow(tmp_path, "wf_fingerprint"))
+    scans: list[str] = []
+    real = command_directory._command_source_roots
+    monkeypatch.setattr(command_directory, "_command_source_roots", lambda path: scans.append(path) or real(path))
+    monkeypatch.setattr(command_directory, "_SOURCE_SCANS", {})
+
+    def fresh() -> str:
+        command_directory._SOURCE_SCANS.pop(folder, None)
+        return command_directory.compute_commands_source_fingerprint(folder)
+
+    first = command_directory.compute_commands_source_fingerprint(folder)
+    assert command_directory.compute_commands_source_fingerprint(folder) == first and len(scans) == 1
+
+    edited = os.path.join(folder, "_commands", "Library", "find_book.py")
+    with open(edited, "a", encoding="utf-8") as handle:
+        handle.write("\n# edited while the server runs\n")
+    after_edit = command_directory.compute_commands_source_fingerprint(folder)
+    assert after_edit != first and len(scans) == 1                 # the file's own stat: no rescan
+    assert fresh() == after_edit
+
+    added = os.path.join(folder, "_commands", "Library", "zz_new.py")
+    with open(added, "w", encoding="utf-8") as handle:
+        handle.write("# a new command file\n")
+    after_add = command_directory.compute_commands_source_fingerprint(folder)
+    assert after_add != after_edit and fresh() == after_add
+
+    os.remove(added)
+    assert command_directory.compute_commands_source_fingerprint(folder) == fresh() == after_edit
+
+
+def test_execution_command_with_a_bad_producer_declaration_logs_once_writes_no_edge_and_does_not_load(tmp_path, caplog):
+    """Owner decision bd fix-qjne.4 (it was: the command keeps loading and its edge is dropped): the command's Input
+    no longer loads (``load_problems`` lists it, ``test_producer_declarations.py``); it is in no scope's command set
+    (B6 item 5: a command that does not load is not routable), so the command listing does not carry it."""
     bad_exec_cmd = '''from pydantic import Field
 import fastworkflow
 from pydantic import BaseModel
@@ -1455,15 +1508,16 @@ class ResponseGenerator:
         if "command 'Library/bad_open':" in rec.getMessage()
     ]) == 2
 
-    # Command stays in routing (preserving trained intent model label sets),
-    # but the broken from_ edge is not written to available_from
-    param_cls = routing_def.get_command_class(
-        "Library/bad_open", ModuleType.COMMAND_PARAMETERS_CLASS
-    )
-    assert param_cls is not None
-    assert "available_from" not in (param_cls.model_fields["book_uid"].json_schema_extra or {})
-    bad_meta = next(c for c in info["commands"] if c["qualified_name"] == "Library/bad_open")
-    assert bad_meta["inputs"][0]["available_from"] is None
+    # The command is in no scope's command set (B6 item 5), none of its classes loads (bd fix-ftdl.2: every class
+    # fetch raises its load error), and the broken from_ edge is not written
+    with pytest.raises(ValueError, match="int does not match"):
+        routing_def.get_command_class("Library/bad_open", ModuleType.COMMAND_PARAMETERS_CLASS)
+    signature = planning_commands.resolve_field_sources(folder).signatures["Library/bad_open"]
+    assert "available_from" not in (signature.Input.model_fields["book_uid"].json_schema_extra or {})
+    assert "Library/bad_open" not in routing_def.get_command_names("Library")
+    assert not [c for c in info["commands"] if c["qualified_name"] == "Library/bad_open"]
+    with pytest.raises(ValueError, match="int does not match"):
+        routing_def.get_command_class("Library/bad_open", ModuleType.INPUT_FOR_PARAM_EXTRACTION_CLASS)
 
 
 def test_snapshot_reloaded_in_fresh_subprocess_preserves_resolved_available_from(tmp_path):
@@ -1511,8 +1565,8 @@ class ResponseGenerator:
     script = f"""
 import json
 import fastworkflow
-from fastworkflow.command_metadata_api import CommandMetadataAPI
-from fastworkflow.command_routing import RoutingRegistry
+from fastworkflow.core.command_metadata_api import CommandMetadataAPI
+from fastworkflow.core.command_routing import RoutingRegistry
 
 fastworkflow.init({{}})
 folder = {folder!r}
@@ -1554,14 +1608,11 @@ def test_missing_parameter_message_strips_context_prefix_and_field_suffix(tmp_pa
 import fastworkflow
 from pydantic import BaseModel, Field
 
-from fastworkflow.utils.signatures import NOT_FOUND
-
-
 class Signature:
     """Open one book by its uid."""
 
     class Input(BaseModel):
-        book_uid: str = Field(default=NOT_FOUND, description="the uid of the book to open", json_schema_extra={"from_command_output": ["find_book.book_uids", "Book/show_book.book_uid", "library_hours"]})
+        book_uid: str = Field(description="the uid of the book to open", json_schema_extra={"from_command_output": ["find_book.book_uids", "Book/show_book.book_uid", "library_hours.branches"]})
 
     plain_utterances = ["open book {book_uid}"]
 
@@ -1592,10 +1643,11 @@ class ResponseGenerator:
     assert param_cls.model_fields["book_uid"].json_schema_extra["available_from"] == [
         "Library/find_book.book_uids",
         "Book/show_book.book_uid",
-        "library_hours",
+        "library_hours.branches",
     ]
 
-    params = param_cls()
+    # the Input as the framework holds it when the request gives no book_uid: the not-given marker
+    params = param_cls.model_construct(book_uid=not_given_value(param_cls.model_fields["book_uid"]))
     extractor = InputForParamExtraction.create(
         workflow, "Library/open_book", "Library/open_book"
     )
@@ -1606,7 +1658,7 @@ class ResponseGenerator:
     # Missing-parameter message lists bare command names only (no Context/ prefix, no .field suffix)
     assert (
         "abort and use the find_book or show_book or library_hours command(s) "
-        "to get book_uid information. OR..."
+        "to get book_uid information."
     ) in message
 
 

@@ -24,8 +24,8 @@ from dotenv import dotenv_values
 import fastworkflow
 from fastworkflow.train.__main__ import train_workflow
 from fastworkflow.train import heldout_evaluation
-from fastworkflow.command_directory import CommandDirectory
-from fastworkflow.model_pipeline_training import CommandRouter
+from fastworkflow.core.command_directory import CommandDirectory
+from fastworkflow.intent.router import CommandRouter
 from fastworkflow.train.determinism import get_training_seed
 from fastworkflow.train.generate_synthetic import (
     utterance_fingerprint,
@@ -103,6 +103,10 @@ def _resolve_env_vars() -> dict:
         val = os.environ.get(key)
         if val and "<" not in val:
             env_vars[key] = val
+    # This file's real training runs are about the per-context trainer (its model folders, its
+    # reserved classes, its selective retraining). The default layout is another trainer, so the
+    # layout is pinned by name.
+    env_vars["INTENT_MODEL_LAYOUT"] = "per_context"
     return env_vars
 
 
@@ -205,7 +209,7 @@ def _preseed_fixed_utterance_cache(workflow_path: str) -> dict[str, list[str]]:
     for command_name in sorted(commands):
         if command_name.split("/")[-1] == "wildcard":
             continue
-        # Framework machinery (fastworkflow/_framework_commands, e.g. review_plan) is not trained, so it
+        # Framework machinery (fastworkflow/review/commands, e.g. review_proposal) is not trained, so it
         # has no provenance record (train.training_report: "not trained, reported or gated").
         framework_meta = cmd_dir.map_command_2_metadata.get(command_name)
         if framework_meta is not None and getattr(framework_meta, "framework", None):
@@ -219,7 +223,6 @@ def _preseed_fixed_utterance_cache(workflow_path: str) -> dict[str, list[str]]:
             num_personas,
             utterances_per_persona,
             personas_per_batch,
-            model,
         )
         attribution = {
             utterance: _FIXTURE_PERSONA_IDS[index // 5]
@@ -366,7 +369,7 @@ def test_benchmark_that_leaks_a_seed_utterance_fails_fast(tmp_path_factory):
         leaked = None
         for command_key in cmd_dir.get_utterance_keys():
             # The leaked seed must be one the model trains on: framework commands
-            # (fastworkflow/_framework_commands, e.g. review_plan) are not trained, so a phrasing
+            # (fastworkflow/review/commands, e.g. review_proposal) are not trained, so a phrasing
             # of theirs in a benchmark is not a leak of the training seeds.
             framework_meta = cmd_dir.map_command_2_metadata.get(command_key)
             if framework_meta is not None and getattr(framework_meta, "framework", None):

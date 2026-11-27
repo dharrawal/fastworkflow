@@ -7,7 +7,7 @@ import shutil
 
 import pytest
 
-from fastworkflow.command_directory import (
+from fastworkflow.core.command_directory import (
     CommandDirectory,
     CommandMetadata,
     compute_commands_source_fingerprint,
@@ -19,10 +19,6 @@ def _minimal_workflow(tmp_path, name: str = "wf") -> str:
     folder = tmp_path / name
     (folder / "_commands").mkdir(parents=True)
     (folder / "__init__.py").write_text("", encoding="utf-8")
-    inheritance = {"Library": {"base": []}}
-    (folder / "_commands" / "context_inheritance_model.json").write_text(
-        json.dumps(inheritance), encoding="utf-8"
-    )
     (folder / "_commands" / "Library").mkdir()
     (folder / "_commands" / "Library" / "_Library.py").write_text(
         "class Context:\n    pass\n", encoding="utf-8"

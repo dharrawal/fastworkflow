@@ -21,8 +21,8 @@ import pytest
 
 import fastworkflow
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import extract_arguments
-from fastworkflow.planning_commands import call_phases, planning_command
-from fastworkflow.planning_phases import phase_steps
+from fastworkflow.planning.planning_commands import call_phases, planning_command
+from fastworkflow.planning.planning_phases import phase_steps
 from tests.test_approval_binding import annotated_library  # noqa: F401 - the library copy
 from tests.test_drafted_subtask_inputs import _framework, scripted  # noqa: F401 - fixtures
 
@@ -79,9 +79,10 @@ def test_a_note_that_holds_the_request_around_it_is_refused(library, scripted, s
 
     result = extract_arguments(library, NOTE_MEMBER, sub_task)
 
-    assert not result.valid and result.retried
+    # The validator's ValueError names no field, so there is no second fill (bd fix-ftdl.9): the refusal stands.
+    assert not result.valid and not result.retried
     assert "holds the member's name" in result.refusal
-    assert "holds the member's name" in lm.prompts[1]   # the retry was told why
+    assert len(lm.prompts) == 1
 
 
 def test_the_note_field_s_rule_reaches_the_extractor(library, scripted):

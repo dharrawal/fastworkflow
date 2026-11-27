@@ -74,7 +74,7 @@ Two places destroy the payload:
 ### 1.1 The ReAct tool boundary is text-only
 
 The agent invokes commands as a DSPy ReAct tool, `execute_workflow_query`, implemented by
-`_execute_workflow_query` in `fastworkflow/workflow_agent.py`. It calls
+`_execute_workflow_query` in `fastworkflow/agent/workflow_agent.py`. It calls
 `CommandExecutor.invoke_command(...)`, which returns the full `CommandOutput` (artifacts intact),
 but then extracts **only the text**:
 
@@ -399,7 +399,7 @@ producer emits two events per command execution at the same `invoke_command` cho
 
 Consumers drain it live:
 
-- **CLI** `fastworkflow/run/__main__.py` (`command_trace_queue.get_nowait()` / `get(timeout=0.1)`).
+- **CLI** `fastworkflow/run_cli/__main__.py` (`command_trace_queue.get_nowait()` / `get(timeout=0.1)`).
 - **Bundled FastAPI MCP server** `fastworkflow/run_fastapi_mcp/utils.py`: runs `process_message` in
   an executor and polls the queue every 50 ms, firing `on_trace` callbacks while the turn runs, then
   calls `persist_pending_after_turn` **once after** the turn. Streaming and persistence are already
@@ -455,7 +455,7 @@ in lifetime/transport:
 
 ### 7.1 Current persistence mechanism (baseline)
 
-`fastworkflow/session_state_store.py` defines `SessionStateStore` (ABC) with six abstract members —
+`fastworkflow/session/session_state_store.py` defines `SessionStateStore` (ABC) with six abstract members —
 `load`/`save`/`clear`/`exists`/`iter_entries`/`remove_at` — keyed by `channel_id`, plus one concrete
 `reap` that applies a `PendingRetentionPolicy` over what `iter_entries` yields. `iter_entries` yields
 a `PendingEntry` NamedTuple (`channel_id`, `saved_at`, `storage_key`) rather than a bare tuple, and
@@ -464,7 +464,7 @@ blob, so carrying the backend's own key is what lets `reap` remove the blob it e
 one re-derived from that blob's self-reported channel id. Two backends:
 
 - `DiskSessionStateStore` — one JSON file per channel (`{encoded_id}.pending.json`, percent-encoded
-  through `fastworkflow/storage_keys.py` so two channel ids can never share a file), written with
+  through `fastworkflow/session/storage_keys.py` so two channel ids can never share a file), written with
   the strict encoder rather than `default=str`.
 - `RedisSessionStateStore` — one JSON string per channel under `fw:session:pending:{channel_id}`.
 
@@ -1089,7 +1089,7 @@ Verified sites missing from section 11, with migration releases per A14:
   incl. `wildcard.py`'s artifact mutations at lines 86/123); all bundled examples (45
   files); the test workflows (`tests/example_workflow`, `tests/todo_list_workflow`,
   `tests/hello_world_workflow`, ~43 command files).
-- **v3.0** (migrate with the surfaces they exercise): `run/__main__.py` CLI printer (R43);
+- **v3.0** (migrate with the surfaces they exercise): `run_cli/__main__.py` CLI printer (R43);
   `run_fastapi_mcp/utils.py:355-357` awaiting check (A3); ~15 test modules asserting on
   `.command_responses[0]` / `artifacts["awaiting_user"]` (notably
   `test_execution_context_agent.py`, `test_fastapi_service.py`,

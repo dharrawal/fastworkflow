@@ -15,13 +15,15 @@ import pytest
 from pydantic import BaseModel, Field
 
 import fastworkflow
-from fastworkflow import planning_commands, planning_phases, command_preview, tracing, workflow_agent
+from fastworkflow.planning import planning_commands, planning_phases, command_preview
+from fastworkflow.agent import workflow_agent
+from fastworkflow.observability import tracing
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import (
     ParameterExtraction,
 )
-from fastworkflow import command_executor as command_executor_module
-from fastworkflow.utils.signatures import InputForParamExtraction
-from fastworkflow.command_executor import (
+from fastworkflow.engine import command_executor as command_executor_module
+from fastworkflow.parameters.signatures import InputForParamExtraction
+from fastworkflow.engine.command_executor import (
     CommandExecutor,
     _resolve_planning_command_name,
     call_response_generator,
@@ -36,7 +38,7 @@ from fastworkflow.observation_offloading.state import (
     observability_db_path,
     scope_for_host,
 )
-from fastworkflow.plan_frame import runs_outside_ranges
+from fastworkflow.planning.plan_frame import runs_outside_ranges
 from fastworkflow.planning import (
     StepFormError,
     count_and_names_read,
@@ -45,12 +47,12 @@ from fastworkflow.planning import (
     when,
 )
 from fastworkflow.planning import Step, command_inputs_for_steps, planned
-from fastworkflow.planning_commands import PlanningCommandCallPlan, PlanningCommandFormatError, call_phases
-from fastworkflow.planning_phases import Placeholder, step_paging
-from fastworkflow.turn import TurnStatus
+from fastworkflow.planning.planning_commands import PlanningCommandCallPlan, PlanningCommandFormatError, call_phases
+from fastworkflow.planning.planning_phases import Placeholder, step_paging
+from fastworkflow.core.turn import TurnStatus
 from fastworkflow.utils import python_utils
-from fastworkflow.utils.react import fastWorkflowReAct
-from fastworkflow.workflow_agent import core_command_names, initialize_workflow_tool_agent
+from fastworkflow.agent.react import fastWorkflowReAct
+from fastworkflow.agent.workflow_agent import core_command_names, initialize_workflow_tool_agent
 from tests.test_turn_result_capture import no_review_gate  # noqa: F401 - the review gate is off for these turns
 from tests.test_planning_command_code_steps import Model
 from tests.test_planning_command_phases import RecordingSink
@@ -71,7 +73,7 @@ _COPIED_PLANNING_COMMANDS = (
 _COPIED_COMMANDS = (
     "_commands/library_hours.py",
     "_commands/startup.py",
-    "_commands/Library/_wording.py",
+    "_commands/_shared/__init__.py", "_commands/_shared/wording.py",
     "_commands/Library/count_overdue.py",
     "_commands/Library/find_book.py",
     "_commands/Library/find_member.py",
@@ -113,10 +115,6 @@ def _library_workflow(
 
     commands_dir = folder / "_commands"
     commands_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(
-        os.path.join(LIBRARY, "_commands", "context_inheritance_model.json"),
-        commands_dir / "context_inheritance_model.json",
-    )
     for rel in dict.fromkeys((*_COPIED_CONTEXT_CLASSES, *_COPIED_COMMANDS, *extra_commands,
                               *(command_texts or {}))):
         src = os.path.join(LIBRARY, rel)
@@ -198,8 +196,9 @@ def test_the_runtime_classifiers_read_full_list_when_and_do_not_run():
 
 
 def test_run_and_full_list_quote_parser_characters_and_keep_plain_names_and_placeholders():
-    # Spaces alone are not quoted; None is left out; placeholders are written unquoted.
-    assert run("find_member", query="Raj Patel") == "find_member query=Raj Patel"
+    # A name of several words is quoted (it could hold a condition word); a single plain word is not; None is
+    # left out; placeholders are written unquoted.
+    assert run("find_member", query="Raj Patel") == 'find_member query="Raj Patel"'
     assert run("find_book", query="Dune", start=None) == "find_book query=Dune"
     assert run("find_book", query=Placeholder("title")) == "find_book query=<title>"
     assert run("find_book", query="<title>") == "find_book query=<title>"
@@ -499,11 +498,11 @@ def test_code_runs_quoted_values_and_example_values_while_hand_typed_and_cme_kee
     orig_extract = ParameterExtraction._extract_parameters_from_key_values
     library_env.planning_command = _build_planning_command(WriteNotes)
 
-    # First verify the parser without code_written declines the example value and placeholders,
+    # First verify the parser without code_written takes a value equal to an example like any other
+    # (bd fix-qjne.21 follow-up: no examples guard), declines placeholders,
     # and drops the trailing parenthetical on the unquoted f-string form.
-    assert (
-        orig_extract('add_note text="the cover is torn"', AddNote.Input, "add_note") is None
-    )
+    example_bound = orig_extract('add_note text="the cover is torn"', AddNote.Input, "add_note")
+    assert example_bound is not None and example_bound.text == "the cover is torn"
     assert orig_extract('add_note text="see <link>"', AddNote.Input, "add_note") is None
     assert orig_extract('add_note text="wait..."', AddNote.Input, "add_note") is None
     assert orig_extract('add_note text="a=b"', AddNote.Input, "add_note") is not None
@@ -525,26 +524,21 @@ def test_code_runs_quoted_values_and_example_values_while_hand_typed_and_cme_kee
     # None of the ".note('for the record')" text was sent to the command.
     assert all("for the record" not in c for c in library_env.runner.sent)
     # After the turn, by_code is cleared from the workflow context, and a user-typed
-    # command path declines an example value.
+    # command path takes an example value like any other.
     assert "by_code" not in library_env.wf.context
     user_code_written = bool(library_env.wf.context.get("by_code"))
-    assert (
-        orig_extract(
-            'add_note text="the cover is torn"',
-            AddNote.Input,
-            "add_note",
-            code_written=user_code_written,
-        )
-        is None
+    user_bound = orig_extract(
+        'add_note text="the cover is torn"',
+        AddNote.Input,
+        "add_note",
+        code_written=user_code_written,
     )
+    assert user_bound is not None and user_bound.text == "the cover is torn"
 
 
-def test_the_cme_declines_an_example_value_in_a_step_the_agent_wrote(library_env):
-    """Agent ``execute_workflow_query`` keeps the examples guard (``by_code`` is false).
-
-    A hand-typed plan step is still run by ``code_step`` with ``code_written=True``, so the
-    example value would bind in code; the agent must write the command outside that path.
-    """
+def test_the_cme_takes_an_example_value_in_a_step_the_agent_wrote(library_env):
+    """Agent ``execute_workflow_query`` has no examples guard any more (bd fix-qjne.21 follow-up): a value equal to
+    one of the field's examples binds like any other."""
     lib = library_env.wf.root
     book_cls = type(lib.books["b1"])
     lib.books["b5"] = book_cls(lib, "b5", "Dune", "Frank Herbert", 1, "Riverside")
@@ -568,7 +562,7 @@ def test_the_cme_declines_an_example_value_in_a_step_the_agent_wrote(library_env
     result = library_env.ctx.process_turn("look up Dune")
 
     assert result.status == TurnStatus.COMPLETED
-    assert lib.books["b1"].notes[len(before_notes):] == ["spine is cracked"]
+    assert lib.books["b1"].notes[len(before_notes):] == ["the cover is torn", "spine is cracked"]
     assert "add_note text=the cover is torn" in library_env.runner.sent
     assert "add_note text=spine is cracked" in library_env.runner.sent
     assert "by_code" not in library_env.wf.context
@@ -649,7 +643,7 @@ class LibraryRunner:
             )
         # As the CME walk does (3.9): a name on the lookup path runs bound to the record
         # of its scope; a name of the current scope runs on the current object.
-        from fastworkflow.context_navigation import command_on_path
+        from fastworkflow.core.context_navigation import command_on_path
 
         found = command_on_path(wf, name)
         if found is not None and len(found[1]) == 1:
@@ -755,7 +749,7 @@ def script_command_extraction(monkeypatch, wf, extracted: dict[str, dict] | None
             return core
         # What the CME's wildcard command does for a routed command (3.9): a name on the lookup
         # path runs bound to the record of its scope; any other name runs on the current object.
-        from fastworkflow.context_navigation import command_on_path
+        from fastworkflow.core.context_navigation import command_on_path
 
         found = command_on_path(wf, name)
         if found is not None and len(found[1]) == 1:
@@ -851,16 +845,15 @@ def library_env(tmp_path, initialized_fastworkflow, monkeypatch):
         session._initial_plan_text = ""
         return user_query
 
-    monkeypatch.setattr("fastworkflow.workflow_agent.build_query_with_next_steps", fake_plan)
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.build_query_with_next_steps", fake_plan)
+    from tests.conftest import script_plan
+
+    script_plan(monkeypatch, lambda text: state.planning_command)
     monkeypatch.setattr(
-        "fastworkflow.workflow_agent.planner_planning_command_for",
-        lambda text, folder_path, **_: ("", state.planning_command),
-    )
-    monkeypatch.setattr(
-        "fastworkflow.workflow_agent.split_into_subtasks",
+        "fastworkflow.agent.workflow_agent.split_into_subtasks",
         lambda *args, **kwargs: ["look up the book"],
     )
-    monkeypatch.setattr("fastworkflow.planning_phases.write_answer", lambda query: "written")
+    monkeypatch.setattr("fastworkflow.planning.planning_phases.write_answer", lambda query: "written")
 
     runner.sent.clear()
     yield state
@@ -957,16 +950,15 @@ def _make_library_runner_env(
         session._initial_plan_text = ""
         return user_query
 
-    monkeypatch.setattr("fastworkflow.workflow_agent.build_query_with_next_steps", fake_plan)
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.build_query_with_next_steps", fake_plan)
+    from tests.conftest import script_plan
+
+    script_plan(monkeypatch, lambda text: state.planning_command)
     monkeypatch.setattr(
-        "fastworkflow.workflow_agent.planner_planning_command_for",
-        lambda text, folder_path, **_: ("", state.planning_command),
-    )
-    monkeypatch.setattr(
-        "fastworkflow.workflow_agent.split_into_subtasks",
+        "fastworkflow.agent.workflow_agent.split_into_subtasks",
         lambda *args, **kwargs: ["look up the book"],
     )
-    monkeypatch.setattr("fastworkflow.planning_phases.write_answer", lambda query: "written")
+    monkeypatch.setattr("fastworkflow.planning.planning_phases.write_answer", lambda query: "written")
 
     runner.sent.clear()
     return state
@@ -1035,7 +1027,7 @@ def test_pick_in_a_later_phase_runs_by_code_on_the_one_exact_match(library_env):
     assert library_env.model.asked == []
     # find_book query=Dune returned b1 ("Dune") and b2 ("Dune Messiah"); pick opened b1 in code.
     assert library_env.runner.sent == ["find_book query=Dune", "open_book book_uid=b1"]
-    spans = library_env.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
+    spans = library_env.sink.named(tracing.SPAN_PHASE)
     assert [s.attributes["phase"] for s in spans] == ["find", "book"]
     assert spans[1].attributes["code_stop"] == "done"
     assert spans[1].attributes["facts"] == {
@@ -1064,7 +1056,7 @@ def test_pick_goes_to_the_agent_when_two_rows_or_none_match(library_env):
     assert result.status == TurnStatus.COMPLETED
     assert len(library_env.model.asked) == 2
     assert "1. open_book with the uid of the Dune match" in library_env.model.asked[0]["query"]
-    spans = library_env.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
+    spans = library_env.sink.named(tracing.SPAN_PHASE)
     assert spans[1].attributes["code_stop"] == "open step 1"
 
     # 2. No row matches the named title ("Dune" when only "Dune 1" and "Dune Messiah" exist).
@@ -1162,8 +1154,8 @@ def test_pick_joins_pages_of_a_full_list_listing(library_env, monkeypatch):
     assert result.status == TurnStatus.COMPLETED
     assert library_env.model.asked == []
     assert library_env.runner.sent == [
-        "find_book query=Frank Herbert",
-        "find_book query=Frank Herbert start=1",
+        'find_book query="Frank Herbert"',
+        'find_book query="Frank Herbert" start=1',
         "open_book book_uid=b2",
     ]
 
@@ -1216,7 +1208,7 @@ def test_pick_skips_a_child_listing_inside_a_child_range(library_env, monkeypatc
     assert [(row["step_index"], row["command"]) for row in rows] == [
         (0, "Library/find_book"), (1, "Library/find_book"), (3, "Library/open_book")]
     assert result.status == TurnStatus.COMPLETED
-    book_span = library_env.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)[1]
+    book_span = library_env.sink.named(tracing.SPAN_PHASE)[1]
     if child_range:
         assert book_span.attributes["code_stop"] == "done"
         assert book_span.attributes["steps_by_code"] == 1
@@ -1439,7 +1431,7 @@ def test_library_loan_report_from_real_module_runs_full_list_on_open_book(librar
     assert result.status == TurnStatus.COMPLETED
     assert library_proof_env.model.asked == []
     assert library_proof_env.runner.sent == ["list_loans"]
-    spans = library_proof_env.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
+    spans = library_proof_env.sink.named(tracing.SPAN_PHASE)
     assert len(spans) == 1
     assert spans[0].attributes["code_stop"] == "done"
     assert spans[0].attributes["steps_by_code"] == 1
@@ -1471,9 +1463,9 @@ def test_library_note_member_pick_without_uid_on_test_copy(tmp_path, initialized
 
         assert result.status == TurnStatus.COMPLETED
         assert state.runner.sent == [
-            "find_member query=Raj Patel",
+            'find_member query="Raj Patel"',
             "open_member member_uid=m2",
-            "add_note text=card renewed",
+            'add_note text="card renewed"',
         ]
         assert state.model.asked == []
         assert lib.members["m2"].notes == before + ["card renewed"]

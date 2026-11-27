@@ -1,6 +1,6 @@
 """A retired db_lookup, declared as a json_schema_extra key: a load error."""
 
-from fastworkflow.workflow import Workflow
+from fastworkflow.core.workflow import Workflow
 from pydantic import BaseModel, Field
 
 

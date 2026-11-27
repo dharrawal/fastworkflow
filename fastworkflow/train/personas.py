@@ -97,11 +97,9 @@ PERSONA_FILENAME: str = "personas.json"
 #: Escape hatch for a persona file that lives outside the workflow folder, and the only
 #: route that works with no integration at all (see ``default_persona_source``).
 #:
-#: Read with an empty-string code default, which follows the house convention: settable
-#: from ``fastworkflow.env``, NOT from a shell ``export``, because a non-None code default
-#: short-circuits the ``os.environ`` lookup in ``fastworkflow.get_env_var``. The empty
-#: default also suppresses the "does not exist" warning that a ``None`` default logs on
-#: every command of every run.
+#: Read with an empty-string code default, which suppresses the "does not exist" warning that a
+#: ``None`` default logs on every command of every run. Settable from ``fastworkflow.env`` or a
+#: shell ``export`` (which wins, ``fastworkflow.get_env_var``).
 PERSONA_FILE_ENV_VAR: str = "SYNTHETIC_UTTERANCE_GEN_PERSONA_FILE"
 
 PERSONA_SCHEMA_VERSION: int = 1
@@ -260,6 +258,13 @@ def load_persona_config(path: str) -> PersonaConfig:
         raise PersonaConfigError(
             f"Unsupported persona schema_version {version!r} in {path}; this build "
             f"understands {PERSONA_SCHEMA_VERSION}."
+        )
+
+    if "personas" in raw and "domain_keywords" in raw:
+        raise PersonaConfigError(
+            f"Persona file {path} has both 'personas' and 'domain_keywords'. Keep one of "
+            f"the two keys: 'personas' to supply the personas yourself, or "
+            f"'domain_keywords' to filter PersonaHub."
         )
 
     personas = [
@@ -764,9 +769,8 @@ def persona_source_from_config(
 ) -> PersonaSource:
     """Build the source a parsed config asks for.
 
-    An explicit ``personas`` list wins over ``domain_keywords``: supplying personas is the
-    stronger statement, and honouring the keywords as well would silently mix generic
-    PersonaHub rows into a set the developer curated.
+    A file that has both ``personas`` and ``domain_keywords`` never gets here:
+    `load_persona_config` refuses it, because one of the two would silently win.
 
     ``num_personas_hint`` is advisory and only sizes a domain-conditioned pool. None
     means "read the configured per-command persona count", which is what every

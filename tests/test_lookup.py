@@ -29,9 +29,10 @@ import pytest
 
 import fastworkflow
 from fastworkflow import ModuleType
-from fastworkflow.command_executor import CommandExecutor
-from fastworkflow.utils.signatures import InputForParamExtraction
-from fastworkflow.workflow_agent import _explicit_agent_command
+from fastworkflow.engine.command_executor import CommandExecutor
+from fastworkflow.parameters.signatures import InputForParamExtraction
+from fastworkflow.agent.workflow_agent import _explicit_agent_command
+from fastworkflow.core.workflow import running_command
 
 # Fixtures and helpers reused from the sibling test modules (not copied).
 from tests.test_global_first_lookup import (  # noqa: F401 - fixtures
@@ -42,6 +43,7 @@ from tests.test_global_first_lookup import (  # noqa: F401 - fixtures
     _route,
 )
 from tests.test_lookup_exact_names import _run  # noqa: F401
+from tests.scripted_extractor import script_extractor
 from tests.test_turn_result_capture import (  # noqa: F401 - shared fixtures
     initialized_fastworkflow,
 )
@@ -76,6 +78,14 @@ HOURS_CANDIDATES = [
 ]
 
 
+def _decided_by_name(app, phrasing: str) -> bool:
+    """True when the intent loop settles *phrasing* by a command name (exact or fuzzy), with no head asked."""
+    from fastworkflow.intent import intent_loop
+
+    return intent_loop.resolve(app, phrasing, core=True).decided_by in (
+        intent_loop.BY_EXACT_NAME, intent_loop.BY_FUZZY_NAME)
+
+
 def _short(name: str) -> str:
     return name.split("/")[-1]
 
@@ -87,8 +97,10 @@ def test_an_inherited_command_is_recognised_by_the_flattened_head_and_bound_to_t
     current Book, not the root, and filed under no other record."""
     app, cme, library = library_on_a_book
     book = app._current_command_context
-    hits = [(phrasing, name) for phrasing, name in _probe(cme, INHERITED_CANDIDATES, "Book")
-            if _short(name) in {"add_note", "show_notes"}]
+    # A phrasing close enough to the command's name ("show the notes") is decided by the intent loop's name layers
+    # before any head is asked; this test is about the head, so those phrasings are left out.
+    hits = [(phrasing, name) for phrasing, name in _probe(app, INHERITED_CANDIDATES, "Book")
+            if _short(name) in {"add_note", "show_notes"} and not _decided_by_name(app, phrasing)]
     if not hits:
         pytest.skip(f"the Book head names an inherited Record command confidently on none of "
                     f"{len(INHERITED_CANDIDATES)} probed phrasings")
@@ -131,6 +143,9 @@ def test_a_switch_to_a_user_said_on_a_user_is_resolved_by_the_climb_and_bound_to
     bob = User(root, "bob")
     root.add_user(bob)
 
+    # The parameter extractor's model is scripted (``script_extractor``) with what the request gives: these walks used
+    # to reach a live extraction model through a developer's .env that litellm loaded into the process.
+    script_extractor(monkeypatch, *[{"user_name": "bob"}] * 3)
     out = _route(cme, "set_current_user bob")
 
     artifacts = out.command_response.artifacts
@@ -144,7 +159,7 @@ def test_a_switch_to_a_user_said_on_a_user_is_resolved_by_the_climb_and_bound_to
         assert "ChatRoom/set_current_user" in out.command_response.response, out.command_response.response
         command_name = "ChatRoom/set_current_user"
     # Bound to the chat room (the enclosing scope on the live chain), not the current user.
-    assert app.record is root
+    assert app._command_context_for_response_generation is root
     assert app._current_command_context is user
 
     # The workflow's validate_extracted_parameters hook does the fuzzy match that db_lookup did (fix-3rsq.one-hook),
@@ -156,12 +171,14 @@ def test_a_switch_to_a_user_said_on_a_user_is_resolved_by_the_climb_and_bound_to
     # Built unvalidated: validate_parameters runs the Input validators with the context (constructing
     # here would run them without it).
     exact_case = signature.Input.model_construct(user_name="Bob")
-    is_valid, _message, _, _ = extraction.validate_parameters(app, command_name, exact_case)
+    with running_command():     # the validators run inside the command's dispatch, where workflow.record is bound
+        is_valid, _message, _, _ = extraction.validate_parameters(app, command_name, exact_case)
     assert is_valid, "the hook must read the bound chat room's users"
     assert exact_case.user_name == "bob", "the hook writes the corrected value back to the input"
 
     near_miss = signature.Input.model_construct(user_name="bobb")
-    is_valid, message, _, fields = extraction.validate_parameters(app, command_name, near_miss)
+    with running_command():
+        is_valid, message, _, fields = extraction.validate_parameters(app, command_name, near_miss)
     assert not is_valid and fields == ["user_name"]
     assert "Did you mean" in message and "bob" in message, message
 
@@ -173,11 +190,14 @@ def test_library_hours_is_reachable_by_exact_name_from_inside_a_book(
     app, cme, library = library_on_a_book
     book = app._current_command_context
 
+    # The parameter extractor's model is scripted (``script_extractor``) with what the request gives: these walks used
+    # to reach a live extraction model through a developer's .env that litellm loaded into the process.
+    script_extractor(monkeypatch, *[{"branch": "NOT_FOUND"}] * 3)
     run = _run(app, cme, monkeypatch, "library_hours")
 
     assert _short(run.command_name) == "library_hours"
     assert run.ran_on_context_name == "Library"
-    assert app.record is library
+    assert app._command_context_for_response_generation is library
     assert app._current_command_context is book
 
 
@@ -188,16 +208,20 @@ def test_library_hours_by_natural_language_from_a_book(
     probed phrasing, and otherwise skips with the count, which is the stated expectation here."""
     app, cme, library = library_on_a_book
     book = app._current_command_context
-    hits = [phrasing for phrasing, name in _probe(cme, HOURS_CANDIDATES, "*")
-            if _short(name) == "library_hours"]
+    hits = [phrasing for phrasing, name in _probe(app, HOURS_CANDIDATES, "*")
+            if _short(name) == "library_hours" and not _decided_by_name(app, phrasing)]
     if not hits:
         pytest.skip(f"the library's global head is not confident on library_hours for any of "
                     f"{len(HOURS_CANDIDATES)} probed phrasings: reachable by exact name only")
     asked = _heads_asked(monkeypatch)
 
+    # The parameter extractor's model is scripted (``script_extractor``) with what the request gives: these walks used
+    # to reach a live extraction model through a developer's .env that litellm loaded into the process.
+    branch = "Riverside" if "Riverside" in hits[0] else "NOT_FOUND"
+    script_extractor(monkeypatch, *[{"branch": branch}] * 3)
     out = _route(cme, hits[0])
 
     assert asked[0] == "*", asked
     assert _short(out.command_response.artifacts["command_name"]) == "library_hours"
-    assert app.record is library
+    assert app._command_context_for_response_generation is library
     assert app._current_command_context is book

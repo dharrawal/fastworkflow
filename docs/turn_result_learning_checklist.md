@@ -1,7 +1,7 @@
 # TurnResult — Learning Checklist
 
 A running guide to make sure you *deeply* understand the v2.21 `TurnResult` capture
-change (uncommitted work: `fastworkflow/turn.py` + edits to `__init__.py`,
+change (uncommitted work: `fastworkflow/core/turn.py` + edits to `__init__.py`,
 `workflow_execution_context.py`, `workflow_agent.py`, `utils/react.py`,
 `chat_session.py`, the `build/` generators, and `tests/test_turn_result_capture.py`).
 

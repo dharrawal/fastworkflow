@@ -12,9 +12,9 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 import json
 
-from fastworkflow.command_context_model import CommandContextModel, CommandContextModelValidationError
+from fastworkflow.core.command_context_model import CommandContextModel, CommandContextModelValidationError
 from fastworkflow.utils.logging import logger
-from fastworkflow.utils.context_utils import get_context_names
+from fastworkflow.core.context_utils import get_context_names
 
 __all__ = ["ContextFolderGenerator"]
 
@@ -25,7 +25,8 @@ class ContextFolderGenerator:
     def __init__(
         self, 
         commands_root: str | Path = "_commands", 
-        model_path: str | Path = "_commands/context_inheritance_model.json"
+        model_path: str | Path = "_commands/context_inheritance_model.json",
+        model: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Initialize the context folder generator.
 
@@ -36,7 +37,9 @@ class ContextFolderGenerator:
         """
         self.commands_root = Path(commands_root)
         self.model_path = Path(model_path)
-        self._model_data: Optional[Dict[str, Any]] = None
+        # ``{context: {"base": [...]}}`` given by the caller (``fastworkflow build`` derives it from the classes and
+        # writes no file); without it the model is read from *model_path*
+        self._model_data: Optional[Dict[str, Any]] = model
 
     def load_context_model(self) -> Dict[str, Any]:
         """Load the context model using the CommandContextModel.
@@ -79,7 +82,8 @@ class ContextFolderGenerator:
         
         Creates a folder for each context in the model,
         except for the global "*" context. Also creates a _<ContextName>.py file
-        in each context folder with a Context class and get_parent method.
+        in each context folder with an empty Context class (no get_parent: the context is top level until its
+        author declares parents and writes get_parent together).
         
         Returns:
             Dict[str, Path]: Mapping of context names to their folder paths
@@ -106,27 +110,14 @@ class ContextFolderGenerator:
             # Create _<ContextName>.py file if it doesn't exist
             handler_file = context_dir / f"_{context}.py"
             if not handler_file.exists():
-                # Determine parent type based on inheritance model
-                parent_type = "None"
-                parent_import = ""
-                
-                # Get base classes for this context
-                base_classes = context_model.get(context, {}).get('base', [])
-                if base_classes:
-                    # Use first base class as parent type
-                    parent_type = base_classes[0]
-                    parent_import = f"from ...application.{parent_type.lower()} import {parent_type}"
-                
-                # Create the handler file content
-                handler_content = f"""from typing import Optional
-from ...application.{context.lower()} import {context}
-{parent_import}
-
-class Context:
-    @classmethod
-    def get_parent(cls, record: {context}) -> Optional[{parent_type}]:
-        return getattr(record, 'parent', None)
-"""
+                # No get_parent is written: a context is top level until its author declares parents = [...] and
+                # writes get_parent together (a get_parent with no parents is a load error, and parents cannot be
+                # derived from code because one get_parent may return records of several contexts). The build
+                # adds the context's inherits line to this file after creating it.
+                handler_content = f'''class Context:
+    """The {context} context. It is top level: to place its records inside another context, declare
+    parents = [...] (every context a record can sit in) and write get_parent(cls, record) beside it."""
+'''
 
                 # Write the file
                 handler_file.write_text(handler_content)

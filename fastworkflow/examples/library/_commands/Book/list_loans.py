@@ -11,11 +11,16 @@ class Signature:
     """List the loans of the open book: each borrower and the due date."""
 
     class Input(BaseModel):
-        start: Optional[int] = Field(default=None, description="the first row of the page")
+        start: Optional[int] = Field(default=None, ge=0, description="the first row of the page")
 
     class Output(BaseModel):
-        borrowers: list[str] = Field(description="each borrower's name, in row order")
-        due_dates: list[str] = Field(description="each loan's due date, in row order")
+        borrowers: list[str] = Field(description="each borrower's name, in row order",
+                                     examples=[["Ann Lee", "Raj Patel"], ["Mia Chen"]],
+                                     json_schema_extra={"ui": {"table": "loans"}})
+        due_dates: list[str] = Field(description="each loan's due date as an ISO date "
+                                                 "(YYYY-MM-DD), in row order",
+                                     examples=[["2026-11-02", "2026-10-20"], ["2026-10-18"]],
+                                     json_schema_extra={"ui": {"table": "loans"}})
         total: int = Field(description="how many loans the book has, on every page")
 
     plain_utterances = [

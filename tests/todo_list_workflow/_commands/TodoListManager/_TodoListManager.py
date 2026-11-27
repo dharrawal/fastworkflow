@@ -10,10 +10,6 @@ class Context:
     state_version = 1
 
     @classmethod
-    def get_parent(cls, record: TodoListManager) -> None:
-        return None
-
-    @classmethod
     def get_state(cls, record: TodoListManager) -> dict[str, Any]:
         """Snapshot the manager so a session holding it can be evicted.
 

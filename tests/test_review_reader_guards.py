@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import pytest
 
-from fastworkflow import review_engine as re_
-from fastworkflow.review_engine import EditRefused, Verdict, apply_edits
-from fastworkflow.review_proposals import (
+from fastworkflow.review import review_engine as re_
+from fastworkflow.review.review_engine import EditRefused, Verdict, apply_edits
+from fastworkflow.review.review_proposals import (
     Means, ProposedEdit, SubTask, SubTaskInput, SubTaskProposal, _proposed_edits_to_engine, merge_subtask_input_edit)
+
+pytestmark = pytest.mark.usefixtures("review_nouns_workflow")
 
 RECORDED = {'r4_5_08_pass9': {'id': 99,
                    'steps': [('Quarterly packet for Henderson Ramirez and Lewis',
@@ -527,3 +529,151 @@ def test_a_yes_with_a_no_effect_qualifier_is_accepted(reply):
 ])
 def test_a_yes_that_asks_for_an_edit_is_not_accepted(reply):
     assert not re_._affirmative_accept_cue(reply)
+
+
+# ---- fix-j9qk: an edit a model read from free text may not set an enumerated input outside its choices ----
+
+import uuid  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+import fastworkflow  # noqa: E402
+from fastworkflow.review.review_engine import Add, Change, ProposalReplyPolicy, Split  # noqa: E402
+
+_TUTORIAL = str(Path(__file__).resolve().parent / "planning_tutorial_workflow")
+_FREE_TEXT = "please make that step about authors instead"   # not the typed grammar: the reader model reads it
+
+
+@pytest.fixture
+def tutorial_workflow(tmp_path):
+    fastworkflow.init({"FASTWORKFLOW_STATE_ROOT": str(tmp_path / "workflow_contexts")})
+    fastworkflow.RoutingRegistry.clear_registry()
+    fastworkflow.RoutingRegistry.get_definition(_TUTORIAL, load_cached=False)
+    yield fastworkflow.Workflow.create(_TUTORIAL, workflow_id_str=f"choices_{uuid.uuid4().hex[:8]}")
+    fastworkflow.RoutingRegistry.clear_registry()
+
+
+def _find_record_plan() -> SubTaskProposal:
+    return SubTaskProposal(items=[
+        SubTask(goal="Look for Emma", inputs=[SubTaskInput(name="name", value="Emma"),
+                                              SubTaskInput(name="kind", value="book")],
+                means=Means(kind="planning", name="find_record")),
+        SubTask(goal="Say hello")])
+
+
+def _decide(workflow, edits, proposal=None):
+    policy = ProposalReplyPolicy(lambda text, proposal: list(edits), app_workflow=workflow)
+    return policy.decide(proposal or _find_record_plan(), _FREE_TEXT)
+
+
+def test_a_read_edit_setting_an_input_outside_its_choices_is_refused_naming_the_choices(tutorial_workflow):
+    decision = _decide(tutorial_workflow, [Change(index=1, field="inputs", value="kind=author")])
+    assert decision.verdict == Verdict.REFUSE
+    assert "kind" in decision.message and "book" in decision.message and "member" in decision.message
+    assert "author" in decision.message
+
+
+def test_a_read_edit_setting_an_input_to_one_of_its_choices_is_still_accepted(tutorial_workflow):
+    decision = _decide(tutorial_workflow, [Change(index=1, field="inputs", value="kind=Member")])
+    assert decision.verdict == Verdict.EDIT
+
+
+def test_a_read_edit_that_leaves_an_existing_out_of_choices_value_alone_is_accepted(tutorial_workflow):
+    plan = SubTaskProposal(items=[
+        SubTask(goal="Look for Emma", inputs=[SubTaskInput(name="name", value="Emma"),
+                                              SubTaskInput(name="kind", value="author")],
+                means=Means(kind="planning", name="find_record"))])
+    decision = _decide(tutorial_workflow, [Change(index=1, field="goal", value="Look for Emma again")], plan)
+    assert decision.verdict == Verdict.EDIT
+
+
+def test_a_read_edit_of_a_free_text_input_or_an_unknown_means_is_not_checked(tutorial_workflow):
+    assert _decide(tutorial_workflow, [Change(index=1, field="inputs", value="name=Dune")]).verdict == Verdict.EDIT
+    plan = SubTaskProposal(items=[SubTask(goal="Look", inputs=[SubTaskInput(name="kind", value="book")],
+                                          means=Means(kind="planning", name="no_such_command"))])
+    decision = _decide(tutorial_workflow, [Change(index=1, field="inputs", value="kind=author")], plan)
+    assert decision.verdict == Verdict.EDIT
+
+
+def test_a_split_part_carrying_an_out_of_choices_value_is_refused(tutorial_workflow):
+    parts = [{"goal": "Look for Emma", "means": "planning:find_record", "inputs": "name=Emma, kind=author"},
+             {"goal": "Look for Lee", "means": "planning:find_record", "inputs": "name=Lee, kind=member"}]
+    decision = _decide(tutorial_workflow, [Split(index=1, parts=parts)])
+    assert decision.verdict == Verdict.REFUSE and "kind" in decision.message
+
+
+def test_an_added_step_carrying_an_out_of_choices_value_is_refused_and_one_without_inputs_is_accepted(tutorial_workflow):
+    refused = _decide(tutorial_workflow, [Add(after=1, values={
+        "goal": "Look for Lee", "means": "planning:find_record", "inputs": "name=Lee, kind=author"})])
+    assert refused.verdict == Verdict.REFUSE
+    deferred = _decide(tutorial_workflow, [Add(after=1, values={"goal": "Look for Lee", "means": "planning:find_record"})])
+    assert deferred.verdict == Verdict.EDIT      # an added step's inputs may be left to run time: not refused
+
+
+def test_with_no_workflow_nothing_is_checked():
+    decision = ProposalReplyPolicy(lambda text, proposal: [Change(index=1, field="inputs", value="kind=author")]
+                                   ).decide(_find_record_plan(), _FREE_TEXT)
+    assert decision.verdict == Verdict.EDIT
+
+
+def test_a_from_sub_task_binding_on_an_enumerated_field_is_accepted(tutorial_workflow):
+    decision = _decide(tutorial_workflow, [Change(index=1, field="inputs", value="kind=from sub-task 2")])
+    assert decision.verdict == Verdict.EDIT
+
+
+def test_non_string_or_mixed_choice_sets_are_never_checked():
+    import enum
+    from typing import Literal, Optional
+
+    from fastworkflow.review.review_proposals import _string_choices
+
+    class Level(enum.IntEnum):
+        LOW = 1
+        HIGH = 2
+
+    class Color(str, enum.Enum):
+        RED = "red"
+        BLUE = "blue"
+
+    assert _string_choices(Level) == []
+    assert _string_choices(Literal[1, 2]) == []
+    assert _string_choices(Literal[True, False]) == []
+    assert _string_choices(Literal["a", 1]) == []
+    assert _string_choices(list[Literal["a", "b"]]) == []
+    assert _string_choices(str) == []
+    assert _string_choices(Literal["b", "a"]) == ["a", "b"]
+    assert _string_choices(Optional[Color]) == ["blue", "red"]
+
+
+# ---------------------------------------------------------------- an edit's field written as a path names one input
+
+def _read_edits(proposal, *edits):
+    from fastworkflow.review.review_proposals import workflow_scope
+
+    with workflow_scope(_TUTORIAL):
+        return _proposed_edits_to_engine(proposal, [ProposedEdit(**each) for each in edits], reply_text="")
+
+
+def test_a_field_written_as_a_path_replaces_that_input(tutorial_workflow):
+    plan = SubTaskProposal(items=[_find_record_plan().items[0]])
+    edits = _read_edits(plan, {"op": "change", "index": 1, "field": "sub_tasks[1].inputs.kind", "value": "member"})
+    applied = apply_edits(plan, edits)
+    assert _inputs(applied, 1) == {"name": "Emma", "kind": "member"}
+    assert all(each.name for each in applied.items[0].inputs)
+
+
+def test_a_path_that_names_another_step_or_a_field_that_names_no_input_is_asked_again(tutorial_workflow):
+    from fastworkflow.review.review_engine import EditParseError
+
+    with pytest.raises(EditParseError, match="names another step"):
+        _read_edits(_find_record_plan(), {"op": "change", "index": 1, "field": "sub_tasks[2].inputs.kind",
+                                          "value": "member"})
+    with pytest.raises(EditParseError) as asked:
+        _read_edits(_find_record_plan(), {"op": "change", "index": 1, "field": "frobnicate", "value": "x"})
+    assert "kind" in str(asked.value) and "name" in str(asked.value)
+
+
+def test_an_input_the_command_declares_but_the_step_does_not_hold_is_accepted(tutorial_workflow):
+    plan = SubTaskProposal(items=[SubTask(goal="Look for Emma", inputs=[SubTaskInput(name="name", value="Emma")],
+                                          means=Means(kind="planning", name="find_record"))])
+    applied = apply_edits(plan, _read_edits(plan, {"op": "change", "index": 1, "field": "kind", "value": "member"}))
+    assert _inputs(applied, 1) == {"name": "Emma", "kind": "member"}

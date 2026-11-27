@@ -11,14 +11,17 @@ class Signature:
     class Input(BaseModel):
         book_uid: str = Field(
             description="the uid of the book to open",
+            examples=["b1", "b3", "b2"],
             json_schema_extra={"from_command_output": "find_book.book_uids"},
             pattern=r"^b[0-9]+$",
         )
 
     class Output(BaseModel):
-        book_uid: str = Field(description="the uid of the book now open")
-        title: str = Field(description="the book's title")
-        author: str = Field(description="the book's author")
+        book_uid: str = Field(description="the uid of the book now open, such as b1",
+                              examples=["b1", "b3"])
+        title: str = Field(description="the book's title", examples=["Dune", "Emma"])
+        author: str = Field(description="the book's author",
+                            examples=["Frank Herbert", "Jane Austen"])
         copies: int = Field(description="how many copies the library owns")
 
     plain_utterances = [

@@ -29,6 +29,7 @@ class Signature:
 
     class Input(BaseModel):
         name: str = Field(description="the name to look for",
+                          examples=["Emma", "Lee", "Dune Messiah"],
                           json_schema_extra={"copied_from_command_text": True})
         kind: Literal["book", "member"] = Field(
             default="book", description="whether to look for a book or a member")

@@ -17,7 +17,7 @@ from types import SimpleNamespace
 import pytest
 
 import fastworkflow
-from fastworkflow.command_routing import RoutingDefinition
+from fastworkflow.core.command_routing import RoutingDefinition
 from fastworkflow.planning import run_code
 from fastworkflow.utils import python_utils
 
@@ -138,7 +138,7 @@ def test_a_namespaced_module_name_digests_as_the_bare_name_it_had_before(tmp_pat
 def test_two_copies_of_the_tutorial_workflow_at_two_paths_preview_identically(tmp_path):
     """The previews name a planning command's types by their plain names: a workflow folder's namespace
     digest (set by its path) never reaches a preview, so two copies at two paths preview the same text."""
-    from fastworkflow import command_preview
+    from fastworkflow.planning import command_preview
 
     tutorial = os.path.join(ROOT, "tests", "planning_tutorial_workflow")
     first = command_preview.render_previews(_copy(tutorial, tmp_path / "first" / "planning_tutorial_workflow"))

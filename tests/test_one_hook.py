@@ -16,14 +16,15 @@ import pytest
 
 import fastworkflow
 from fastworkflow import ModuleType
-from fastworkflow.command_executor import CommandExecutor
+from fastworkflow.engine.command_executor import CommandExecutor
+from fastworkflow.core.workflow import running_command
 from fastworkflow.observability.decision_signals import SLOT_BINDING_SOURCES, SIGNAL_CONTRACT_VERSION
 from fastworkflow.observability.decision_signals import slot_binding_source  # noqa: F401 - the vocabulary
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import slot_binding_uncertainty
-from fastworkflow import planning_commands as pc
-from fastworkflow.planning_commands import PlanningCommandInputError
-from fastworkflow.utils.signatures import InputForParamExtraction
-from fastworkflow import workflow_agent
+from fastworkflow.planning import planning_commands as pc
+from fastworkflow.planning.planning_commands import PlanningCommandInputError
+from fastworkflow.parameters.signatures import InputForParamExtraction
+from fastworkflow.agent import workflow_agent
 
 from tests.test_global_first_lookup import messaging_on_a_user  # noqa: F401 - fixture (a copy of messaging_app_4)
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401 - shared fixture
@@ -77,8 +78,8 @@ def test_refused_with_field_asks_for_that_field_only_and_keeps_the_others(initia
     assert fields == ["seat"]
     assert diagnostics["invalid_fields"] == ["seat"]
     assert "seat B9 is taken; pick another" in message
-    assert "Provide corrected parameter values in the exact order specified below, separated by commas:\nseat" in message
-    assert "note" not in message.split("Provide corrected parameter values")[1]
+    assert message.endswith("Which seat should I use?")
+    assert "note" not in message.split("pick another")[1]   # the question asks for the seat only
     assert input_obj.note == "window side"
 
 
@@ -116,7 +117,7 @@ class PlanGenerator:
         pc.check_input(command, {"room": "attic"}, "pick the attic", None)
     assert refused.value.fields == ("room",)
     question = pc.refusal_question(command, refused.value)
-    assert "What should the room be?" in question
+    assert "Which room should I use?" in question
 def test_refused_without_field_refuses_the_call_and_asks_for_nothing(initialized, workflow_path):
     workflow = _workflow(workflow_path)
 
@@ -312,13 +313,20 @@ def test_the_output_return_is_the_response_and_the_framework_sets_success(initia
 # ---------------------------------------------------------------- messaging_app_4: the lookup moved into its hook
 
 
+@pytest.fixture
+def in_dispatch():
+    """The validators run inside the command's dispatch, where workflow.record is the record the command runs on."""
+    with running_command():
+        yield
+
+
 def test_messaging_app_4_set_current_user_corrects_a_near_name_and_refuses_one_it_cannot_place(
-        messaging_on_a_user):
+        messaging_on_a_user, in_dispatch):
     app, _cme, root, _user = messaging_on_a_user
     from fastworkflow.examples.messaging_app_4.application.user import User
 
     root.add_user(User(root, "fred"))
-    # the NLU path binds the record the command runs on (the chat room) before the hook runs
+    # the NLU path binds the record the command runs on (the chat room) before the hook runs, inside the dispatch
     app._command_context_for_response_generation = root
     command = "ChatRoom/set_current_user"
     params_cls = fastworkflow.RoutingRegistry.get_definition(app.folderpath).get_command_class(
@@ -345,7 +353,8 @@ def test_messaging_app_4_set_current_user_corrects_a_near_name_and_refuses_one_i
     assert unknown.user_name == "qzxv"
 
 
-def test_messaging_app_4_set_current_user_refuses_a_near_tie_with_field_and_both_names(messaging_on_a_user):
+def test_messaging_app_4_set_current_user_refuses_a_near_tie_with_field_and_both_names(messaging_on_a_user,
+                                                                                      in_dispatch):
     """fix-jd9o.10: 'Sarah Coen' is near both users, so the hook refuses by field with both names and
     sets nothing; the field is then asked again rather than silently taking one of them."""
     app, _cme, root, _user = messaging_on_a_user

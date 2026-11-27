@@ -15,7 +15,7 @@ from queue import Queue
 import pytest
 
 import fastworkflow
-from fastworkflow.distillation_compare import (
+from fastworkflow.evaluation.distillation_compare import (
     TaskComparison,
     attempt_passed,
     pool_pairs,
@@ -165,9 +165,9 @@ def test_distill_takes_exactly_one_mode(argv, ok):
 
 @pytest.fixture
 def session(tmp_path):
-    from fastworkflow.command_routing import RoutingRegistry
-    from fastworkflow.distillation import DistillationSession
-    from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+    from fastworkflow.core.command_routing import RoutingRegistry
+    from fastworkflow.evaluation.distillation import DistillationSession
+    from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
     fastworkflow.init({})
     RoutingRegistry.clear_registry()
@@ -206,8 +206,9 @@ def test_compare_runs_compares_exactly_the_chosen_attempts_and_labels_outcomes(t
     attempts asked for and carry each side's outcome to the result."""
     import json as _json
 
-    from fastworkflow import state_paths, tracing
-    from fastworkflow.distillation_compare import compare_runs
+    from fastworkflow.session import state_paths
+    from fastworkflow.observability import tracing
+    from fastworkflow.evaluation.distillation_compare import compare_runs
     from fastworkflow.observability import store as obs
     from tests.benchmark_pins import pin_for
 
@@ -237,7 +238,7 @@ def test_compare_runs_compares_exactly_the_chosen_attempts_and_labels_outcomes(t
                 "experiment_id": exp, "task_id": "16", "attempt": attempt,
             })
             spans.append(tracing.Span(
-                span_id=f"{key}-x", trace_id=key, name=tracing.SPAN_COMMAND_EXECUTE,
+                span_id=f"{key}-x", trace_id=key, name=tracing.SPAN_COMMAND,
                 channel_id=channel, command_name="close_ticket", start_ns=10, end_ns=20,
                 status=tracing.STATUS_OK, experiment_id=exp, task_id="16", attempt=attempt,
                 attributes={"raw_command": "close_ticket", "parameters": {"id": "T-1"},

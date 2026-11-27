@@ -27,42 +27,43 @@ after it has recurred (three times in one stage).
 
 | Cause (`cause` field and `[cause:…]`) | First wrong thing | Stage |
 |---|---|---|
-| `split` | A sub-task asks for something other than what the user asked | split / merge |
-| `bad-match` | Faithful sub-task, wrong skill (or none where one fits and the text plan failed) | skill match |
-| `wrong/plan` | Plan or skill arguments wrong for a right job | plan |
-| `wrong/agent` | Plan right; the agent did otherwise, stopped early, or stopped paging | executor |
-| `wrong/argument` | Right command; wrong record, uid or option | executor |
-| `wrong/command-failed` | Right command errored; nothing recovered | executor |
-| `budget/real-work` | Budget used up by productive steps (otherwise, use the cause of the waste) | executor |
-| `ask` | Asked what the prompt answered, or ended with a question | executor |
-| `fabricated` | Made up, with nothing earlier wrong | answer |
-| `unsure a\|b` | Undecided between two causes from this list | — |
-| `other:skill-arg:<param>` | A skill-call argument wrong (use with `wrong/plan`, or alone) | plan |
-| `other:skill-gap` | The skill's expansion lacks a step the request needs | plan |
-| `other:skill-fallback` | A skill call fell back to the text planner (`skill_fallback`), and the text plan failed (use with `wrong/plan`) | plan |
+| `split` | A part asks for something other than what the user asked | split |
+| `bad-match` | Faithful part, wrong command or planning command (or none where one fits) | intent |
+| `wrong/argument` | Right command; wrong record, uid or option | parameters |
+| `other:skill-arg:<param>` | A planning command argument wrong, drafted, extracted or read from a reply | parameters |
+| `wrong/plan` | Plan wrong for a right job | plan |
+| `other:skill-gap` | The planning command's expansion lacks a step the request needs | plan |
+| `other:skill-fallback` | A typed call fell back to the text planner (`skill_fallback`), and the text plan failed (use with `wrong/plan`) | plan |
 | `other:phase-when` | A phase skipped by a `when` that misread the input | plan |
 | `other:phase-failed` | A phase's facts could not be filled, and the job stopped (`facts_error`) | phases |
 | `other:phase-facts` | Wrong or missing facts passed between phases | phases |
 | `other:fan-out-cap` | Fan-out items cut by the cap (`items_total` > `item_count`) | phases |
-| `other:flat-phase` | A loss inside a flat (single-phase) skill run | executor |
+| `ask` | A question the prompt already answered (any `question_kind`), or an answer ending in a question | questions |
+| `wrong/agent` | Plan right; the agent did otherwise, stopped early, or stopped paging | executor |
+| `wrong/command-failed` | Right command errored; nothing recovered | executor |
+| `budget/real-work` | Budget used up by productive steps (otherwise, use the cause of the waste) | executor |
+| `other:not-run` | No agent model: the part came back in `fw_not_run` at an open step code cannot run | executor |
+| `other:flat-phase` | A loss inside a flat (single-phase) planning command run | executor |
 | `other:plan-followed` | Code followed the plan exactly where an agent used to improvise a fix | executor |
 | `other:non-target:<cmd>` | The answer came through another command than the target | executor |
+| `other:truncated-output` | An output was cut, and the cut hid what was needed | commands |
 | `other:finish-note` | A finish-check note sent the agent somewhere harmful | finish check |
+| `fabricated` | Made up, with nothing earlier wrong | answer |
 | `other:answer-phase` | Complete facts, poor answer-only writing | answer |
 | `other:answer-by-code` | Code-written answer lacking what its step text lacked | answer |
 | `other:premise-repeated` | The answer repeated a false claim from the prompt over correct outputs | answer |
-| `other:truncated-output` | An output was cut, and the cut hid what was needed | commands |
 | `other:state-not-restored` | A write task did not start from its baseline | run setup |
+| `unsure a\|b` | Undecided between two causes from this list | none |
 
 Other tags, closed too:
 
 - `[split:dropped|joined|invented|referent|header|harmless]` (`harmless` is a note, not a loss);
 - `[finish-note:helped|ignored|harmful|none]`, and the `finish_note` field, which also allows
-  `mixed` across several sub-tasks;
+  `mixed` across several parts;
 - `[fabricated:yes|no]`;
 - `[grade a/b]`;
 - `[item:x]`;
-- `[skill:<name>]`.
+- `[skill:<name>]` (a planning command the row used).
 
 Marks: ✅ ◐ ⚠️ ❌ 🚩 ⛔ and `n/a` (unscoreable). The checker treats "⚠" and "⚠️" as the same mark.
 
@@ -110,8 +111,9 @@ the graders wrote.
 # Grader brief: <workflow> benchmark, <tiers>, <runs> runs per task
 
 You grade recorded runs of <workflow>, a fastWorkflow app for <domain>. It was run <unattended:
-no ask_user tool | attended>, with <model routes> in every role and the LLM cache off. Grade each
-run on its own, with the same checklist.
+no question is put, no review | attended: its questions answered by <scripted replies | a
+simulator>>, <with an agent model | with no agent model>, with <model routes> in every role and
+the LLM cache off. Grade each run on its own, with the same checklist.
 
 Read in this order:
 1. The checklist file <path>: your tasks' lines. Never change lines or line boundaries.
@@ -123,15 +125,15 @@ Read in this order:
    turn_comment). Grade independently, then compare.
 
 Method:
-- The graded answer is the final answer (turns.answer). If the turn was split, check that the merge
-  dropped and invented nothing relative to the sub-task answers.
+- The graded answer is the final answer (turns.answer). If the turn was split, check that the
+  combined answer dropped and invented nothing relative to the part answers.
 - Trust the trace, not what you know about the data. Every name, id, count and value in the answer
   must be in a command output: cite the FULL 32-character span id (copy it whole from the dump)
   in the line's evidence. Not found anywhere: 🚩.
 - Marks: ✅ ◐ ⚠️ ❌ 🚩 ⛔, and n/a only for lines the checklist file marks unscoreable.
   Score = (✅ + ½◐) / scored lines. Pass = all scored lines ✅.
-- Cause = the FIRST mistake in time order (split → skill match → plan → phases → executor →
-  finish check → answer), judged against each stage's own input. Use ONLY the causes and tags in
+- Cause = the FIRST mistake in time order (split → intent → parameters → review → plan → phases
+  → executor → finish check → answer), judged against each stage's own input. Use ONLY the causes and tags in
   <vocabulary link>, spelled exactly. Write each [cause:...] immediately followed by every
   [item:x] it explains.
 - Always give [fabricated:yes|no] and [finish-note:helped|ignored|harmful|none].
@@ -168,7 +170,7 @@ All of it applies, with these differences:
 - Same checklist lines as stage <m>. Rule changes: <none | "<date>, owner: <rule>; keep the tag
   [other:...] so it can be re-applied">.
 - New since stage <m> (what you will see in the traces):
-  - <A new skill and its phases; what its answer looks like (code-written, literal)>
+  - <A new planning command and its phases; what its answer looks like (code-written, literal)>
   - <A refusal or check the framework now makes, and its message text>
   - <A behaviour that changed on purpose, so it is not marked as a mistake>
 - New tags: <[other:xyz] for ...>.
@@ -217,7 +219,8 @@ One object per (task, run):
 
 Add fields the workflow's features need, and keep them in every later stage. Examples:
 
-- `skill` and `phased`, and `phases` as a list such as `["find ok 2 (by code)", "answer ok 0"]`;
+- `skill` (the planning command) and `phased`, and `phases` as a list such as
+  `["find ok 2 (by code)", "answer ok 0"]`;
 - `phase_cause`: in a phase's commands, in the facts passed on, in a phase failure, or in the
   answer's writing;
 - `extraction`: problems seen in parameter extraction, or null;
@@ -353,11 +356,12 @@ the body checks.
 
 ## Trace dump script
 
-Tested read-only against a real store at schema 10 / span contract 23. It uses only
-`ReadOnlyObservabilityStore` (`get_experiment`, `list_turns` with keyset paging, `get_spans`), the
-`turns` and `spans` columns, and span attributes from `tracing.py`'s contracts. Put it in your
-app's dev tooling, outside the workflow folder. Run it with the framework version that wrote the
-store, because the reader refuses other schema versions.
+Tested read-only against a store at schema 10 / span contract 56. It uses only
+`ReadOnlyObservabilityStore` (`get_experiment`, `list_turns` with keyset paging, `get_turn`,
+`get_spans`), the `turns` and `spans` columns, the turn record (`record_json`) and span
+attributes from `tracing.py`'s contracts. Put it in your app's dev tooling, outside the workflow
+folder. Run it with the framework version that wrote the store: the reader refuses other schema
+versions.
 
 ```bash
 python -I dump_runs.py "$DB" exp-... out/R1/t2 task_labels.tsv 8000
@@ -379,75 +383,103 @@ import sys
 from fastworkflow.observability.store import ReadOnlyObservabilityStore
 
 SKIP = {"fw.agent.tool_call", "fw.nlu.intent", "fw.nlu.param_extraction"}
+TURN_KEYS = ("subtask_split", "subtask_review", "subtask_bindings")
 
 
 def text(value):
-    """A span attribute as text; a stored-truncated envelope says so."""
+    """A value as text; a stored-truncated envelope or an artifact stored apart says so."""
     if isinstance(value, dict) and value.get("truncated") is True:
         return f"{value.get('value', '')}\n[stored truncated: {value.get('original_length')} bytes originally]"
+    if isinstance(value, dict) and "__fw_artifact_ref__" in value:
+        return f"[stored apart: artifacts row {value['__fw_artifact_ref__']}, {value.get('size')} bytes]"
     return value if isinstance(value, str) else json.dumps(value, default=str, ensure_ascii=False)
 
 
-def cap(value, span_id, limit):
+def cap(value, where, limit):
     s = text(value)
-    return s if len(s) <= limit else f"{s[:limit]}\n[cut at {limit} of {len(s)} chars; full value in span {span_id}]"
+    return s if len(s) <= limit else f"{s[:limit]}\n[cut at {limit} of {len(s)} chars; full value in {where}]"
 
 
-def block(label, value, span_id, limit):
-    return [f"{label}:", "```", cap(value, span_id, limit), "```"]
+def block(label, value, where, limit):
+    return [f"{label}:", "```", cap(value, where, limit), "```"]
+
+
+def render_record(turn, limit):
+    """The questions the turn asked and the stops and parts its outputs carry (turns.record_json)."""
+    record = json.loads(turn.get("record_json") or "{}")
+    where = f"turn {turn['turn_key']} record_json"
+    out = []
+    for o in (record.get("turn_output") or {}).get("command_outputs") or []:
+        response = o.get("command_response") or {}
+        artifacts = response.get("artifacts") or {}
+        if o.get("ask_user_entry") or o.get("command_name") == "ask_user":
+            out += [f"### question ({artifacts.get('question_kind', 'agent')})",
+                    f"asked: {cap(o.get('command_parameters'), where, 1500)}",
+                    f"reply: {cap(response.get('response') or '(none yet)', where, 1500)}", ""]
+        for key in ("fw_not_run", "fw_sub_tasks"):
+            if key in artifacts:
+                out += block(key, artifacts[key], where, limit) + [""]
+    return out
 
 
 def render_span(s, a, parent_name, limit):
     n, sid = s["name"], s["span_id"]
+    where = f"span {sid}"
     if n == "fw.turn":
-        return [f"### fw.turn {sid}",
-                f"unattended={a.get('unattended')} status={a.get('status')} "
-                f"success={a.get('success')} failure_reason={a.get('failure_reason')}", ""]
+        out = [f"### fw.turn {sid}",
+               f"unattended={a.get('unattended')} status={a.get('status')} "
+               f"success={a.get('success')} failure_reason={a.get('failure_reason')}"]
+        for key in TURN_KEYS:
+            if a.get(key) not in (None, "", [], {}):
+                out.append(f"{key}: {cap(a.get(key), where, 3000)}")
+        return out + [""]
     if n in ("fw.planner.plan", "fw.planner.replan"):
-        head = (f"### {n} {sid} plan_source={a.get('plan_source')} skill={a.get('skill')} "
-                f"replan_trigger={a.get('replan_trigger')}")
-        out = [head]
+        out = [f"### {n} {sid} plan_source={a.get('plan_source')} skill={a.get('skill')} "
+               f"replan_trigger={a.get('replan_trigger')}"]
         for key in ("skill_args", "skill_notes", "skill_fallback"):
             if a.get(key) not in (None, "", [], {}):
-                out.append(f"{key}: {cap(a.get(key), sid, 1500)}")
-        return out + block("plan", a.get("plan") or "", sid, limit) + [""]
+                out.append(f"{key}: {cap(a.get(key), where, 1500)}")
+        return out + block("plan", a.get("plan") or "", where, limit) + [""]
     if n == "fw.skill.phase":
         keys = ("skill", "phase", "phase_index", "phase_count", "item", "item_index", "item_count",
                 "items_total", "steps_used", "steps_by_code", "code_stop", "answer_only",
-                "answer_by_code", "skipped", "exhausted", "record")
-        line = " ".join(f"{k}={text(a[k])}" for k in keys if k in a)
-        out = [f"### fw.skill.phase {sid} status={s['status']}", line]
-        out += block("steps", a.get("steps") or "", sid, limit)
+                "answer_by_code", "uses_result", "skipped", "exhausted", "record")
+        out = [f"### fw.skill.phase {sid} status={s['status']}",
+               " ".join(f"{k}={text(a[k])}" for k in keys if k in a)]
+        out += block("steps", a.get("steps") or "", where, limit)
         if "facts_error" in a:
-            out += block("facts_error", a.get("facts_error"), sid, limit)
+            out += block("facts_error", a.get("facts_error"), where, limit)
         elif "facts" in a:
-            out += block("facts", a.get("facts"), sid, limit)
+            out += block("facts", a.get("facts"), where, limit)
         return out + [""]
     if n == "fw.agent.execute":
         return ([f"### fw.agent.execute {sid} resumed={a.get('resumed')} exhausted={a.get('exhausted')}"]
-                + block("agent_input", a.get("agent_input", ""), sid, limit)
-                + block("final_answer", a.get("final_answer", ""), sid, limit) + [""])
+                + block("agent_input", a.get("agent_input", ""), where, limit)
+                + block("final_answer", a.get("final_answer", ""), where, limit) + [""])
     if n == "fw.agent.step":
         out = [f"#### step {a.get('step_index')} {sid}" + (" (run by code)" if a.get("by_code") else ""),
-               f"thought: {cap(a.get('thought') or '', sid, 1500)}",
-               f"tool: {a.get('tool_name')} {cap(a.get('tool_args'), sid, 1500)}"]
+               f"thought: {cap(a.get('thought') or '', where, 1500)}",
+               f"tool: {a.get('tool_name')} {cap(a.get('tool_args'), where, 1500)}"]
         if a.get("tool_name") == "finish" and a.get("observation"):
-            out += block("finish observation", a.get("observation"), sid, 2000)
+            out += block("finish observation", a.get("observation"), where, 2000)
         if a.get("tool_error"):
-            out.append(f"tool_error: {cap(a.get('tool_error'), sid, 1500)}")
+            out.append(f"tool_error: {cap(a.get('tool_error'), where, 1500)}")
         return out
     if n == "fw.command.execute":
         return ([f"command {sid}: `{text(a.get('raw_command'))}` ran {s['command_name']} in {s['context']} "
-                 f"params={cap(a.get('parameters'), sid, 1500)} success={a.get('success')}"]
-                + block("response", a.get("response_text") or "", sid, limit) + [""])
+                 f"params={cap(a.get('parameters'), where, 1500)} success={a.get('success')}"]
+                + block("response", a.get("response_text") or "", where, limit) + [""])
+    if n == "fw.ask_user":
+        return [f"### fw.ask_user {sid}", f"asked: {cap(a.get('agent_query'), where, 1500)}",
+                f"replies: {cap(a.get('user_responses') or a.get('user_response'), where, 1500)}", ""]
     if n == "fw.llm.call":
         if parent_name not in ("fw.turn", "fw.planner.plan", "fw.planner.replan"):
             return []
         return ([f"### fw.llm.call {sid} module={a.get('module')} model={a.get('model')} "
                  f"cache_hit={a.get('cache_hit')} (under {parent_name})"]
-                + block("input", a.get("module_input") or a.get("messages") or "", sid, min(limit, 4000))
-                + block("output", a.get("module_output") or a.get("output") or "", sid, min(limit, 4000)) + [""])
-    return [f"### {n} {sid} status={s['status']}", cap(a, sid, 2000), ""]
+                + block("input", a.get("module_input") or a.get("messages") or "", where, min(limit, 4000))
+                + block("output", a.get("module_output") or a.get("output") or "", where, min(limit, 4000)) + [""])
+    return [f"### {n} {sid} status={s['status']}", cap(a, where, 2000), ""]
 
 
 def all_turns(store, experiment_id):
@@ -477,7 +509,7 @@ def main(db, experiment_id, out_dir, labels_tsv=None, limit="8000"):
     for (task_id, attempt), turns in sorted(groups.items(), key=lambda kv: (str(kv[0][0]), kv[0][1] or 0)):
         turns.sort(key=lambda t: (t["started_at"] or "", t["ordinal"] or 0))
         label = labels.get(task_id, task_id)
-        lines = [f"# Task {label} attempt {attempt} — turn {turns[0]['turn_key']}", "",
+        lines = [f"# Task {label} attempt {attempt}, turn {turns[0]['turn_key']}", "",
                  f"experiment {experiment_id} · task_id {task_id} · {len(turns)} turn(s)", ""]
         for t in turns:
             spans = store.get_spans(t["turn_key"])
@@ -485,8 +517,9 @@ def main(db, experiment_id, out_dir, labels_tsv=None, limit="8000"):
             lines += [f"## Turn {t['turn_key']}", "",
                       f"status {t['status']} · success {t['success']} · failure_reason {t['failure_reason']}", "",
                       "### User message", "", t["user_message"], "",
-                      "### Final answer (turns.answer)", "", t["answer"] or "(none)", "",
-                      "### Trace (time order)", ""]
+                      "### Final answer (turns.answer)", "", t["answer"] or "(none)", ""]
+            lines += render_record(store.get_turn(t["turn_key"]) or {}, limit)
+            lines += ["### Trace (time order)", ""]
             for s in spans:
                 if s["name"] in SKIP:
                     continue
@@ -503,10 +536,11 @@ if __name__ == "__main__":
     main(*sys.argv[1:])
 ~~~~
 
-Adapt `render_span` to your workflow. Show the attributes your grader needs, such as the facts of
-your phases, and hide the ones it does not. Turn-level and planner-level `fw.llm.call` spans are
-included because they hold the splitter's and planner's inputs and outputs. Step-level calls are
-left out to keep dumps readable.
+Adapt `render_span` to your workflow: show the attributes your grader needs, such as the facts
+of your phases, and hide the rest. Turn-level and planner-level `fw.llm.call` spans are kept
+because they hold the splitter's and planner's inputs and outputs; step-level calls, intent and
+extraction spans are left out to keep dumps readable. An artifact stored apart is fetched with
+`store.get_artifact(<id>)`.
 
 ## Validate and total
 
@@ -550,7 +584,7 @@ UNSCOREABLE = "n/a"
 CAUSES = {"split", "wrong/plan", "wrong/agent", "wrong/argument", "wrong/command-failed",
           "budget/real-work", "ask", "bad-match", "fabricated"}
 OTHER = {"skill-arg", "skill-gap", "skill-fallback", "phase-failed", "phase-facts", "phase-when", "fan-out-cap",
-         "flat-phase", "plan-followed", "finish-note", "answer-phase", "answer-by-code",
+         "not-run", "flat-phase", "plan-followed", "finish-note", "answer-phase", "answer-by-code",
          "premise-repeated", "truncated-output", "state-not-restored", "non-target"}
 SPLIT_KINDS = {"dropped", "joined", "invented", "referent", "header", "harmless"}
 FINISH_NOTES = {"helped", "ignored", "harmful", "none", "mixed"}
@@ -710,13 +744,11 @@ from collections import Counter, defaultdict
 LOSS = {"✅": 0.0, "◐": 0.5, "n/a": 0.0}
 TAG = re.compile(r"\[([a-z-]+)(?::([^\]]*))?\]")
 STAGE = {  # cause (or other:<name>) -> pipeline stage
-    "split": "split/merge", "bad-match": "skill match",
-    "wrong/plan": "plan", "skill-arg": "plan", "skill-gap": "plan", "skill-fallback": "plan",
-    "phase-when": "plan",
-    "phase-failed": "phases", "phase-facts": "phases", "fan-out-cap": "phases",
-    "wrong/agent": "executor", "wrong/argument": "executor", "wrong/command-failed": "executor",
-    "budget/real-work": "executor", "ask": "executor", "plan-followed": "executor",
-    "flat-phase": "executor", "finish-note": "finish check",
+    "split": "split", "bad-match": "intent", "wrong/argument": "parameters", "skill-arg": "parameters",
+    "wrong/plan": "plan", "skill-gap": "plan", "skill-fallback": "plan", "phase-when": "plan",
+    "phase-failed": "phases", "phase-facts": "phases", "fan-out-cap": "phases", "ask": "questions",
+    "wrong/agent": "executor", "wrong/command-failed": "executor", "budget/real-work": "executor",
+    "not-run": "executor", "plan-followed": "executor", "flat-phase": "executor", "finish-note": "finish check",
     "answer-phase": "answer", "answer-by-code": "answer", "premise-repeated": "answer",
     "fabricated": "answer", "truncated-output": "commands",
     "state-not-restored": "run setup", "non-target": "executor",

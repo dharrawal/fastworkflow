@@ -28,8 +28,12 @@ import litellm
 
 import fastworkflow
 from fastworkflow.utils.logging import logger as fastworkflow_logger
-from fastworkflow.model_pipeline_training import TrainingDataError, split_training_data
-from fastworkflow.nlu_labels import PARAMETER_VALUE_LABEL, WILDCARD_LABEL
+from fastworkflow.train.model_pipeline_training import (
+    BUILT_IN_VAGUE_REPLIES,
+    TrainingDataError,
+    split_training_data,
+)
+from fastworkflow.intent.nlu_labels import PARAMETER_VALUE_LABEL, WILDCARD_LABEL
 from fastworkflow.train import heldout_evaluation
 from fastworkflow.train import training_report as tr
 from fastworkflow.train.determinism import (
@@ -877,6 +881,10 @@ def _resolve_env_vars() -> dict:
         val = os.environ.get(key)
         if val and "<" not in val:
             env_vars[key] = val
+    # This file's real training runs are about the per-context trainer (its model folders, its
+    # reserved classes, its selective retraining). The default layout is another trainer, so the
+    # layout is pinned by name.
+    env_vars["INTENT_MODEL_LAYOUT"] = "per_context"
     return env_vars
 
 
@@ -928,10 +936,11 @@ def test_report_describes_a_real_training_run(tmp_path_factory):
         assert recorded, "a completed training run must leave provenance behind"
         wildcard_record = context_records[("*", WILDCARD_LABEL)]
         parameter_value_record = context_records[("*", PARAMETER_VALUE_LABEL)]
-        assert wildcard_record.status is ContextTrainingStatus.SKIPPED_NO_UTTERANCES
+        # fix-1hs8: a context with no foreign commands seeds its wildcard class from the built-in vague replies.
+        assert wildcard_record.status is ContextTrainingStatus.INCLUDED
         assert wildcard_record.own_row_count
-        assert wildcard_record.raw_candidate_count == 0
-        assert wildcard_record.deduplicated_candidate_count == 0
+        assert wildcard_record.raw_candidate_count == len(BUILT_IN_VAGUE_REPLIES)
+        assert wildcard_record.deduplicated_candidate_count == len(set(BUILT_IN_VAGUE_REPLIES))
         assert wildcard_record.selected_budget is None
         assert parameter_value_record.status is ContextTrainingStatus.INCLUDED
         assert parameter_value_record.row_count > 0
@@ -960,7 +969,8 @@ def test_report_describes_a_real_training_run(tmp_path_factory):
         assert _row(report, APP_COMMAND).kind is tr.CommandKind.APPLICATION
         assert _row(report, FRAMEWORK_COMMAND).kind is tr.CommandKind.FRAMEWORK
         assert _row(report, WILDCARD_LABEL).kind is tr.CommandKind.RESERVED
-        assert _row(report, WILDCARD_LABEL).row_count == 0
+        # fix-1hs8: the wildcard class's rows are the built-in vague replies.
+        assert _row(report, WILDCARD_LABEL).row_count == wildcard_record.row_count == len(set(BUILT_IN_VAGUE_REPLIES))
         assert _row(report, PARAMETER_VALUE_LABEL).row_count == (
             parameter_value_record.row_count
         )

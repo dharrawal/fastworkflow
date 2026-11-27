@@ -34,6 +34,7 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
+from fastworkflow.parameters import parameter_clarification
 from fastworkflow.run_fastapi_mcp import checkpoint
 from fastworkflow.run_fastapi_mcp.turns import (
     CREDENTIAL_CONTEXT_KEY,
@@ -46,9 +47,9 @@ from fastworkflow.run_fastapi_mcp.utils import (
     ensure_user_runtime_exists,
     persist_pending_after_turn,
 )
-from fastworkflow.serialization_hooks import ProjectionOutcome
+from fastworkflow.session.serialization_hooks import ProjectionOutcome
 from fastworkflow.utils.logging import logger
-from fastworkflow.workflow import _WORKFLOW_REGISTRY
+from fastworkflow.core.workflow import _WORKFLOW_REGISTRY
 
 TESTS_DIR = Path(__file__).parent
 
@@ -71,7 +72,7 @@ TODO_LIST_JSON = TESTS_DIR / "todo_list_workflow" / "application" / "todo_list.j
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
-def speedict_folder(tmp_path):
+def speedict_folder(tmp_path, monkeypatch):
     """Point fastWorkflow's durable root at a private temp directory.
 
     Every checkpoint namespace these tests read is derived from
@@ -89,6 +90,9 @@ def speedict_folder(tmp_path):
     previous_env = fastworkflow._env_vars
     speedict = tmp_path / "speedict"
     fastworkflow.init({"FASTWORKFLOW_STATE_ROOT": str(speedict)})
+    # The process environment wins over the env-file dict (`fastworkflow.get_env_var`), and conftest's
+    # `isolate_state_root` sets it there, so the root is set in the process too.
+    monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(speedict))
     fastworkflow.RoutingRegistry.clear_registry()
     # Pin warnings are throttled per (workflow, reason) for the life of the
     # process, so a test that asserts on one has to start from a clean slate.
@@ -213,9 +217,7 @@ def _count_calls(call_log: str) -> int:
 
 NO_HOOK_CONTEXT = '''
 class Context:
-    @classmethod
-    def get_parent(cls, record) -> None:
-        return None
+    pass
 '''
 
 POKE_COMMAND = '''
@@ -247,7 +249,6 @@ def _write_scratch_workflow(tmp_path: Path) -> str:
     context_folder.mkdir(parents=True)
     (context_folder / "_Widget.py").write_text(NO_HOOK_CONTEXT)
     (context_folder / "poke.py").write_text(POKE_COMMAND)
-    (folderpath / "_commands" / "context_inheritance_model.json").write_text("{}")
     return str(folderpath)
 
 
@@ -352,7 +353,7 @@ def test_an_evicted_channel_returns_with_its_application_state(
     # node inside root — the application would then navigate one
     # tree while its commands mutated another.
     assert workflow._current_command_context is laundry
-    assert workflow.record is chores
+    assert workflow._command_context_for_response_generation is chores
     assert laundry.parent is chores
     assert chores.parent is manager_obj
 
@@ -422,8 +423,7 @@ def test_a_suspended_channel_is_evicted_now_that_its_snapshot_is_complete(
         # Suspending for real needs an LLM turn. These are the fields the ctx
         # itself treats as authoritative, set the way tests/test_fastapi_topology_b.py
         # does, and then persisted through the server's own post-turn writer.
-        ctx._awaiting_user = True
-        ctx._pending_clarification_request = "which one?"
+        ctx._ask_agent_question("which one?")
         ctx._begin_turn("do the thing")
         ctx.append_ask_user_entry("which one?")
         persist_pending_after_turn(
@@ -451,7 +451,7 @@ def test_a_suspended_channel_is_evicted_now_that_its_snapshot_is_complete(
     # Evicting is only safe because the suspended state is still restorable.
     blob = manager.session_state_store.load(suspended)
     assert blob is not None
-    assert blob["awaiting_user"] is True
+    assert blob["waiting"]["kind"] == "agent" and blob["waiting"]["question"] == "which one?"
     assert blob["turn"]["key"] == turn_key
     assert blob["turn"]["outputs"][0]["command_name"] == "ask_user"
 
@@ -849,8 +849,7 @@ def test_suspended_session_is_evictable_once_its_state_is_durable():
         await _create(manager, channel_id, HELLO_WORLD)
         runtime = await manager.get_session(channel_id)
         ctx = runtime.execution_context
-        ctx._awaiting_user = True
-        ctx._pending_clarification_request = "Which one?"
+        ctx._ask_agent_question("Which one?")
         ctx._begin_turn("do the thing")
         ctx.append_ask_user_entry("Which one?")
 
@@ -882,7 +881,7 @@ def test_suspended_session_pins_when_its_state_never_reached_the_store():
     async def body():
         await _create(manager, channel_id, HELLO_WORLD)
         runtime = await manager.get_session(channel_id)
-        runtime.execution_context._awaiting_user = True
+        runtime.execution_context._ask_agent_question("which one?")
         # Deliberately no persist_pending_after_turn: this is the shape left
         # behind by a StateEncodingError.
         manager.session_state_store.clear(channel_id)
@@ -906,7 +905,7 @@ def test_assess_without_a_store_pins_a_suspended_session():
     async def body():
         await _create(manager, channel_id, HELLO_WORLD)
         runtime = await manager.get_session(channel_id)
-        runtime.execution_context._awaiting_user = True
+        runtime.execution_context._ask_agent_question("which one?")
         return checkpoint.assess(runtime)
 
     eligibility = asyncio.run(body())
@@ -928,9 +927,10 @@ def test_mid_extraction_session_persists_instead_of_clearing():
         runtime = await manager.get_session(channel_id)
         ctx = runtime.execution_context
         cme = ctx._cme_workflow.context
-        cme["NLU_Pipeline_Stage"] = fastworkflow.NLUPipelineStage.PARAMETER_EXTRACTION
         cme["command"] = "add two numbers"
         cme["command_name"] = "add_two_numbers"
+        parameter_clarification.store(cme, parameter_clarification.ParameterLoop(
+            command="add_two_numbers", kind="execution", open=["first_num"]))
 
         assert ctx.has_open_command()
         # A COMPLETED turn, deliberately: the turn ended (with an error asking
@@ -954,8 +954,8 @@ def test_mid_extraction_session_persists_instead_of_clearing():
     blob = asyncio.run(body())
 
     assert blob is not None, "mid-extraction state was cleared instead of saved"
-    assert blob["cme"]["command_name"] == "add_two_numbers"
-    assert blob["cme"]["command"] == "add two numbers"
+    assert blob["waiting"]["payload"]["command_name"] == "add_two_numbers"
+    assert blob["waiting"]["payload"]["command"] == "add two numbers"
 
 
 def test_mid_extraction_persists_through_the_turns_engine_too():
@@ -974,9 +974,10 @@ def test_mid_extraction_persists_through_the_turns_engine_too():
         await _create(manager, channel_id, HELLO_WORLD)
         runtime = await manager.get_session(channel_id)
         cme = runtime.execution_context._cme_workflow.context
-        cme["NLU_Pipeline_Stage"] = fastworkflow.NLUPipelineStage.PARAMETER_EXTRACTION
         cme["command"] = "add two numbers"
         cme["command_name"] = "add_two_numbers"
+        parameter_clarification.store(cme, parameter_clarification.ParameterLoop(
+            command="add_two_numbers", kind="execution", open=["first_num"]))
 
         # A completed (not suspended) turn: the case that used to clear.
         _persist_after_turn(
@@ -993,7 +994,7 @@ def test_mid_extraction_persists_through_the_turns_engine_too():
     blob = asyncio.run(body())
 
     assert blob is not None, "the turns engine cleared mid-extraction state"
-    assert blob["cme"]["command_name"] == "add_two_numbers"
+    assert blob["waiting"]["payload"]["command_name"] == "add_two_numbers"
 
 
 # ---------------------------------------------------------------------------
@@ -1012,7 +1013,7 @@ def test_reap_pending_state_protects_the_channels_the_process_holds():
     import time as _time
     from pathlib import Path as _Path
 
-    from fastworkflow.session_state_store import (
+    from fastworkflow.session.session_state_store import (
         SAVED_AT_KEY,
         PendingRetentionPolicy,
     )

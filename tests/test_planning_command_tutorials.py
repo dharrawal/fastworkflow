@@ -33,8 +33,10 @@ import sys
 
 import pytest
 
-from fastworkflow import ModuleType, planning_commands, command_preview, workflow_agent
-from fastworkflow import planning_phases as sp
+from fastworkflow import ModuleType
+from fastworkflow.agent import workflow_agent
+from fastworkflow.planning import planning_commands, command_preview
+from fastworkflow.planning import planning_phases as sp
 from fastworkflow.observation_offloading.finish_check import plain_command_name
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -48,7 +50,7 @@ _BLOCK = re.compile(r"<!-- ([\w-]+)(?:: ([^\n]*?))? -->\n```[\w-]*\n(.*?)\n```",
 
 
 def _routing(folder: str = WORKFLOW):
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     return RoutingRegistry.get_definition(folder)
 
@@ -199,13 +201,21 @@ def test_a_skipped_phase_reads_as_none_and_the_answer_says_so():
     assert text.endswith("answer written by __result__:\n  No book matches Ulysses.")
 
 
+def test_book_details_does_not_pick_one_of_several_matches_for_the_user():
+    # "Dun" matches Dune and Dune Messiah: the step is left open, not answered for the first book.
+    text = dry_run("book_details", {"title": "Dun"})
+    assert "code runs: show_book" not in text
+    assert text.endswith("step 1 is open: the agent would run it and the rest")
+    assert "code runs: show_book book_uid=b1" in dry_run("book_details", {"title": "Dune"})
+
+
 def test_pick_opens_the_exact_title_and_else_leaves_the_row_to_code_or_the_agent():
     assert "code runs: show_book book_uid=b1" in dry_run("book_by_title", {"title": "Dune"})
     assert "code runs: show_book book_uid=b2" in dry_run("book_by_title",
                                                        {"title": "dune messiah"})
     # no title is exactly "Dune Messia": the step is written in pick words, for the agent
     near = dry_run("book_by_title", {"title": "Dune Messia"})
-    assert "1. show_book with the uid of the Dune Messia match" in near
+    assert '1. show_book with the uid of the "Dune Messia" match' in near
     assert "code runs: show_book book_uid=b2" in near
     two = dry_run("book_by_title", {"title": "Dun"})
     assert "1. show_book with the uid of the Dun match" in two

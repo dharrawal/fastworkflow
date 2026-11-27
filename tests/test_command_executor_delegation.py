@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import fastworkflow
-from fastworkflow.command_executor import CommandExecutor, CommandNotFoundError
+from fastworkflow.engine.command_executor import CommandExecutor, CommandNotFoundError
 from fastworkflow._workflows.command_metadata_extraction._commands.wildcard import Signature
 
 

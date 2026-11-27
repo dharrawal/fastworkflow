@@ -5,7 +5,7 @@ Real dspy objects only: a tiny ``dspy.LM`` subclass records the kwargs of every 
 import litellm  # noqa: F401  (must precede dspy)
 import dspy
 
-from fastworkflow.utils.extraction_attempts import FirstAttemptGreedy
+from fastworkflow.parameters.extraction_attempts import FirstAttemptGreedy
 
 
 class RecordingLM(dspy.LM):

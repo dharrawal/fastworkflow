@@ -2,7 +2,7 @@
 
 from fastworkflow.experiment.runner import ExperimentTask
 from fastworkflow.run_fastapi_mcp.utils import InvokeRequest
-from fastworkflow.turn import TurnStatus
+from fastworkflow.core.turn import TurnStatus
 from tests.test_subtask_execution import _agent_with_steps, _fake_progress_check, _split
 from tests.test_turn_result_capture import (  # noqa: F401 - shared fixtures
     _make_agent_ctx,

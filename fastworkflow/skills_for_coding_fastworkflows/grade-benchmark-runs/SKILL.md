@@ -46,7 +46,9 @@ traces looked like an agent failing politely, and its numbers meant nothing. Che
 | The first message of each attempt equals the task's prompt | `experiment_first_messages(id)` vs the benchmark version |
 | Transport and provider errors | `turns.failure_reason` holds `"<ExceptionType>: <first line>"` (a transport error, `max_iters_exhausted`); runner logs for connection refused, 5xx, timeouts |
 | No dropped evidence for these turns | `writer_health()` folds every writer of the whole store. Read `spans_dropped` / `records_dropped` and intersect `spans_dropped_turn_keys` / `records_dropped_turn_keys` with this experiment's turns |
-| Same model routes, cache policy and unattended setting in every lane | the experiment description, and each attempt's `runtime_snapshot_json` |
+| Same model routes, cache policy, agent or no-agent mode (`LLM_AGENT`) in every lane | the experiment description; each `fw.llm.call`'s `model` and `cache_hit` |
+| Same workflow and intent model in every lane | each attempt's `runtime_snapshot_json` (`workflow_fingerprint`, `workflow_model_version`; null unless the attempt was claimed through the server) |
+| Same attended or unattended setting | `unattended` on every `fw.turn` span; no attempt ended `awaiting_user` (an unanswered question: fix the scripted replies and rerun) |
 | State-changing tasks started from the documented baseline | your restore log for the round |
 
 Open the store only with `ReadOnlyObservabilityStore` (see
@@ -99,43 +101,29 @@ Audit the tasks before freezing:
 
 Score = (✅ + ½◐) ÷ scored lines. Pass = every scored line ✅. Set `fabricated: yes` whenever any
 line is 🚩, and also when a total is stated over a partial read (that line is ⚠️). A ✅ without a
-cited span is the grader's opinion. Grade the final answer (`turns.answer`). After a split, also
-check that the merge dropped and invented nothing.
+cited span is the grader's opinion. Grade the final answer (`turns.answer`; a reply to a question
+continues the same turn). After a split, also check that the combined answer dropped and invented
+nothing.
 
 ## 3. Causes: the first mistake, tagged
 
 Mistakes snowball. A wrong command wastes steps, the budget runs out, and the answer gets made up.
-Only the first mistake is the cause. Walk each lost line's sub-task in time order: split → skill
-match → plan → phases → executor → finish check → answer. Judge each stage against **its own
-input**: a planner that faithfully planned a badly split sub-task is not at fault. A stage that went
-wrong but was recovered, with the line still ✅, is not a cause.
+Only the first mistake is the cause. Walk each lost line's part in time order: split → intent →
+parameters → review → plan → phases → executor → finish check → answer. Judge each stage against
+**its own input**: a planner that faithfully planned a badly split part is not at fault. A stage
+that went wrong but was recovered, with the line still ✅, is not a cause.
 
-The cause vocabulary is closed. The core causes are:
-
-- `split`
-- `bad-match`
-- `wrong/plan`
-- `wrong/agent`
-- `wrong/argument`
-- `wrong/command-failed`
-- `budget/real-work`
-- `ask`
-- `fabricated`
-- `unsure a|b`
-- `other:<name>`, from a fixed list of framework-shaped names such as `phase-failed`,
-  `phase-facts`, `answer-by-code`, `skill-arg:<p>` and `fan-out-cap`.
-
-The canonical list, with definitions, is in [reference.md](reference.md#cause-and-tag-vocabulary).
-The brief and the checker use the same list. Three of the same new `other:` in one stage earn a
-place in the list.
+The cause vocabulary is closed: one list, with definitions and stages, in
+[reference.md](reference.md#cause-and-tag-vocabulary). The brief and the scripts use the same
+list. Three of the same new `other:` in one stage earn a place in it.
 
 Write each `[cause:...]` immediately followed by every `[item:x]` it explains:
 `[grade 3/5] [fabricated:no] [cause:split] [split:dropped] [item:b] [cause:wrong/agent] [item:d] [finish-note:ignored]`.
 Always record `[fabricated:yes|no]`. Always record the finish check's effect,
 `[finish-note:helped|ignored|harmful|none]`, because that measures the check itself.
 
-What each stage looks like in the trace (span attributes, stage-specific tags, offline checks) is
-in [pipeline-and-metrics.md](pipeline-and-metrics.md#stage-by-stage).
+What each stage looks like in the trace, and who answers the questions a turn asks, is in
+[pipeline-and-metrics.md](pipeline-and-metrics.md#stage-by-stage).
 
 **Rules will change.** Keep the tag whatever the current rule awards. A later rule then becomes a
 re-score in code, not a re-grade: see
@@ -148,16 +136,11 @@ Build one markdown file per (task, attempt), read-only, from the store:
 
 - **First line:** the task label, the attempt and the exact `turn_key`. Graders copy keys from
   that line; keys retyped by hand come back wrong (one stage got 11 wrong).
-- The user message, the final answer, then the trace in time order:
-  - turn status, `failure_reason` and `unattended`;
-  - the turn-level `fw.llm.call` spans (the splitter, the matcher and other request-level calls);
-  - each `fw.planner.plan` (`plan_source`, `skill`, `skill_args`, `skill_notes`, `plan`);
-  - each `fw.skill.phase` (`steps`, `steps_used`, `steps_by_code`, `code_stop`, `facts` or
-    `facts_error`, fan-out item fields, `answer_by_code`);
-  - each `fw.agent.execute` (`agent_input`, `final_answer`);
-  - each `fw.agent.step` (`by_code`, tool, arguments, and the finish-check observation);
-  - every `fw.command.execute` (`raw_command`, the `command_name` / `context` columns,
-    `parameters`, `success`, `response_text`).
+- The user message, the final answer, the questions asked with their kind and replies, the
+  stops (`fw_not_run`) and parts (`fw_sub_tasks`) from the turn record, then the trace in time
+  order: the turn (`unattended`, `subtask_split`, `subtask_review`, `subtask_bindings`), the
+  turn-level and planner `fw.llm.call` spans, plans, phases, agent runs and steps, and every
+  command with its response.
 - Cap long values (about 8000 characters) with a note naming the span that holds the full value.
   Show the store's own truncation envelope too (`original_length` is in bytes), because the store
   may not hold the full text either.
@@ -172,8 +155,9 @@ tooling, not in the workflow folder.
   and hard limits. Graders open the store read-only only. They write exactly one grades file, with
   no helper scripts and no temp files. They never run the agent or touch the backend.
 - **The addendum** comes with each stage. It gives the dumps' location, which earlier stage to
-  compare with, and *what changed in the system*, described as it will look in traces (new skills,
-  code-written answers, new refusals). It also lists new tags and dated rule changes. Without it,
+  compare with, and *what changed in the system*, described as it will look in traces (new
+  planning commands, code-written answers, new refusals). It also lists new tags and dated rule
+  changes. Without it,
   deliberate new behaviour gets marked as mistakes. Consolidate the chain into a new brief after
   about five addenda.
 - **Fan out** one grader agent per group, with your coding agent's parallel sub-agent mechanism.
@@ -201,9 +185,8 @@ Graders' prose truncates and drifts. **Totals come only from the JSON.** The che
 5. Each ✅ cites a full 32-hex span id. This is a heuristic: record uids of the same shape also
    match. On one real stage, 436 of 504 rows had ✅ lines citing only shortened ids or none.
 
-Then **spot-check**: open the cited spans of a few rows per grader. Report the metrics listed in
-[pipeline-and-metrics.md](pipeline-and-metrics.md#metrics). Lines lost per cause, stage and
-`plan_source` come from the losses script in [reference.md](reference.md#losses-by-cause-and-stage).
+Then **spot-check**: open the cited spans of a few rows per grader, and report the
+[metrics](pipeline-and-metrics.md#metrics).
 
 ## 7. Keep the record
 
@@ -219,19 +202,11 @@ compared and re-scored against them. Optional mirrors:
   outcome_source="<grader id>", reward=<credit ÷ scored lines>)`. This is write-once. A derived
   outcome already recorded stays; never present it as a grade.
 
-## Anti-patterns
-
-- Grading a run with a dead dependency, or before its health is checked.
-- A checklist written after reading the trace, or line boundaries that drift between stages.
-- ✅ without evidence. "The agent said it did it" counted as done. An abstention scored as success.
-- Tagging every bad thing in a trace as a cause, or tags outside the vocabulary.
-- One task's runs split across graders. Totals taken from prose.
-- One LLM judge's score deciding something with no second judge, fixtures or human check.
-
 ## Checklist
 
 ```
-- [ ] Run health: status, rows = tasks × attempts, first messages, failure_reason, dropped turn keys
+- [ ] Run health: status, rows = tasks × attempts, first messages, failure_reason, dropped turn keys,
+      same lanes, no attempt left awaiting_user
 - [ ] Checklists from prompts, ground truth verified, n/a items declared, owner-approved, frozen
 - [ ] Brief with the closed vocabulary and schema; addendum states what changed and the comparison
 - [ ] Dumps written read-only, turn key on the first line, long values capped with span pointers

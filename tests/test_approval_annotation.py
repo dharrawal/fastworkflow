@@ -1,7 +1,7 @@
 """The ``approval`` annotation: declared on a command class, validated at load, exposed (Phase 10 step 10.13).
 
 ``@user_approval_for_execution(UserApproval.REQUIRED_ALWAYS | REQUIRED_UNTIL_DELEGATED)`` on a command's
-``ResponseGenerator`` (or a planning command's ``PlanGenerator``) is read the way ``@descends_to`` is. Absent means agent discretion. This file covers the
+``ResponseGenerator`` is read the way ``@descends_to`` is (on a planning command's ``PlanGenerator`` it is a load error). Absent means agent discretion. This file covers the
 declaration only: nothing is gated here (enforcement is fix-3rsq.10.14).
 
 Each case runs on a COPY of the library example, annotated in the copy. Nothing is mocked: the routing
@@ -16,14 +16,15 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow import approval_annotations as aa
-from fastworkflow.approval_annotations import (
-    REQUIRED_ALWAYS, REQUIRED_UNTIL_DELEGATED, command_approval, planning_steps_needing_approval)
-from fastworkflow.command_declarations import CommandDeclarationError
-from fastworkflow.command_metadata_api import CommandMetadataAPI
-from fastworkflow.command_routing import RoutingRegistry
+from fastworkflow.core import approval_annotations as aa
+from fastworkflow.core.approval_annotations import (
+    REQUIRED_ALWAYS, REQUIRED_UNTIL_DELEGATED, command_approval)
+from fastworkflow.planning import command_preview
+from fastworkflow.core.command_directory import CommandLoadError
+from fastworkflow.core.command_metadata_api import CommandMetadataAPI
+from fastworkflow.core.command_routing import RoutingRegistry
 from fastworkflow.examples.library.application.library import Library
-from fastworkflow.run_listing import command_shortlist_text
+from fastworkflow.agent.run_listing import command_shortlist_text
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401 - shared fixture
 
 pytestmark = pytest.mark.usefixtures("initialized_fastworkflow")
@@ -120,25 +121,31 @@ def test_the_value_is_the_snapshot_in_command_directory_json(tmp_path):
 # Invalid values are load errors
 # ---------------------------------------------------------------------------
 
+def _open_book_problem(folder: Path) -> str:
+    """The one load problem of open_book: that command does not load, the workflow does (bd fix-ftdl.2)."""
+    RoutingRegistry.clear_registry()
+    problems = [p for p in command_preview.load_problems(str(folder)) if p.startswith("Library/open_book: ")]
+    assert len(problems) == 1, problems
+    return problems[0]
+
+
 def test_a_retired_string_spelling_is_a_load_error_naming_the_decorator(tmp_path):
     folder = _copy(tmp_path, "retired_string")
     _in_class(folder, "Library/open_book.py", 'approval = "mandatory"')
 
-    with pytest.raises(CommandDeclarationError) as caught:
-        RoutingRegistry.get_definition(str(folder))
-    message = str(caught.value)
+    message = _open_book_problem(folder)
     assert "Library/open_book.py" in message
     assert 'approval = "mandatory" is removed: write @user_approval_for_execution(UserApproval.REQUIRED_ALWAYS)' in message
+    with pytest.raises(CommandLoadError):
+        RoutingRegistry.get_definition(str(folder)).get_command_class(
+            "Library/open_book", fastworkflow.ModuleType.RESPONSE_GENERATION_INFERENCE)
 
 
 def test_a_retired_non_string_spelling_is_a_load_error(tmp_path):
     folder = _copy(tmp_path, "retired_non_string")
     _in_class(folder, "Library/open_book.py", "approval = True")
 
-    with pytest.raises(CommandDeclarationError) as caught:
-        RoutingRegistry.get_definition(str(folder))
-    assert "approval = True is removed" in str(caught.value)
-    assert "Library/open_book" in str(caught.value)
+    assert "approval = True is removed" in _open_book_problem(folder)
 
 
 def test_a_decorator_argument_that_is_not_a_member_fails_at_import(tmp_path):
@@ -146,42 +153,85 @@ def test_a_decorator_argument_that_is_not_a_member_fails_at_import(tmp_path):
     _decorate(folder, "Library/open_book.py",
               '@fastworkflow.user_approval_for_execution("sometimes")')
 
-    with pytest.raises(ImportError, match="takes a UserApproval member"):
-        RoutingRegistry.get_definition(str(folder))
+    # the file does not import: that command (and each command file that imports it) does not load
+    assert "takes a UserApproval member" in _open_book_problem(folder)
+    definition = RoutingRegistry.get_definition(str(folder))
+    assert "Library/open_book" not in definition.command_directory.map_command_2_metadata
+    assert definition.get_command_class(
+        "Library/find_book", fastworkflow.ModuleType.INPUT_FOR_PARAM_EXTRACTION_CLASS) is not None
 
 
 def test_the_accessor_surfaces_a_load_error_rather_than_hiding_it(tmp_path):
     folder = _copy(tmp_path, "accessor_error")
     _in_class(folder, "Library/open_book.py", 'approval = "maybe"')
 
-    with pytest.raises(CommandDeclarationError):
-        command_approval(str(folder), "Library/open_book")
+    assert 'approval = "maybe" is removed' in _open_book_problem(folder)
+    assert command_approval(str(folder), "Library/open_book") is None
 
 
 # ---------------------------------------------------------------------------
 # Planning commands
 # ---------------------------------------------------------------------------
 
-def test_planning_steps_needing_approval_lists_the_annotated_commands_its_template_calls(tmp_path):
+def test_a_planning_command_needs_what_the_commands_its_steps_run_need(tmp_path):
+    # bd fix-ftdl.7.6: one inheritance rule for both marks. A planning command's approval is derived from the
+    # commands its steps run, as command_writes.write_commands derives its writes (it replaced the one-level helper
+    # planning_steps_needing_approval). member_report's steps run find_member, open_member, list_member_loans and
+    # show_notes; only open_member is annotated.
     folder = _copy(tmp_path, "planning_steps")
     _annotate(folder, "Library/open_member.py", "REQUIRED_UNTIL_DELEGATED")
 
-    # member_report's template calls find_member, open_member, list_member_loans and show_notes;
-    # only open_member is annotated.
-    assert planning_steps_needing_approval(str(folder), "Library/member_report") == [
-        ("Library/open_member", REQUIRED_UNTIL_DELEGATED)]
+    assert command_approval(str(folder), "Library/member_report") == REQUIRED_UNTIL_DELEGATED
+    assert aa.approval_marker(str(folder), "Library/member_report") == " " + MARKER_DELEGATABLE
+    assert command_approval(str(folder), "Library/author_books") is None     # its steps run no annotated command
 
 
-def test_planning_steps_needing_approval_is_empty_without_annotated_steps(tmp_path):
-    folder = _copy(tmp_path, "planning_none")
-    assert planning_steps_needing_approval(str(folder), "Library/member_report") == []
+def test_the_strongest_approval_a_step_reaches_wins(tmp_path):
+    folder = _copy(tmp_path, "planning_strongest")
+    _annotate(folder, "Library/open_member.py", "REQUIRED_UNTIL_DELEGATED")
+    _annotate(folder, "Record/show_notes.py", "REQUIRED_ALWAYS")
+    assert command_approval(str(folder), "Library/member_report") == REQUIRED_ALWAYS
 
 
-def test_a_planning_command_may_carry_the_annotation_itself(tmp_path):
+def test_a_planning_command_inherits_through_a_planning_command_its_steps_run(tmp_path):
+    folder = _copy(tmp_path, "planning_nested")
+    _annotate(folder, "Record/add_note.py", "REQUIRED_ALWAYS")
+    (folder / "_commands" / "Library" / "relay_note.py").write_text(
+        '''from pydantic import BaseModel, Field
+
+from fastworkflow.planning import run
+
+
+class Signature:
+    """Pass a note on to a member's record."""
+
+    plain_utterances = ["pass a note on to Ann Lee", "relay to Raj Patel that he called"]
+
+    class Input(BaseModel):
+        member: str = Field(description="the member's name")
+        text: str = Field(description="what the note says")
+
+
+class PlanGenerator:
+    def relay(self, input):
+        return [run("note_member", member=input.member, text=input.text)]
+''')
+    assert command_approval(str(folder), "Library/note_member") == REQUIRED_ALWAYS
+    assert command_approval(str(folder), "Library/relay_note") == REQUIRED_ALWAYS
+
+
+def test_the_annotation_on_a_planning_command_is_a_load_error(tmp_path):
+    # bd fix-ftdl.7.6: it used to load and only add a listing marker, while @writes there is a load error. Both
+    # marks now follow one rule: the mark goes on the execution command a step runs.
     folder = _copy(tmp_path, "planning_self")
     _annotate(folder, "Library/member_report.py", "REQUIRED_ALWAYS", on="PlanGenerator")
 
-    assert command_approval(str(folder), "Library/member_report") == REQUIRED_ALWAYS
+    from fastworkflow.planning.command_preview import load_problems
+
+    [problem] = [p for p in load_problems(str(folder)) if "member_report" in p]
+    assert "Library/member_report.py" in problem
+    assert ("a planning command cannot carry @user_approval_for_execution. Its steps are asked about when they "
+            "run a command that carries it: put the decorator on that execution command") in problem
 
 
 # ---------------------------------------------------------------------------

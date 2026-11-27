@@ -17,9 +17,12 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
+from fastworkflow.intent import intent_loop
+from fastworkflow.parameters import parameter_clarification
+from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import model_of, park
 from fastworkflow.run_fastapi_mcp import checkpoint
-from fastworkflow.session_state_store import SCHEMA_VERSION
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.session.session_state_store import SCHEMA_VERSION
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 
 @pytest.fixture
@@ -30,7 +33,7 @@ def todo_workflow_path() -> str:
 @pytest.fixture
 def initialized_fastworkflow(tmp_path):
     fastworkflow.init({"FASTWORKFLOW_STATE_ROOT": str(tmp_path / "workflow_contexts")})
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     RoutingRegistry.clear_registry()
     yield tmp_path
@@ -58,20 +61,22 @@ def _params_class(ctx: WorkflowExecutionContext, command_name: str):
 def _enter_parameter_extraction(ctx: WorkflowExecutionContext) -> str:
     """Put the CME workflow in the state a failed extraction leaves behind.
 
-    parameter_extraction stores an instance built with model_construct whose
-    missing fields hold the NOT_FOUND sentinel, which is exactly the shape
-    ordinary validation refuses -- so a restore that validates would reject the
-    very state it exists to carry.
+    The extractor works on an instance built with model_construct whose missing
+    fields hold the NOT_FOUND sentinel, which is exactly the shape ordinary
+    validation refuses; what it leaves behind is the pending parameter loop
+    (plain data) that ``park`` builds from such an instance.
     """
+    from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import park
+
     command_name = "TodoListManager/create_todo_list"
     params_class = _params_class(ctx, command_name)
     assert params_class is not None, "test fixture needs a real Input class"
 
     cme = ctx._cme_workflow.context
-    cme["NLU_Pipeline_Stage"] = fastworkflow.NLUPipelineStage.PARAMETER_EXTRACTION
     cme["command"] = "create a todo list"
     cme["command_name"] = command_name
-    cme["stored_parameters"] = params_class.model_construct(description="NOT_FOUND")
+    park(ctx._cme_workflow, command_name, params_class.model_construct(description="NOT_FOUND"),
+         request_text="create a todo list")
     return command_name
 
 
@@ -98,9 +103,10 @@ def test_cme_continuation_survives_a_round_trip(
     blob = ctx.serialize_state(channel_id=channel_id)
     ctx.close()
 
-    assert blob["cme"] is not None
-    assert blob["cme"]["command_name"] == command_name
-    assert blob["cme"]["stored_parameters"] == {"description": "NOT_FOUND"}
+    assert blob["waiting"] is not None
+    assert blob["waiting"]["payload"]["command_name"] == command_name
+    assert blob["waiting"]["payload"]["loop"]["open"] == ["description"]
+    assert blob["waiting"]["payload"]["loop"]["values"] == {}
 
     restored = _make_ctx(todo_workflow_path, channel_id)
     restored.apply_serialized_state(blob)
@@ -108,14 +114,13 @@ def test_cme_continuation_survives_a_round_trip(
     cme = restored._cme_workflow.context
     assert cme["command_name"] == command_name
     assert cme["command"] == "create a todo list"
-    assert (
-        cme["NLU_Pipeline_Stage"]
-        == fastworkflow.NLUPipelineStage.PARAMETER_EXTRACTION
-    )
+    assert intent_loop.waiting_for(cme) == intent_loop.WAITING_PARAMETERS
 
-    params = cme["stored_parameters"]
-    # Rebuilt as the real Input class, not a dict: parameter_extraction merges
-    # into it with getattr and type(...).model_fields, both of which a dict fails.
+    loop = parameter_clarification.pending(cme)
+    assert loop.command == command_name and loop.open == ["description"]
+    # The extractor rebuilds the real Input class from the loop, not a dict: it merges into it with getattr and
+    # type(...).model_fields, both of which a dict fails.
+    params = model_of(loop, _params_class(restored, command_name))
     assert type(params) is _params_class(restored, command_name)
     assert params.description == "NOT_FOUND"
     restored.close()
@@ -140,20 +145,19 @@ def test_sentinel_in_a_typed_field_survives_restore(
     assert "id" in params_class.model_fields
 
     cme = ctx._cme_workflow.context
-    cme["NLU_Pipeline_Stage"] = fastworkflow.NLUPipelineStage.PARAMETER_EXTRACTION
     cme["command"] = "get the todo list"
     cme["command_name"] = command_name
-    cme["stored_parameters"] = params_class.model_construct(id="NOT_FOUND")
+    park(ctx._cme_workflow, command_name, params_class.model_construct(id="NOT_FOUND"), request_text="get the todo list")
 
     blob = ctx.serialize_state(channel_id=channel_id)
     ctx.close()
 
-    assert blob["cme"]["stored_parameters"] == {"id": "NOT_FOUND"}
+    assert blob["waiting"]["payload"]["loop"]["open"] == ["id"]
 
     restored = _make_ctx(todo_workflow_path, channel_id)
     restored.apply_serialized_state(blob)
 
-    params = restored._cme_workflow.context["stored_parameters"]
+    params = model_of(parameter_clarification.pending(restored._cme_workflow.context), params_class)
     assert type(params) is params_class
     assert params.id == "NOT_FOUND"
     restored.close()
@@ -271,13 +275,13 @@ def test_no_open_turn_or_command_serializes_as_absent(
     assert ctx.has_open_command() is False
     blob = ctx.serialize_state(channel_id=channel_id)
     assert blob["turn"] is None
-    assert blob["cme"] is None
+    assert blob["waiting"] is None
 
     restored = _make_ctx(todo_workflow_path, channel_id)
     restored.apply_serialized_state(blob)
     assert restored._turn_key is None
     assert restored._turn_outputs == []
-    assert "stored_parameters" not in restored._cme_workflow.context
+    assert parameter_clarification.pending(restored._cme_workflow.context) is None
     ctx.close()
     restored.close()
 
@@ -297,11 +301,11 @@ def test_has_open_command_tracks_the_cme_keys(
     ctx._cme_workflow.end_command_processing()
     assert ctx.has_open_command() is False
 
-    # It clears command and stored_parameters but leaves command_name behind,
+    # It clears command and the parameter loop but leaves command_name behind,
     # which is why the predicate must not key off command_name: a session that
     # merely ran one command would otherwise look mid-extraction forever.
     assert ctx._cme_workflow.context.get("command_name") is not None
-    assert ctx.serialize_state(channel_id=channel_id)["cme"] is None
+    assert ctx.serialize_state(channel_id=channel_id)["waiting"] is None
     ctx.close()
 
 
@@ -320,17 +324,15 @@ def test_unresolvable_parameter_class_resets_rather_than_resuming(
     blob = ctx.serialize_state(channel_id=channel_id)
     ctx.close()
 
-    blob["cme"]["command_name"] = "TodoListManager/command_deleted_in_a_later_release"
+    blob["waiting"]["payload"]["command_name"] = "TodoListManager/command_deleted_in_a_later_release"
 
     restored = _make_ctx(todo_workflow_path, channel_id)
     restored.apply_serialized_state(blob)
 
     cme = restored._cme_workflow.context
-    assert (
-        cme["NLU_Pipeline_Stage"] == fastworkflow.NLUPipelineStage.INTENT_DETECTION
-    )
+    assert intent_loop.waiting_for(cme) is None
     assert "command_name" not in cme
-    assert "stored_parameters" not in cme
+    assert parameter_clarification.pending(cme) is None
     restored.close()
 
 
@@ -338,7 +340,7 @@ def test_v1_blob_is_refused_rather_than_partly_restored(
     initialized_fastworkflow, todo_workflow_path
 ):
     """Schema 1 lacked exactly the fields whose absence made restore wrong."""
-    from fastworkflow.session_state_store import IncompatibleSessionState
+    from fastworkflow.session.session_state_store import IncompatibleSessionState
 
     channel_id = f"v1_{uuid.uuid4().hex[:8]}"
     ctx = _make_ctx(todo_workflow_path, channel_id)
@@ -346,19 +348,19 @@ def test_v1_blob_is_refused_rather_than_partly_restored(
     blob = ctx.serialize_state(channel_id=channel_id)
     ctx.close()
 
-    legacy = {k: v for k, v in blob.items() if k not in ("turn", "cme")}
+    legacy = {k: v for k, v in blob.items() if k not in ("turn", "waiting")}
     legacy["schema_version"] = 1
 
     restored = _make_ctx(todo_workflow_path, channel_id)
     with pytest.raises(IncompatibleSessionState):
         restored.apply_serialized_state(legacy)
-    assert "stored_parameters" not in restored._cme_workflow.context
+    assert parameter_clarification.pending(restored._cme_workflow.context) is None
     restored.close()
 
 
 def test_schema_version_is_current(initialized_fastworkflow, todo_workflow_path):
     """Adding fields without bumping would let an old reader half-apply a new blob."""
-    assert SCHEMA_VERSION == 4
+    assert SCHEMA_VERSION == 8
     channel_id = f"ver_{uuid.uuid4().hex[:8]}"
     ctx = _make_ctx(todo_workflow_path, channel_id)
     assert ctx.serialize_state(channel_id=channel_id)["schema_version"] == SCHEMA_VERSION
@@ -403,4 +405,3 @@ def test_missing_cme_workflow_reads_as_nothing_in_flight(
     ctx._cme_workflow = None
 
     assert ctx.has_open_command() is False
-    assert ctx._is_extracting_parameters() is False

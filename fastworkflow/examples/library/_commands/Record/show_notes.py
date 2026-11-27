@@ -7,7 +7,9 @@ class Signature:
     """Show the notes on the open record."""
 
     class Output(BaseModel):
-        notes: list[str] = Field(description="each note, oldest first")
+        notes: list[str] = Field(description="each note, oldest first",
+                                 examples=[["one copy is a large-print edition"],
+                                           ["prefers email reminders", "card renewed"]])
         total: int = Field(description="how many notes the record holds")
 
     plain_utterances = [

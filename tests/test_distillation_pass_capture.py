@@ -42,10 +42,11 @@ import pytest
 from dspy.dsp.utils.utils import dotdict
 
 import fastworkflow
-from fastworkflow import state_paths, tracing
+from fastworkflow.session import state_paths
+from fastworkflow.observability import tracing
 from fastworkflow.benchmark import setup
-from fastworkflow.command_executor import CommandExecutor
-from fastworkflow.distillation import DistillationSession, PlanningStep
+from fastworkflow.engine.command_executor import CommandExecutor
+from fastworkflow.evaluation.distillation import DistillationSession, PlanningStep
 from fastworkflow.experiment.runner import ExperimentController
 from fastworkflow.observability import comparison as comparison_module
 from fastworkflow.observability import store as obs
@@ -61,7 +62,7 @@ from fastworkflow.observability.comparison import (
 from fastworkflow.run_chatbot import selection_api
 from fastworkflow.run_chatbot import server as run_chatbot_server
 from fastworkflow.run_chatbot.server import cost_rollup, execution_ledger
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 # The recorder-side seeding helpers, reused rather than restated (the same
 # import `tests/test_selection_api.py` makes): attempt 2 below is a turn a
@@ -142,7 +143,7 @@ class _ScriptedAgent:
         self.trajectory: dict = {}
 
     def __call__(self, **_kwargs):
-        from fastworkflow.workflow_agent import _execute_workflow_query
+        from fastworkflow.agent.workflow_agent import _execute_workflow_query
 
         script = self._pending.pop(0)
         if script.dspy_call:
@@ -188,7 +189,7 @@ def _script_the_llm_boundaries(monkeypatch, ctx, scripts: list[_PassScript]) -> 
     plans = [script.plan for script in scripts]
 
     monkeypatch.setattr(
-        "fastworkflow.workflow_agent.initialize_workflow_tool_agent",
+        "fastworkflow.agent.workflow_agent.initialize_workflow_tool_agent",
         lambda chat_session, **_kwargs: _ScriptedAgent(chat_session, pending),
     )
 
@@ -208,10 +209,10 @@ def _script_the_llm_boundaries(monkeypatch, ctx, scripts: list[_PassScript]) -> 
         return user_query
 
     monkeypatch.setattr(
-        "fastworkflow.workflow_agent.build_query_with_next_steps", scripted_planner
+        "fastworkflow.agent.workflow_agent.build_query_with_next_steps", scripted_planner
     )
     monkeypatch.setattr(
-        "fastworkflow.workflow_agent._what_can_i_do", lambda session: "commands"
+        "fastworkflow.agent.workflow_agent._what_can_i_do", lambda session: "commands"
     )
     monkeypatch.setattr(
         "fastworkflow.utils.dspy_utils.get_lm", lambda *args, **kwargs: None
@@ -285,7 +286,7 @@ def todo_workflow_path() -> str:
 @pytest.fixture
 def initialized_fastworkflow():
     fastworkflow.init({})
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     RoutingRegistry.clear_registry()
     yield
@@ -695,9 +696,7 @@ def test_an_unstamped_pass_id_records_nothing(
         DistillationSession(ctx)._run_agent_pass(
             "tidy up my lists",
             agent_lm_role="LLM_TEACHER_AGENT",
-            agent_api_key_role="LITELLM_API_KEY_TEACHER_AGENT",
             planner_lm_role="LLM_TEACHER_PLANNER",
-            planner_api_key_role="LITELLM_API_KEY_TEACHER_PLANNER",
         )
     finally:
         ctx.clear_workflow_stack()

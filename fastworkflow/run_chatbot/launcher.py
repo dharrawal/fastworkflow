@@ -138,6 +138,13 @@ def plan_server_spawn(
         # legitimately serve the chatbot page from a different local port
         # [R19 as amended alongside R18].
         "--cors_loopback_only",
+        # The page asks for approvals as the channel surface (a plain yes, no token). The server's own
+        # default is the strict host surface, so the chat's loopback server must say channel
+        # explicitly. (fix-rkr1)
+        "--chat_approval_surface", "channel",
+        # The page's "LLM cache" checkbox toggles the cache for its single local user. Any other server
+        # ignores the request field.
+        "--allow_request_cache_toggle",
     ]
     if expect_encrypted_jwt:
         cmd.append("--expect_encrypted_jwt")
@@ -153,7 +160,7 @@ def plan_server_spawn(
 
 def _workflow_state_dir(workflow_path: str, *, create: bool) -> str:
     """State dir for one workflow. ``create=False`` must not mkdir."""
-    from fastworkflow import state_paths
+    from fastworkflow.session import state_paths
 
     if create:
         return state_paths.workflow_state_dir(workflow_path)
@@ -432,7 +439,7 @@ def is_train_running(workflow_path: str) -> bool:
 
 def find_live_train() -> Optional[tuple[str, int]]:
     """``(live_db_path, pid)`` of any live chatbot-spawned train, else None."""
-    from fastworkflow import state_paths
+    from fastworkflow.session import state_paths
 
     root = os.path.join(state_paths.state_root(), "workflows")
     try:

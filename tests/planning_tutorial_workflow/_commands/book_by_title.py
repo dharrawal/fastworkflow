@@ -5,7 +5,7 @@ is skipped when nothing matched; __result__ says what book found, or that no boo
 """
 from pydantic import BaseModel, Field
 
-from ._book_phases import BookPhases
+from ._shared.book_phases import BookPhases
 
 
 class Signature:

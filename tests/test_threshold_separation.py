@@ -18,7 +18,7 @@ import os
 import numpy as np
 import pytest
 
-from fastworkflow.model_pipeline_training import (
+from fastworkflow.train.model_pipeline_training import (
     MAX_AMBIGUITY_THRESHOLD,
     SINGLE_LABEL_RESOLUTION_FLOOR,
     TIER_AMBIGUITY_MIN_SEPARATION,
@@ -160,7 +160,7 @@ def test_the_writer_refuses_to_publish_a_collapsed_pair(tmp_path, monkeypatch):
     """The guard is in the writer, so a future change to the margin arithmetic cannot
     republish the defect quietly."""
     monkeypatch.setattr(
-        "fastworkflow.model_pipeline_training.separated_tiny_ambiguous_threshold",
+        "fastworkflow.train.model_pipeline_training.separated_tiny_ambiguous_threshold",
         lambda tier, stats: tier,
     )
     with pytest.raises(ValueError, match="never report an ambiguity"):

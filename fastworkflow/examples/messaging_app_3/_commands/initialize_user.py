@@ -33,6 +33,7 @@ class Signature:
         ] + generate_diverse_utterances(Signature.plain_utterances, command_name)
 
 
+@fastworkflow.descends_to("User")
 class ResponseGenerator:
     """Create a User instance and attach it as the root command context."""
 

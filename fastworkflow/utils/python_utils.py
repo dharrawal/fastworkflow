@@ -8,6 +8,7 @@ import importlib.util
 import sys
 import threading
 import types
+from types import UnionType
 from contextlib import contextmanager
 from functools import lru_cache
 from pathlib import Path
@@ -15,6 +16,12 @@ import typing
 from typing import Any, Optional, Union, get_args, get_origin
 
 from fastworkflow.utils.logging import logger
+
+
+def is_union(annotation: Any) -> bool:
+    """Whether *annotation* is a union: ``Optional[X]``, ``Union[X, Y]`` and ``X | Y`` are all one thing. The one
+    test every place that unwraps an annotation uses, so the two spellings of an optional type never differ."""
+    return typing.get_origin(annotation) in (typing.Union, UnionType)
 
 # Serialises loads where Python's per-module import lock is unavailable.
 _FALLBACK_LOAD_LOCK = threading.RLock()

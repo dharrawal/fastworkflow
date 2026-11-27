@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 from fastworkflow import CommandResponse
 from fastworkflow.planning import run
 
-from ._wording import copies
+from .._shared.wording import copies
 from .find_book import Signature as FindBook
 from .open_book import Signature as OpenBook
 
@@ -33,13 +33,17 @@ class Signature:
 
     class Input(BaseModel):
         title: str = Field(description="the book's title",
+                           examples=["Dune", "Dune Messiah", "Persuasion"],
                            json_schema_extra={"copied_from_command_text": True})
 
     class Output(BaseModel):
         found: bool = Field(description="whether a book was opened for the title")
-        book_uid: Optional[str] = Field(default=None, description="the uid of the book opened")
-        title: Optional[str] = Field(default=None, description="its title, as the library has it")
-        author: Optional[str] = Field(default=None, description="its author")
+        book_uid: Optional[str] = Field(default=None, description="the uid of the book opened, such as b1",
+                                        examples=["b1", "b3"])
+        title: Optional[str] = Field(default=None, description="its title, as the library has it",
+                                     examples=["Dune", "Emma"])
+        author: Optional[str] = Field(default=None, description="its author",
+                                      examples=["Frank Herbert", "Jane Austen"])
         copies: int = Field(default=0, description="how many copies the library owns")
 
 

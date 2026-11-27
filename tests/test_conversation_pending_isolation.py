@@ -16,13 +16,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from fastworkflow import approval_binding as ab
-from fastworkflow import review_proposals, workflow_agent
-from fastworkflow.review_engine import AWAITING, INVALIDATED
-from fastworkflow.turn import TurnStatus
+from fastworkflow.review import approval_binding as ab
+from fastworkflow.review import review_proposals
+from fastworkflow.agent import workflow_agent
+from fastworkflow.review.review_engine import AWAITING, INVALIDATED
+from fastworkflow.core.turn import TurnStatus
 from tests.test_approval_binding import (  # noqa: F401 - fixtures and the scripted agent
     _added, _ask, _finish, annotated_library, no_live_model, no_model_call_for_parameters, todo)
-from tests.test_round1_gate import EMMA, JOKE, _open_review, _split_into, gated  # noqa: F401
+from tests.test_round1_gate import EMMA, JOKE, _open_review, _split_into, gated, remote_decides_emma_and_joke  # noqa: F401
 from tests.test_round1_handoff import _scripted_context  # noqa: F401 - a fresh context on the annotated library
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401
 
@@ -134,7 +135,7 @@ def test_a_new_conversation_cancels_a_pending_approval_at_once(todo, annotated_l
 # ----------------------------------------------------------------------
 
 
-def test_an_open_round_one_review_is_parked_and_never_answered_from_the_second_conversation(gated, monkeypatch):
+def test_an_open_round_one_review_is_parked_and_never_answered_from_the_second_conversation(gated, monkeypatch, remote_decides_emma_and_joke):
     gated.ctx.bind_observability_identity(conversation_id=CONV_A)
     _split_into(monkeypatch, [EMMA, JOKE])
     gated.ctx.process_turn(f"{EMMA} and {JOKE}")
@@ -143,7 +144,7 @@ def test_an_open_round_one_review_is_parked_and_never_answered_from_the_second_c
 
     gated.ctx.bind_observability_identity(conversation_id=CONV_B)
     assert ab.active_reviews(gated.wf) == []                    # parked off the live store
-    assert not gated.ctx._turn_frame().subtask_review_open
+    assert gated.ctx._waiting is None
 
     _split_into(monkeypatch, [JOKE])                            # B's own request opens B's own review, if anything
     gated.script.steps = [("finish", {})]
@@ -152,7 +153,7 @@ def test_an_open_round_one_review_is_parked_and_never_answered_from_the_second_c
     assert review_id not in {r.id for r in ab.active_reviews(gated.wf)}
 
     gated.ctx.bind_observability_identity(conversation_id=CONV_A)
-    assert gated.ctx._turn_frame().subtask_review_open is True
+    assert gated.ctx._waiting is not None and gated.ctx._waiting.kind == "review"
     assert review_id in {r.id for r in ab.active_reviews(gated.wf)}
     assert ab.active_record(gated.wf).state == AWAITING
 
@@ -247,7 +248,7 @@ def test_new_conversation_parks_the_question_and_saves_it_before_any_next_messag
     """The two calls the endpoint makes on the button (run_fastapi_mcp.__main__._settle_pending_for_new_conversation):
     park_pending_for_new_conversation, then persist_pending_after_turn on the real disk store."""
     from fastworkflow.run_fastapi_mcp.utils import persist_pending_after_turn
-    from fastworkflow.session_state_store import DiskSessionStateStore
+    from fastworkflow.session.session_state_store import DiskSessionStateStore
 
     todo.ctx.bind_observability_identity(conversation_id=CONV_A)
     _ask_aaron(todo)
@@ -288,7 +289,7 @@ def test_dropping_a_conversation_removes_only_the_state_parked_for_it(todo, anno
 
 def test_the_persisted_blob_loses_a_dropped_conversations_parked_state(todo, annotated_library, tmp_path):
     from fastworkflow.run_fastapi_mcp.utils import drop_parked_pending_for_conversation
-    from fastworkflow.session_state_store import DiskSessionStateStore
+    from fastworkflow.session.session_state_store import DiskSessionStateStore
 
     todo.ctx.bind_observability_identity(conversation_id=CONV_A)
     _ask_aaron(todo)
@@ -352,7 +353,7 @@ def _persisted_blob(runtime, session_state_store):
 
 
 def test_a_deleted_conversations_parked_state_is_pruned_at_the_next_persist(todo, annotated_library, obs_sink, tmp_path):
-    from fastworkflow.session_state_store import DiskSessionStateStore
+    from fastworkflow.session.session_state_store import DiskSessionStateStore
 
     store = obs_sink.store
     todo.ctx.set_trace_sink(obs_sink)
@@ -373,7 +374,7 @@ def test_a_deleted_conversations_parked_state_is_pruned_at_the_next_persist(todo
 
 
 def test_an_existing_conversations_parked_state_stays_through_a_persist(todo, annotated_library, obs_sink, tmp_path):
-    from fastworkflow.session_state_store import DiskSessionStateStore
+    from fastworkflow.session.session_state_store import DiskSessionStateStore
 
     store = obs_sink.store
     todo.ctx.set_trace_sink(obs_sink)
@@ -391,7 +392,7 @@ def test_an_existing_conversations_parked_state_stays_through_a_persist(todo, an
 
 
 def test_unowned_and_none_parked_state_is_never_pruned(todo, annotated_library, obs_sink, tmp_path, monkeypatch):
-    from fastworkflow.session_state_store import DiskSessionStateStore
+    from fastworkflow.session.session_state_store import DiskSessionStateStore
 
     store = obs_sink.store
     # "none": a question asked with no conversation bound (no trace sink, so nothing mints one), parked by the New
@@ -432,7 +433,7 @@ class _UnreadableStore:
 
 
 def test_no_store_or_an_unreadable_store_prunes_nothing_and_raises_nothing(todo, annotated_library, tmp_path):
-    from fastworkflow.session_state_store import DiskSessionStateStore
+    from fastworkflow.session.session_state_store import DiskSessionStateStore
 
     todo.ctx.bind_observability_identity(conversation_id=CONV_A)
     _ask_aaron(todo)

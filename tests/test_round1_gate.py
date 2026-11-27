@@ -12,16 +12,22 @@ from pathlib import Path
 
 import pytest
 
+from fastworkflow._workflows.plan_metadata_extraction import resolution
+
 import fastworkflow
-from fastworkflow import review_proposals, tracing, workflow_agent
-from fastworkflow.approval_binding import Surface
-from fastworkflow.planning_commands import planning_command
-from fastworkflow.review_engine import AWAITING, CONFIRMED, DECLINED, EXPIRED, PROPOSAL_TTL_SECONDS, proposal_of
-from fastworkflow.review_proposals import SubTaskProposal
-from fastworkflow.run_listing import check_planned_arguments
-from fastworkflow.turn import TurnStatus
+from tests import span_tree
+from fastworkflow.review import review_proposals
+from fastworkflow.agent import workflow_agent
+from fastworkflow.observability import tracing
+from fastworkflow.review.approval_binding import Surface
+from fastworkflow.planning.planning_commands import planning_command
+from fastworkflow.review.review_engine import AWAITING, CONFIRMED, DECLINED, EXPIRED, PROPOSAL_TTL_SECONDS, proposal_of
+from fastworkflow.review.review_proposals import SubTaskProposal
+from fastworkflow.agent.run_listing import check_planned_arguments
+from fastworkflow.core.turn import TurnStatus
 from tests.test_approval_binding import (  # noqa: F401 - the real agent on the annotated library copy, and the guards
     _finish, annotated_library, no_live_model, no_model_call_for_parameters, todo)
+from tests.conftest import script_matcher
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401
 
 pytestmark = pytest.mark.usefixtures("initialized_fastworkflow")
@@ -40,6 +46,21 @@ JOKE = "tell Ann a joke about cats"                        # heads: unsure, no c
 FIND = "find member Ann Lee"                               # heads: one confident label (find_member)
 
 
+#: The remote decision model's answer for the two parts the local model is unsure of (it gives each a list of
+#: candidates): EMMA is the planning command ``book_by_title``, and no command fits JOKE, so JOKE is an ad hoc part.
+#: Scripted (``script_matcher``), with no model call: these tests used to get it from a live call, because litellm
+#: loaded a developer's .env with a ``JEV_API_KEY`` into the process. Without an answer the turn asks which command
+#: is meant (the ambiguity question) instead of opening the review.
+REMOTE_ANSWERS = {EMMA: {"Library/book_by_title": 0.95, "none": 0.05}, JOKE: {"none": 0.95}}
+
+
+@pytest.fixture
+def remote_decides_emma_and_joke(monkeypatch):
+    """The remote decision model answers EMMA and JOKE as ``REMOTE_ANSWERS`` says; any other text gets no answer, so
+    the local model's decision stands for it."""
+    return script_matcher(monkeypatch, REMOTE_ANSWERS)
+
+
 @pytest.fixture
 def gated(todo):
     """The approval tests' ``todo`` context with the review gate restored (``todo`` bypasses it for those tests), at the
@@ -51,13 +72,24 @@ def gated(todo):
 
 def _split_into(monkeypatch, subtasks):
     """The planner's split (the one model-backed seam before the gate): the sub-tasks it returns."""
-    monkeypatch.setattr("fastworkflow.workflow_agent.split_into_subtasks", lambda user_query, **kwargs: list(subtasks))
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.split_into_subtasks", lambda user_query, **kwargs: list(subtasks))
 
 
 def _marker(todo) -> str | None:
-    """The turn span's ``subtask_review`` attribute, from the last turn span the sink recorded."""
-    spans = [span for span in todo.sink.spans if span.name == tracing.SPAN_TURN]
-    return spans[-1].attributes.get("subtask_review") if spans else None
+    """What the last recorded turn's tree says about its review (span contract 63: the review's outcome is on its
+    ``fw.review`` span, no longer on the turn's): the review's ``outcome`` (open, reviewed, declined, expired); with no
+    review, ``fast_path`` when a part took the gate's fast path, else ``not_reviewed`` for a turn that went through the
+    stages; None for a turn that recorded none."""
+    turns = [span for span in todo.sink.spans if span.name == tracing.SPAN_TURN]
+    if not turns:
+        return None
+    spans = [span for span in span_tree.spans(todo.sink) if span.trace_id == turns[-1].trace_id]
+    reviews = [span for span in spans if span.name == tracing.SPAN_REVIEW]
+    if reviews:
+        return reviews[-1].attributes.get("outcome")
+    if any(span.name == tracing.SPAN_RESOLVE_PART and span.attributes.get("fast_path") for span in spans):
+        return "fast_path"
+    return "not_reviewed" if any(span.name == tracing.SPAN_RESOLVE for span in spans) else None
 
 
 def _open_review(todo):
@@ -83,7 +115,8 @@ def _confirmed(todo):
 
 def test_a_single_confident_sub_task_runs_directly_with_no_review(gated, monkeypatch):
     _split_into(monkeypatch, [FIND])
-    assert review_proposals.fast_path_for(gated.wf, [FIND]).reason == review_proposals.FAST_HEAD_CONFIDENT
+    intent = resolution.part_intent(gated.wf, FIND)
+    assert resolution.is_fast_path(intent, gated.wf) and intent.decided_by == resolution.BY_CLASSIFIER
     gated.script.steps = _finish()
     out = gated.ctx.process_turn(FIND)
     assert out.status is TurnStatus.COMPLETED
@@ -93,9 +126,9 @@ def test_a_single_confident_sub_task_runs_directly_with_no_review(gated, monkeyp
 
 def test_an_exact_command_name_runs_directly_with_no_review(gated, monkeypatch):
     _split_into(monkeypatch, ["count_books"])
-    fast = review_proposals.fast_path_for(gated.wf, ["count_books"])
-    assert fast is not None and fast.reason == review_proposals.FAST_EXACT_NAME
-    assert fast.name == "Library/count_books" and fast.is_planning is True
+    fast = resolution.part_intent(gated.wf, "count_books")
+    assert resolution.is_fast_path(fast, gated.wf) and fast.decided_by == resolution.BY_EXACT_NAME
+    assert fast.command == "Library/count_books" and fast.kind == resolution.KIND_PLANNING
     gated.script.steps = _finish()
     out = gated.ctx.process_turn("count_books")
     assert out.status is TurnStatus.COMPLETED
@@ -105,7 +138,7 @@ def test_an_exact_command_name_runs_directly_with_no_review(gated, monkeypatch):
 
 def test_an_unsure_single_sub_task_is_not_on_the_fast_path(gated, monkeypatch):
     _split_into(monkeypatch, [JOKE])
-    assert review_proposals.fast_path_for(gated.wf, [JOKE]) is None
+    assert not resolution.is_fast_path(resolution.part_intent(gated.wf, JOKE), gated.wf)
 
 
 # ----------------------------------------------------------------------
@@ -113,7 +146,7 @@ def test_an_unsure_single_sub_task_is_not_on_the_fast_path(gated, monkeypatch):
 # ----------------------------------------------------------------------
 
 
-def test_a_multi_sub_task_request_opens_the_review_with_the_proposed_means(gated, monkeypatch):
+def test_a_multi_sub_task_request_opens_the_review_with_the_proposed_means(gated, monkeypatch, remote_decides_emma_and_joke):
     _split_into(monkeypatch, [EMMA, JOKE])
     out = gated.ctx.process_turn(f"{EMMA} and {JOKE}")
     assert out.status is TurnStatus.AWAITING_USER
@@ -128,7 +161,7 @@ def test_a_multi_sub_task_request_opens_the_review_with_the_proposed_means(gated
     assert _marker(gated) == "open"
 
 
-def test_an_unsure_single_sub_task_opens_the_review(gated, monkeypatch):
+def test_an_unsure_single_sub_task_opens_the_review(gated, monkeypatch, remote_decides_emma_and_joke):
     _split_into(monkeypatch, [JOKE])
     out = gated.ctx.process_turn(JOKE)
     assert out.status is TurnStatus.AWAITING_USER
@@ -136,7 +169,7 @@ def test_an_unsure_single_sub_task_opens_the_review(gated, monkeypatch):
     assert len(record.binding["items"]) == 1 and record.binding["items"][0]["goal"] == JOKE
 
 
-def test_a_refused_planning_argument_is_shown_on_its_line(gated, monkeypatch):
+def test_a_refused_planning_argument_is_shown_on_its_line(gated, monkeypatch, remote_decides_emma_and_joke):
     _split_into(monkeypatch, [EMMA, JOKE])
     gated.ctx.process_turn(f"{EMMA} and {JOKE}")
     record = _open_review(gated)
@@ -147,7 +180,7 @@ def test_a_refused_planning_argument_is_shown_on_its_line(gated, monkeypatch):
     assert f"[check: {refusal}]" in model_line
 
 
-def test_the_draft_round_trips_through_the_review_as_json(gated, monkeypatch):
+def test_the_draft_round_trips_through_the_review_as_json(gated, monkeypatch, remote_decides_emma_and_joke):
     """The draft is passed to review_subtasks as JSON, read back as the same items, and stored as the record's binding."""
     _split_into(monkeypatch, [EMMA, JOKE])
     gated.ctx.process_turn(f"{EMMA} and {JOKE}")
@@ -162,7 +195,7 @@ def test_the_draft_round_trips_through_the_review_as_json(gated, monkeypatch):
 # ----------------------------------------------------------------------
 
 
-def test_a_declined_review_runs_nothing(gated, monkeypatch):
+def test_a_declined_review_runs_nothing(gated, monkeypatch, remote_decides_emma_and_joke):
     _split_into(monkeypatch, [EMMA, JOKE])
     gated.ctx.process_turn(f"{EMMA} and {JOKE}")
     record = _open_review(gated)
@@ -175,7 +208,7 @@ def test_a_declined_review_runs_nothing(gated, monkeypatch):
     assert _marker(gated) == "declined"
 
 
-def test_an_expired_review_runs_nothing(gated, monkeypatch):
+def test_an_expired_review_runs_nothing(gated, monkeypatch, remote_decides_emma_and_joke):
     _split_into(monkeypatch, [EMMA, JOKE])
     gated.ctx.process_turn(f"{EMMA} and {JOKE}")
     record = _open_review(gated)
@@ -188,7 +221,7 @@ def test_an_expired_review_runs_nothing(gated, monkeypatch):
     assert _marker(gated) == "expired"
 
 
-def test_an_accepted_review_is_stored_for_the_hand_off_and_the_turn_runs_its_goals(gated, monkeypatch):
+def test_an_accepted_review_is_stored_for_the_hand_off_and_the_turn_runs_its_goals(gated, monkeypatch, remote_decides_emma_and_joke):
     _split_into(monkeypatch, [EMMA, JOKE])
     gated.ctx.process_turn(f"{EMMA} and {JOKE}")
     gated.ctx.process_turn("change 2: inputs=Ann Lee")
@@ -225,7 +258,7 @@ def test_an_unattended_turn_runs_the_draft_unreviewed(gated, monkeypatch):
     _assert_ran_unreviewed(gated, out)
 
 
-def test_a_host_surface_turn_runs_the_draft_unreviewed(gated, monkeypatch):
+def test_a_host_surface_turn_runs_the_draft_unreviewed(gated, monkeypatch, remote_decides_emma_and_joke):
     _split_into(monkeypatch, [EMMA, JOKE])
     gated.script.steps = _finish() + _finish()
     surface = Surface(kind="host", verified=True, uid="user-1")
@@ -238,10 +271,7 @@ def test_a_host_surface_turn_runs_the_draft_unreviewed(gated, monkeypatch):
 # ----------------------------------------------------------------------
 
 
-def test_with_no_jev_key_jev_is_never_called_and_the_draft_is_still_built(gated, monkeypatch):
-    monkeypatch.delenv("JEV_API_KEY", raising=False)
-    monkeypatch.setattr(fastworkflow, "_env_vars",
-                        {name: value for name, value in fastworkflow._env_vars.items() if name != "JEV_API_KEY"})
+def test_with_no_jev_key_jev_is_never_called_and_the_draft_is_still_built(gated, monkeypatch, no_planner_key):
     calls: list = []
 
     def refuse_jev(*args, **kwargs):
@@ -249,14 +279,16 @@ def test_with_no_jev_key_jev_is_never_called_and_the_draft_is_still_built(gated,
         raise AssertionError("Jev was called without JEV_API_KEY")
 
     monkeypatch.setattr(workflow_agent, "TypeSafe", refuse_jev)
-    workflow_agent._planning_command_matcher.cache_clear()
-    try:
-        assert workflow_agent._jev_lm() is None
-        draft = review_proposals.draft_round1_proposal(gated.wf, [EMMA, JOKE])
-    finally:
-        workflow_agent._planning_command_matcher.cache_clear()
+    assert workflow_agent._jev_lm() is None
+    draft = review_proposals.draft_round1_proposal(gated.wf, [EMMA, JOKE])
     assert calls == []
-    assert draft.items[0].means.name == "Library/book_by_title"
+    # The local model is confident of a PLANNING command here; with no key that is an ambiguity to ask about before
+    # the review (bd fix-o1lg.2), so the draft does not bind it. The decision still names it first.
+    assert draft.items[0].means.kind == "from_scratch"
+    from fastworkflow._workflows.plan_metadata_extraction import resolution
+
+    intent = resolution.part_intent(gated.wf, EMMA)
+    assert intent.outcome == resolution.AMBIGUOUS and intent.ambiguous[0] == "Library/book_by_title"
 
 
 # ----------------------------------------------------------------------
@@ -281,7 +313,7 @@ def _recording_split(monkeypatch, gated):
         conversations.append(kwargs.get("conversation", ""))
         return [user_query]
 
-    monkeypatch.setattr("fastworkflow.workflow_agent.split_into_subtasks", split)
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.split_into_subtasks", split)
     return seen
 
 
@@ -313,3 +345,22 @@ def test_a_drafted_goal_never_holds_the_conversation_summary(gated, monkeypatch)
     assert out.status is TurnStatus.COMPLETED
     assert seen == [JOKE] and conversations == ["conversation summary: startup -> The library is open."]
     assert [item.goal for item in gated.ctx._turn_subtask_plan.items] == [JOKE]
+
+
+# ----------------------------------------------------------------------
+# fix-jj3k: the fast path is bound in agent mode too
+# ----------------------------------------------------------------------
+
+
+def test_a_fast_path_command_is_bound_to_its_part_in_agent_mode(gated, monkeypatch):
+    """A single execution command the local model is confident of is drafted as a one-item plan and run bound, as in
+    no-agent mode (``_run_plain_means``: the listing is narrowed to the command), not left to the agent. The review is
+    still skipped."""
+    _split_into(monkeypatch, [FIND])
+    gated.script.steps = _finish()
+    out = gated.ctx.process_turn(FIND)
+    assert out.status is TurnStatus.COMPLETED
+    assert gated.store.records == []
+    assert _marker(gated) == "fast_path"
+    (item,) = gated.ctx._turn_subtask_plan.items
+    assert (item.means.kind, item.means.name) == ("plain", "Library/find_member")

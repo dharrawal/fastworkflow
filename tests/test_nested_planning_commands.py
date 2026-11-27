@@ -18,12 +18,12 @@ import pytest
 from pydantic import BaseModel, Field
 
 import fastworkflow
-import fastworkflow.workflow_agent as workflow_agent
-from fastworkflow import planning_commands, planning_phases
-from fastworkflow import plan_frame as plan_frame_module
-from fastworkflow import tracing
-from fastworkflow.command_executor import CommandExecutor, CommandNotFoundError
-from fastworkflow.context_identity import context_class_for
+import fastworkflow.agent.workflow_agent as workflow_agent
+from fastworkflow.planning import planning_commands, planning_phases
+from fastworkflow.planning import plan_frame as plan_frame_module
+from fastworkflow.observability import tracing
+from fastworkflow.engine.command_executor import CommandExecutor, CommandNotFoundError
+from fastworkflow.core.context_identity import context_class_for
 from fastworkflow.planning import run
 from fastworkflow.planning import phase
 from fastworkflow.observation_offloading.facts import MissingFactError, workflow_signatures
@@ -33,14 +33,14 @@ from fastworkflow.observation_offloading.state import (
     observability_db_path,
     scope_for_host,
 )
-from fastworkflow.plan_frame import TURN_MAX_STEPS_ENV, PlanFrame, runs_outside_ranges, turn_max_steps
-from fastworkflow.typed_phase_facts import fill_typed_phase_output
+from fastworkflow.planning.plan_frame import TURN_MAX_STEPS_ENV, PlanFrame, runs_outside_ranges, turn_max_steps
+from fastworkflow.planning.typed_phase_facts import fill_typed_phase_output
 from fastworkflow.examples.library._commands.Library.book_by_title import Signature as BookByTitle
 from fastworkflow.examples.library._commands.Library.find_book import Signature as FindBook
-from fastworkflow.planning_commands import PlanningCommandInputError
-from fastworkflow.state_serialization import validate_state
-from fastworkflow.turn import TurnStatus
-from fastworkflow.workflow_execution_context import (
+from fastworkflow.planning.planning_commands import PlanningCommandInputError
+from fastworkflow.session.state_serialization import validate_state
+from fastworkflow.core.turn import TurnStatus
+from fastworkflow.engine.workflow_execution_context import (
     AWAITING_ANSWER_REFUSAL_MESSAGE,
     NESTED_BUDGET_SPENT_MESSAGE,
 )
@@ -63,7 +63,7 @@ CHILD_ALIAS = "/book_by_title#1"
 NESTED_COMMANDS = (
     "_commands/Library/book_by_title.py",
     "_commands/Library/book_loans.py",
-    "_commands/Library/_wording.py",
+    "_commands/_shared/__init__.py", "_commands/_shared/wording.py",
 )
 BOOK_LOANS_ANSWER = "Dune is on loan to 2 borrowers (Ann Lee, Raj Patel)."
 BOOK_BY_TITLE_RESPONSE = "Dune is by Frank Herbert; the library owns 3 copies."
@@ -108,8 +108,8 @@ def _run_book_loans(state, title: str = "Dune"):
 
 
 def _phase_spans(state, planning_command: str):
-    return [s for s in state.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
-            if s.attributes.get("skill") == planning_command]
+    return [s for s in state.sink.named(tracing.SPAN_PHASE)
+            if s.attributes.get("command") == planning_command]
 
 
 def test_a_agent_step_runs_book_loans_and_its_nested_book_by_title(nested_env):
@@ -124,7 +124,7 @@ def test_a_agent_step_runs_book_loans_and_its_nested_book_by_title(nested_env):
     assert child_output.command_response.output.found is True
     assert child_output.command_response.output.book_uid == "b1"
     # The child's two phases ran in its own frame; the parent's phases ran in the turn frame.
-    child_phases = [s.attributes["phase"] for s in nested_env.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
+    child_phases = [s.attributes["phase"] for s in nested_env.sink.named(tracing.SPAN_PHASE)
                     if s.attributes.get(tracing.ATTR_FRAME_ALIAS) == CHILD_ALIAS]
     assert child_phases == ["find", "book"]
     book_span, loans_span = _phase_spans(nested_env, BOOK_LOANS)
@@ -234,10 +234,10 @@ def test_f_nested_spans_name_their_frame_and_the_root_names_none(nested_env):
     closed_root = roots[-1]
     assert closed_root.end_ns is not None
     assert {r.attributes[tracing.ATTR_FRAME_ALIAS] for r in roots} == {""}
-    child = [s for s in nested_env.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
+    child = [s for s in nested_env.sink.named(tracing.SPAN_PHASE)
              if s.attributes.get(tracing.ATTR_FRAME_ALIAS) == CHILD_ALIAS]
     assert len(child) == 2
-    assert all(s.attributes["skill"] == BOOK_BY_TITLE for s in child)
+    assert all(s.attributes["command"] == BOOK_BY_TITLE for s in child)
 
 
 def test_g_a_bad_turn_budget_warns_once_however_often_it_is_read(
@@ -315,7 +315,7 @@ def test_h_the_budget_stops_a_call_partway_and_the_turn_goes_on(budget_env, no_t
     refused = [o for o in ctx._turn_outputs if o.command_name == BOOK_BY_TITLE]
     assert [(o.success, o.command_response.response) for o in refused] == [
         (False, NESTED_BUDGET_SPENT_MESSAGE)]
-    assert not [s for s in state.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
+    assert not [s for s in state.sink.named(tracing.SPAN_PHASE)
                 if s.attributes.get(tracing.ATTR_FRAME_ALIAS) == "/book_by_title#1"]
     assert len(ctx._frame_stack()) == 1
 
@@ -433,12 +433,13 @@ def test_i_a_guard_refusal_is_the_invalid_value_response_and_pushes_no_frame(
         assert [(o.success, o.command_response.response) for o in refused] == [(
             False,
             f"PARAMETER EXTRACTION ERROR FOR COMMAND '{BOOK_BY_TITLE}'\n"
-            "title='Foundation' is not written in the request",
+            "I can't run book by title yet: the title 'Foundation' is not in your request. "   # ask.refused_clause
+            "Which title should I use?",
         )]
         # The guard came before the hook and the Input: neither ran, and no frame was pushed.
         assert state.wf.context.get(HOOK_CALLS) is None
         assert entered == []
-        assert not [s for s in state.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
+        assert not [s for s in state.sink.named(tracing.SPAN_PHASE)
                     if s.attributes.get(tracing.ATTR_FRAME_ALIAS) == CHILD_ALIAS]
         assert len(state.ctx._frame_stack()) == 1
     finally:
@@ -510,8 +511,8 @@ def test_l_an_input_validator_reading_the_request_refuses_on_the_nested_path(
         assert outputs[0].success is False
         assert outputs[0].command_response.response == (
             f"PARAMETER EXTRACTION ERROR FOR COMMAND '{BOOK_BY_TITLE}'\n"
-            f"the arguments break a rule of {BOOK_BY_TITLE}: "
-            "title: the library does not look up withdrawn books")
+            "I can't run book by title yet: the library does not look up withdrawn books. "
+            "Which title should I use?")
         assert outputs[1].success is True
         # Only the accepted step entered the planning path.
         assert entered == [(BOOK_BY_TITLE, "book_by_title title=Dune")]
@@ -674,7 +675,7 @@ def test_r_an_ask_user_in_a_nested_call_suspends_the_whole_turn(open_find_env):
     assert suspended.status == TurnStatus.AWAITING_USER
     assert suspended.answer == "Which Dune?"
     assert ctx.awaiting_user
-    assert ctx._pending_clarification_request == "Which Dune?"
+    assert ctx.waiting.question == "Which Dune?"
     # The child is on top; the parent planning call and the turn frame stay under it, each suspended.
     frames = ctx._frame_stack()
     assert [f.command_name for f in frames] == [None, BOOK_LOANS, BOOK_BY_TITLE]
@@ -706,7 +707,7 @@ def test_s_a_suspended_nested_stack_restores_on_a_fresh_context(
         assert [f.alias for f in frames] == expected_aliases
         assert [f.agent.export_suspended() for f in frames[1:]] == expected_suspensions
         assert restored.ctx.awaiting_user
-        assert restored.ctx._pending_clarification_request == "Which Dune?"
+        assert restored.ctx.waiting.question == "Which Dune?"
         # The restored nested agents count their steps against the turn's budget, as they did.
         assert all(f.agent.on_iteration is not None for f in frames[1:])
 
@@ -778,7 +779,7 @@ def test_u_a_direct_action_is_refused_while_a_question_waits_and_the_turn_is_kep
     assert all(a is b for a, b in zip(ctx._turn_outputs, outputs))
     assert ctx._turn_frame().agent.export_suspended() == suspended_turn
     assert ctx.awaiting_user
-    assert ctx._pending_clarification_request == "Which Dune?"
+    assert ctx.waiting.question == "Which Dune?"
 
     turn = ctx.process_action_turn(action)
 
@@ -809,7 +810,7 @@ def test_v_a_nested_call_that_asks_twice_stays_suspended_until_its_last_answer(o
     assert second.status == TurnStatus.AWAITING_USER
     assert second.answer == "Which edition?"
     assert ctx.awaiting_user
-    assert ctx._pending_clarification_request == "Which edition?"
+    assert ctx.waiting.question == "Which edition?"
     assert [f.command_name for f in ctx._frame_stack()] == [None, BOOK_LOANS, BOOK_BY_TITLE]
 
     result = ctx.process_turn("the first edition")
@@ -1017,7 +1018,7 @@ def test_ad_facts_from_archive_leaves_out_a_child_range_when_given_it(nested_env
     store = archive_for_path(observability_db_path(ctx))
     scope = scope_for_host(ctx)
     # The child's own steps are its find (1) and its open (2), as its phase spans name them.
-    child_steps = [s.attributes["first_step"] for s in nested_env.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
+    child_steps = [s.attributes["first_step"] for s in nested_env.sink.named(tracing.SPAN_PHASE)
                    if s.attributes.get(tracing.ATTR_FRAME_ALIAS) == CHILD_ALIAS]
     ranges = [[min(child_steps), max(child_steps)]]
 
@@ -1115,7 +1116,7 @@ def open_by_uid_env(tmp_path, initialized_fastworkflow, monkeypatch):
 
 def _item_opened(state):
     """open_by_uid's Output, as the workflow loaded it: the model a fan-out phase fills."""
-    from fastworkflow import planning_commands
+    from fastworkflow.planning import planning_commands
 
     # A planning command is not routed: its Signature is in the field-source resolution.
     signatures = planning_commands.resolve_field_sources(state.wf.folderpath).signatures
@@ -1131,8 +1132,10 @@ def test_ae_a_fan_out_item_whose_sub_plan_calls_a_planning_command_is_bound_to_i
         def find(self, input) -> FoundBooks:
             return [run("find_book", query=input.title)]
 
-        @phase(over="find.book_uids", output=item_opened)
-        def opened(self, uid):
+        Opened = item_opened  # the return annotation below is read in the class's namespace
+
+        @phase(over="find.book_uids")
+        def opened(self, uid) -> Opened:
             return [run("open_by_uid", book_uid=uid)]
 
         def __result__(self, input, find, opened):
@@ -1219,8 +1222,10 @@ def test_ak_two_fan_out_items_each_open_their_record_in_place(open_by_uid_env, m
         def find(self, input) -> FoundBooks:
             return [run("find_book", query=input.title)]
 
-        @phase(over="find.book_uids", output=item_opened)
-        def opened(self, uid):
+        Opened = item_opened  # the return annotation below is read in the class's namespace
+
+        @phase(over="find.book_uids")
+        def opened(self, uid) -> Opened:
             return [run("open_by_uid", book_uid=uid)]
 
         def __result__(self, input, find, opened):
@@ -1362,7 +1367,8 @@ class PlanGenerator:
             tmp_path,
             extra_planning_commands={"Library/plan_calls_book": calls_child,
                           "Library/plan_described_book": described},
-            extra_commands=(BOOK_BY_TITLE_FILE, "_commands/Library/_wording.py"),
+            extra_commands=(BOOK_BY_TITLE_FILE, "_commands/_shared/__init__.py",
+                            "_commands/_shared/wording.py"),
         )
     res = planning_commands.resolve_field_sources(folder)
 
@@ -1529,7 +1535,7 @@ def test_real_library_loads_with_no_error_and_book_loans_runs_book_by_title_nest
     assert pushed == [(BOOK_BY_TITLE, CHILD_ALIAS)]
     assert entered == [(BOOK_BY_TITLE, "book_by_title title=Dune")]
     # book_by_title's own phases ran inside that frame; its steps were run by code.
-    child_phases = [s.attributes["phase"] for s in real_library_env.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
+    child_phases = [s.attributes["phase"] for s in real_library_env.sink.named(tracing.SPAN_PHASE)
                     if s.attributes.get(tracing.ATTR_FRAME_ALIAS) == CHILD_ALIAS]
     assert child_phases == ["find", "book"]
     book_span, loans_span = _phase_spans(real_library_env, BOOK_LOANS)
@@ -1561,8 +1567,8 @@ import pytest
 
 import fastworkflow
 import tests.test_nested_planning_commands as nested
-from fastworkflow.command_routing import RoutingRegistry
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.core.command_routing import RoutingRegistry
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 mode, workdir, blob_path = sys.argv[1], Path(sys.argv[2]), Path(sys.argv[3])
 with pytest.MonkeyPatch.context() as mp:
@@ -1585,7 +1591,7 @@ with pytest.MonkeyPatch.context() as mp:
             ctx.apply_serialized_state(json.loads(blob_path.read_text()))
             report = {"command_names": [f.command_name for f in ctx._frame_stack()],
                       "awaiting": ctx.awaiting_user,
-                      "question": ctx._pending_clarification_request}
+                      "question": ctx.waiting.question}
             state.nested.run("find_book query=Dune")
             state.nested.finish()
             state.model.finish()

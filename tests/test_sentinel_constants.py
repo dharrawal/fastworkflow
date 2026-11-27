@@ -1,6 +1,6 @@
 """The framework sentinels are module constants, not env settings.
 
-NOT_FOUND, INVALID and the error-message templates are fixed in fastworkflow.utils.signatures.
+NOT_FOUND, INVALID and the error-message templates are fixed in fastworkflow.parameters.signatures.
 An env file that still sets one of their old keys has no effect, and the shipped env template
 no longer carries them.
 """
@@ -8,7 +8,7 @@ import os
 import re
 
 import fastworkflow
-from fastworkflow.utils import signatures
+from fastworkflow.parameters import signatures
 from fastworkflow._workflows.command_metadata_extraction import parameter_extraction
 
 ENV_TEMPLATE = os.path.join(os.path.dirname(fastworkflow.__file__), "examples", "fastworkflow.env")

@@ -3,9 +3,9 @@ from pathlib import Path
 from pydantic import BaseModel
 import os
 
-from fastworkflow.command_routing import RoutingRegistry, RoutingDefinition, ModuleType
-from fastworkflow.command_directory import CommandDirectory
-from fastworkflow.command_context_model import CommandContextModel
+from fastworkflow.core.command_routing import RoutingRegistry, RoutingDefinition, ModuleType
+from fastworkflow.core.command_directory import CommandDirectory
+from fastworkflow.core.command_context_model import CommandContextModel
 
 
 @pytest.fixture(scope="module")

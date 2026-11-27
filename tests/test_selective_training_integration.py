@@ -32,15 +32,13 @@ import pytest
 from dotenv import dotenv_values
 
 import fastworkflow
-from fastworkflow.command_context_model import CommandContextModel
-from fastworkflow.command_directory import CommandDirectory
-from fastworkflow.command_routing import RoutingDefinition, RoutingRegistry
-from fastworkflow.model_pipeline_training import (
-    CommandRouter,
-    TrainingDataError,
-    get_artifact_path,
-)
-from fastworkflow.nlu_labels import WILDCARD_LABEL
+from fastworkflow.core.command_context_model import CommandContextModel
+from fastworkflow.core.command_directory import CommandDirectory
+from fastworkflow.core.command_routing import RoutingDefinition, RoutingRegistry
+from tests.context_declarations import declare_inherits
+from fastworkflow.intent.router import CommandRouter
+from fastworkflow.train.model_pipeline_training import TrainingDataError, get_artifact_path
+from fastworkflow.intent.nlu_labels import WILDCARD_LABEL
 from fastworkflow.train import (
     artifact_versioning,
     determinism,
@@ -107,6 +105,10 @@ def _resolve_env_vars() -> dict:
         val = os.environ.get(key)
         if val and "<" not in val:
             env_vars[key] = val
+    # This file's real training runs are about the per-context trainer (its model folders, its
+    # reserved classes, its selective retraining). The default layout is another trainer, so the
+    # layout is pinned by name.
+    env_vars["INTENT_MODEL_LAYOUT"] = "per_context"
     return env_vars
 
 
@@ -143,6 +145,8 @@ from ...application.user import PremiumUser
 
 
 class Context:
+    parents = ["PremiumUser"]
+
     @classmethod
     def get_parent(cls, record: PremiumSession) -> PremiumUser:
         return record.user
@@ -373,7 +377,7 @@ def _preseed_fixed_utterance_cache(
     for command_name in sorted(commands):
         if command_name.split("/")[-1] == "wildcard":
             continue
-        # Framework machinery (fastworkflow/_framework_commands, e.g. review_plan) is not trained, so it
+        # Framework machinery (fastworkflow/review/commands, e.g. review_plan) is not trained, so it
         # has no provenance record (train.training_report: "not trained, reported or gated").
         framework_meta = cmd_dir.map_command_2_metadata.get(command_name)
         if framework_meta is not None and getattr(framework_meta, "framework", None):
@@ -387,7 +391,6 @@ def _preseed_fixed_utterance_cache(
             num_personas,
             utterances_per_persona,
             personas_per_batch,
-            model,
         )
         assert cache.store(fingerprint, seed, corpus)
         baseline_corpora[command_name] = corpus
@@ -410,7 +413,6 @@ def _preseed_fixed_utterance_cache(
         num_personas,
         utterances_per_persona,
         personas_per_batch,
-        model,
     )
     assert cache.store(changed_fingerprint, seed, changed_corpus)
     return baseline_corpora, changed_corpus
@@ -557,16 +559,15 @@ def test_a_command_change_under_chatroom_retrains_only_its_own_heads(baseline):
 
 
 def test_a_context_inheritance_model_edit_alone_retrains_the_deriving_context(baseline):
-    """No command file changes here at all -- only ``context_inheritance_model.json``.
+    """No command file changes here at all -- only ``PremiumUser``'s ``inherits`` declaration.
 
-    Removing ``PremiumUser``'s ``base`` entry deletes ``User``'s commands from
-    PremiumUser's label space. Every command file on disk is byte-identical, so the
-    fingerprint diff sees nothing; only the recorded label space does.
+    Removing ``PremiumUser``'s ``inherits`` deletes ``User``'s commands from
+    PremiumUser's label space. Every command file on disk is byte-identical (a context
+    class file is no command file), so the fingerprint diff sees nothing; only the
+    recorded label space does.
     """
     workflow_path, version_id = baseline
-    model_path = os.path.join(
-        workflow_path, "_commands", "context_inheritance_model.json")
-    open(model_path, "w").write(json.dumps({}))
+    declare_inherits(workflow_path, {"PremiumUser": []})
     _rebuild(workflow_path)
 
     plan = _plan(workflow_path, version_id)

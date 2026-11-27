@@ -9,7 +9,7 @@ class Signature:
     """Find library members by name."""
 
     class Input(BaseModel):
-        query: str = Field(description="words of the member's name")
+        query: str = Field(description="words of the member's name", json_schema_extra={"copied_from_command_text": True})
 
     class Output(BaseModel):
         member_uids: list[str] = Field(description="the uid of each member found, in row order")

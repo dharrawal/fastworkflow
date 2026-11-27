@@ -3,10 +3,11 @@
 Two checkers read an argument against the request:
 
 - **planning**: ``planning_commands.checked_arguments`` (``check_arguments``, then ``_validate_arguments``:
-  the hook, ``check_input``, ``_check_roles``), on the values ``extracted_arguments`` hands the typed call
+  the hook, ``check_input``), on the values ``extracted_arguments`` hands the typed call
   (the extractor's "not given" text read as no value, ``_given_or_none``);
 - **execution**: ``argument_checks.check_extracted_values`` and ``ExtractionCheck.apply``, on the
-  ``model_construct`` instance the LLM extractor gives an execution command (``ParameterExtraction._llm_extract``).
+  ``model_construct`` instance the LLM extractor gives an execution command (``ParameterExtraction._llm_extract``),
+  then, for a marked field, the one guard of the validation stage (``check_plan`` through ``option_command``).
 
 Every case of one table goes through both, on the same pydantic ``Input`` (a real planning command of
 ``tests/planning_tutorial_workflow``, or one of the small commands below, written into the temporary copy
@@ -16,7 +17,7 @@ verdict: accepted as given, accepted as another value (respelled, or replaced), 
 The verdicts must be equal, except for a case that names one of the ``DIFFERENCES`` below: such a case must
 show exactly the difference its entry describes (so the list stays truthful), and each entry must have a case.
 A new disagreement fails the test with both verdicts. The fix is then one of two, chosen on purpose: align
-the checkers (move the rule into the shared module, ``fastworkflow/utils/argument_checks.py``, with both paths
+the checkers (move the rule into the shared module, ``fastworkflow/parameters/argument_checks.py``, with both paths
 calling it, and its gate measured: fix-48np.2's notes), or add a documented entry to ``DIFFERENCES``, by an
 explicit decision, with the measurement for the path whose behaviour differs.
 
@@ -41,10 +42,12 @@ import pytest
 from pydantic import BaseModel, Field
 
 import fastworkflow
-from fastworkflow import planning_commands as pc
-from fastworkflow import workflow_agent
-from fastworkflow.utils import argument_checks
-from fastworkflow.utils.signatures import INVALID_INT_VALUE, NOT_FOUND
+from fastworkflow.planning import planning_commands as pc
+from fastworkflow.parameters import check
+from fastworkflow.parameters import check as one_guard
+from fastworkflow.agent import workflow_agent
+from fastworkflow.parameters import argument_checks
+from fastworkflow.parameters.signatures import INVALID_INT_VALUE, NOT_FOUND
 from tests.test_planning_command_argument_screens import TRANSFER_LOAN
 from tests.test_typed_call_strictness import ACCOUNTS, CORPUS
 
@@ -105,7 +108,7 @@ class PlanGenerator:
     def steps(self, input):
         return [f"find the member {input.name}", f"label the shelf {input.code}"]
 ''',
-    # a value converted on purpose (in_request False), with an example
+    # a value converted on purpose (no option: the extractor's value stands), with an example
     "drift_converted": '''
 from pydantic import BaseModel, Field
 
@@ -115,8 +118,7 @@ class Signature:
 
     class Input(BaseModel):
         name: str = Field(default="", description="a person's name", json_schema_extra={"copied_from_command_text": True})
-        due: str = Field(default="", description="the due date, YYYY-MM-DD", examples=["2024-05-20"],
-                         json_schema_extra={"converted_from_command_text": True})
+        due: str = Field(default="", description="the due date, YYYY-MM-DD", examples=["2024-05-20"])
 
 
 class PlanGenerator:
@@ -153,7 +155,6 @@ class Signature:
 
     class Input(BaseModel):
         kind: Literal["book", "member", "branch"] = Field(default="book", description="the kind of record")
-        kind_prose: str = Field(default="book", description="the kind of record. One of: book, member, branch")
 
 
 class PlanGenerator:
@@ -202,12 +203,10 @@ class PlanGenerator:
 
 
 class ChoiceText(BaseModel):
-    """The execution twin of ``drift_choice.kind``: the same choice declared as an execution command's ``str``
-    allowed values (``json_schema_extra`` enum, which a planning command's loader refuses: its choice is a
-    ``Literal``)."""
+    """The execution twin of ``drift_choice.kind``: the same ``Literal`` choice, on an execution command's ``Input``
+    (the one spelling of allowed values)."""
 
-    kind_text: str = Field(default="book", description="the kind of record",
-                           json_schema_extra={"enum": ["book", "member", "branch"]})
+    kind_text: Literal["book", "member", "branch"] = Field(default="book", description="the kind of record")
 
 
 # ---------------------------------------------------------------- verdicts
@@ -247,50 +246,12 @@ def _replaced(verdict) -> bool:
 #: The deliberate differences (fix-48np.2, owner decision 2026-11-06). An entry is removed, or one added, only by
 #: an explicit decision, with the measurement for the path whose behaviour changes (fix-48np.2's notes, step 4).
 DIFFERENCES: dict[str, Difference] = {
-    "int-not-written": Difference(
-        what="An int the request does not write, when it writes exactly one number (or several, one of them the "
-             "field's default): planning replaces it with that number; execution refuses it (a value given) or "
-             "leaves it not given (a value the extractor did not give).",
-        why="On an execution command a replaced number is a silent wrong change to a command that acts; a refusal "
-            "asks the extractor once more, then the user.",
-        measured="fix-qjf4 (the app's extraction replay): replacing made wrong changes, so the execution rule "
-                 "refuses; the planning rule is gated by the strictness corpus.",
-        shows=lambda planning, execution: _replaced(planning) and execution in (REFUSED, NOT_GIVEN)),
-    "absent-int": Difference(
-        what="An int the extractor leaves out (None, its not-given number, or the default 0): planning refuses it "
-             "when the request writes two or more numbers, none of them the default; execution never refuses an "
-             "absent value. (An Optional[int] cannot carry the planning in_request option: option_params refuses "
-             "it, so the planning side of this row is an in_request int with a plain default.)",
-        why="An absent value is not a value the extractor gave; refusing it refuses a correct call.",
-        measured="22 of 974 Haiku calls (2.3%) refused by the planning rule on an absent Optional[int] in the "
-                 "app's extraction replay (fix-qjf4, tests/test_extraction_argument_checks.py).",
-        shows=lambda planning, execution: planning == REFUSED and execution == NOT_GIVEN),
-    "exemptions": Difference(
-        what="Which fields are read against the request: planning checks a str field only when it carries a "
-             "check option (in_request, opt in per field, design 2.46); execution checks every str field unless "
-             "it is exempt (json_schema_extra in_request False, or a declared pattern: opt out), and gives an "
-             "exempt field no description-example check.",
-        why="A planning command's author declares its checks; an execution command's Input predates the options, "
-            "so its checks are on by default and a converted value is exempted by the marker or a pattern.",
-        measured="0 refused user-stated gold values on tau-bench retail (153), airline (105) and the retail set "
-                 "(105); the airline JFK / 2024-05-20 false refusals motivated no example check on exempt fields.",
-        shows=lambda planning, execution: planning == ACCEPTED and execution == REFUSED),
-    "which-values": Difference(
-        what="Which values are checked: execution checks only values the LLM extractor produced, and reads a value "
-             "equal to the field's declared default as not given (the extractor is told to answer the default for "
-             "a value the request leaves out); planning checks every argument of the call, a default included.",
-        why="On the execution path a default is indistinguishable from \"not given\"; refusing it refuses a correct "
-            "call. (Values from other extraction methods, stored parameters, the XML form or a direct action, "
-            "never reach check_extracted_values: ParameterExtraction._llm_extract is its only caller.)",
-        measured="Execution gate: 0 of 1,189 values refused on passing Haiku runs, 32 of 107 wrong Nemotron values "
-                 "caught (fix-qjf4 replay).",
-        shows=lambda planning, execution: planning != NOT_GIVEN and execution == NOT_GIVEN),
     "planning-only": Difference(
-        what="Planning-only concepts, not imposed on execution commands: subjects (the in_request \"subject\" "
-             "option, and a pronoun read as the request's one subject or refused), identifier expansion (a "
-             "fragment of an identifier the request writes becomes the whole identifier, or is refused), kind "
-             "selectors and the vocabulary word screens (a kind, field or command word of the workflow), verify "
-             "verdicts, and roles (two inputs given one value; an optional str repeating another).",
+        what="Planning-only concepts on an UNMARKED field, not imposed on execution commands by this checker: the "
+             "vocabulary word screens of check_plan (a kind, field or command word of the workflow; on an execution "
+             "command they run in validate_parameters) and verify verdicts. A MARKED field of either kind has one "
+             "guard, check_plan (subjects, identifier expansion, the duplicate rule), so its verdicts agree "
+             "(bd fix-ftdl.6.3).",
         why="They read the workflow (its vocabulary, identifiers, subjects) or a classifier and decide what a "
             "planning call means; on an execution command they stay opt-in per field (the option fields "
             "validate_parameters checks with check_arguments itself), not checks of every extracted value.",
@@ -324,29 +285,29 @@ CORPUS_FIELDS: dict[str, tuple[str, str | None]] = {
     "title-case": ("title", None),
     "person": ("author", None),
     "two-roles": ("member", None),
-    "pronoun-one-subject": ("author", "planning-only"),        # "it" is the request's one subject
+    "pronoun-one-subject": ("author", None),                   # "it" is the request's one subject (a marked field)
     "enum": ("kind", None),
     "bools": ("title", None),
-    "whole-identifier": ("title", "planning-only"),           # 4421 -> acct_4421
+    "whole-identifier": ("title", None),                      # 4421 -> acct_4421, by the one guard of a marked field
     "optional-placeholder": ("note", None),
     "braces": ("author", None),
     "angle": ("author", None),
     "name-number": ("author", None),
     "unspecified": ("author", None),
     "invented-example": ("author", None),
-    "that-one": ("author", "planning-only"),                  # a pronoun, no single subject
-    "it": ("author", "planning-only"),
-    "own-name": ("author", "planning-only"),                  # vocabulary words
-    "field-name": ("query", "planning-only"),
+    "that-one": ("author", None),                             # a pronoun, no single subject (a marked field)
+    "it": ("author", None),
+    "own-name": ("author", None),                             # vocabulary words (a marked field)
+    "field-name": ("query", None),
     "command-word": ("member", "planning-only"),
     "declared-choice": ("branch", "planning-only"),
     "kind-word": ("query", "planning-only"),
     "invented-subject": ("author", None),
     "not-in-request": ("title", None),
     "deictic": ("title", None),
-    "identifier-fragment": ("title", "planning-only"),
-    "role-conflict": ("branch", "planning-only"),             # branch is the input refused
-    "role-conflict-unwritten": ("member", "planning-only"),
+    "identifier-fragment": ("title", None),
+    "role-conflict": ("branch", None),                        # unmarked fields: no duplicate rule on either kind
+    "role-conflict-unwritten": ("member", None),
     "not-an-enum-value": ("kind", None),
     "not-given-text": ("title", None),
     "unknown-marker": ("title", None),
@@ -366,12 +327,11 @@ EXECUTION_CASES = [
     Case("request-spelling", _EXEC, "drift_code", "find the member Ann Lee", {"name": "ann lee."}, "name"),
     Case("dash-variant", _EXEC, "drift_code", "find the member Ann Lee–Smith", {"name": "Ann Lee-Smith"}, "name"),
     Case("int-written", _EXEC, "drift_rows", "list the loans of book b1 from row 10", {"count": 10}, "count"),
-    Case("int-not-written", _EXEC, "drift_rows", "list the loans of book b1 from row 10", {"count": 20}, "count",
-         difference="int-not-written"),
+    Case("int-not-written", _EXEC, "drift_rows", "list the loans of book b1 from row 10", {"count": 20}, "count"),
     Case("absent-int-two-numbers", _EXEC, "drift_rows", "list the loans of book b1 for the 2 or 3 members who asked",
-         {"count": None}, "count", difference="absent-int"),
+         {"count": None}, "count"),
     Case("absent-int-sentinel", _EXEC, "drift_rows", "list the loans of book b1 for the 2 or 3 members who asked",
-         {"count": INVALID_INT_VALUE}, "count", difference="absent-int"),
+         {"count": INVALID_INT_VALUE}, "count"),
     Case("choice-outside", _EXEC, "drift_choice", "cancel it, the price dropped elsewhere",
          {"kind": "price dropped elsewhere"}, "kind", execution_field="kind_text", execution_model=ChoiceText),
     Case("choice-declared-spelling", _EXEC, "drift_choice", "find the member Ann", {"kind": "Member"}, "kind",
@@ -394,14 +354,9 @@ EXECUTION_CASES = [
     Case("escaped-unknown-marker", _EXEC, "drift_converted", "find twenty two books",
          {"due": "&lt;UNKNOWN&gt;"}, "due"),
     Case("number-word", _EXEC, "drift_rows", "show eight rows", {"count": 8}, "count"),
-    Case("number-word-not-written", _EXEC, "drift_rows", "show eight rows", {"count": 9}, "count",
-         difference="int-not-written"),
+    Case("number-word-not-written", _EXEC, "drift_rows", "show eight rows", {"count": 9}, "count"),
     Case("digits-inside-a-str", _EXEC, "drift_rows", "find Doyle and Sons 1",
          {"title": "Doyle and Sons 1", "count": 7}, "count"),
-    # "One of:" in a description: one allowed-values rule on both paths (argument_checks.allowed_member, fix-48np.3)
-    Case("one-of-outside", _EXEC, "drift_choice", "find the magazine Ann", {"kind_prose": "magazine"}, "kind_prose"),
-    Case("one-of-spelling", _EXEC, "drift_choice", "find the member Ann", {"kind_prose": "Member"}, "kind_prose"),
-    Case("one-of-member", _EXEC, "drift_choice", "find a branch near Ann", {"kind_prose": "branch"}, "kind_prose"),
 ]
 
 _DIFF = "deliberate difference"
@@ -410,37 +365,33 @@ _DIFF = "deliberate difference"
 DIFFERENCE_CASES = [
     # int-not-written
     Case("absent-int-one-number", _DIFF, "drift_rows", "list the loans of book b1 from row 10", {"count": None},
-         "count", difference="int-not-written"),
-    Case("int-not-written-default-written", _DIFF, "drift_page", "show 5 or 8 loans", {"size": 6}, "size",
-         difference="int-not-written"),
+         "count"),
+    Case("int-not-written-default-written", _DIFF, "drift_page", "show 5 or 8 loans", {"size": 6}, "size"),
     Case("int-agree-no-number", _DIFF, "drift_rows", "list the loans of the book", {"count": 20}, "count"),
     Case("int-agree-two-numbers", _DIFF, "drift_rows", "show 2 or 3 rows", {"count": 7}, "count"),
     # absent-int
-    Case("absent-int-zero", _DIFF, "drift_rows", "show 2 or 3 rows", {"count": 0}, "count", difference="absent-int"),
+    Case("absent-int-zero", _DIFF, "drift_rows", "show 2 or 3 rows", {"count": 0}, "count"),
     Case("absent-int-no-number", _DIFF, "drift_rows", "show the loans", {"count": None}, "count"),
     # exemptions
     Case("unoptioned-str-not-written", _DIFF, "book_details", "who has Foundation on loan", {"title": "Dune Messiah"},
-         "title", difference="exemptions"),
+         "title"),
     Case("unoptioned-str-invented", _DIFF, "transfer_loan", "Move Ann Lee's loan to the Main branch",
-         {"member": "Ann Lee", "branch": "North"}, "branch", difference="exemptions"),
+         {"member": "Ann Lee", "branch": "North"}, "branch"),
     Case("unoptioned-str-written", _DIFF, "book_details", "give me the details of Dune", {"title": "Dune"}, "title"),
     Case("unoptioned-str-placeholder", _DIFF, "book_details", "give me the details of it", {"title": "<title>"},
          "title"),
     # which-values
-    Case("int-equal-to-default", _DIFF, "drift_page", "show 2 or 3 loans", {"size": 5}, "size",
-         difference="which-values"),
-    Case("int-equal-to-default-one-number", _DIFF, "drift_page", "show loans of 3 books", {"size": 5}, "size",
-         difference="which-values"),
+    Case("int-equal-to-default", _DIFF, "drift_page", "show 2 or 3 loans", {"size": 5}, "size"),
+    Case("int-equal-to-default-one-number", _DIFF, "drift_page", "show loans of 3 books", {"size": 5}, "size"),
     # planning-only
-    Case("subject-cut-short", _DIFF, "drift_subject", "Show the books of Ann Lee", {"name": "Ann"}, "name",
-         difference="planning-only"),
+    Case("subject-cut-short", _DIFF, "drift_subject", "Show the books of Ann Lee", {"name": "Ann"}, "name"),
     Case("subject-agree", _DIFF, "drift_subject", "Show the books of Ann Lee", {"name": "Ann Lee"}, "name"),
     Case("verify-verdict", _DIFF, "drift_verify", "is there a book named Lee", {"name": "Lee", "kind": "book"},
          "kind", verdicts={"kind": ("member", 0.9)}, difference="planning-only"),
     Case("verify-unsure-agree", _DIFF, "drift_verify", "is there a book named Lee", {"name": "Lee", "kind": "book"},
          "kind", verdicts={"kind": ("member", 0.3)}),
     Case("optional-repeats-another", _DIFF, "drift_code", "label the shelf of Ann Lee",
-         {"name": "Ann Lee", "code": "Ann Lee"}, "code", difference="planning-only"),
+         {"name": "Ann Lee", "code": "Ann Lee"}, "code"),   # the one duplicate rule of marked fields, both kinds
     Case("identifier-whole-agree", _DIFF, "book_by_title", "who has acct_4421", {"title": "acct_4421"}, "title"),
 ]
 
@@ -492,7 +443,7 @@ def planning_verdict(command: pc.PlanningCommandCommand, case: Case):
             return REFUSED
         return f"refused for another reason: {text}"
     given, value = raw[case.field], args[case.field]
-    if pc._empty(given) or (given == param.default and value == param.default):
+    if pc._empty(given) or not check.is_given_value(given, param.default):   # not given: the default stands
         return NOT_GIVEN if value == param.default else _as(value)
     if value == given:
         return ACCEPTED
@@ -512,8 +463,10 @@ def _literal_verdict(annotation, value):
 
 
 def execution_verdict(command: pc.PlanningCommandCommand, case: Case):
-    """The execution checker on the same ``Input``, as ``ParameterExtraction._llm_extract`` runs it: on the
-    extractor's ``model_construct`` instance, against the command text; ``apply`` writes the outcome."""
+    """The execution checker on the same ``Input``, as an execution command's extraction runs it: the check stage
+    (``argument_checks.check_extracted_values``, ``ParameterExtraction._llm_extract``) on the extractor's
+    ``model_construct`` instance, against the command text, ``apply`` writing its outcome; then, for a MARKED field, the
+    one guard the validation stage runs (``check_plan`` through ``option_command``, bd fix-ftdl.6.3)."""
     model = case.execution_model or command.input_model
     name = case.execution_field or case.field
     values = dict(case.values)
@@ -526,8 +479,16 @@ def execution_verdict(command: pc.PlanningCommandCommand, case: Case):
     check.apply(params)
     if name in check.refused:
         return REFUSED
-    if not argument_checks._given(info, given):
+    if not one_guard.is_given(info, given):
         return NOT_GIVEN
+    option = pc.option_command(model, command.name, ACCOUNTS)
+    if any(p.name == name for p in option.params):
+        raw = {p.name: pc._given_or_none(getattr(params, p.name)) for p in option.params}
+        try:
+            args, _ = pc.check_arguments(option, raw, case.request)
+        except pc.PlanningCommandCallError as refusal:
+            return REFUSED if str(refusal).startswith(f"{name}=") else f"refused for another reason: {refusal}"
+        return ACCEPTED if args[name] == given else _as(args[name])
     if get_origin(info.annotation) is Literal:
         return _literal_verdict(info.annotation, given)
     value = getattr(params, name)
@@ -549,7 +510,7 @@ def test_the_checkers_agree_except_on_a_listed_difference(commands, case):
     if case.difference is None:
         assert planning == execution, (
             f"The argument checkers disagree on {shown}. Align the checkers (one rule in "
-            f"fastworkflow/utils/argument_checks.py, both paths calling it), or, by an explicit decision, add a "
+            f"fastworkflow/parameters/argument_checks.py, both paths calling it), or, by an explicit decision, add a "
             f"documented entry to DIFFERENCES in this file and tag the case with it (fix-48np.2's notes).")
         return
     difference = DIFFERENCES[case.difference]

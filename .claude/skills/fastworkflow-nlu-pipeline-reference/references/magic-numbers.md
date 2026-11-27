@@ -12,18 +12,14 @@ executing path today; "dead" = present but unreached.
 |---|---|---|---|
 | 0.3 | Max normalized Levenshtein distance for fuzzy command-name match | `fastworkflow/_workflows/command_metadata_extraction/intent_detection.py:111` | live |
 | 0.4 | `find_best_matches` default distance threshold (overridden at both NLU call sites) | `fastworkflow/utils/fuzzy_match.py:19` | default, mostly shadowed |
-| 0.85 | Cosine-similarity threshold for the utterance/clarification embedding cache | `intent_detection.py:118` (positional arg) | live |
-| 0.90 | `cache_match` default threshold — no caller uses it | `fastworkflow/cache_matching.py:131` | dead default |
-| 256 | `lru_cache` size for DistilBERT embeddings | `cache_matching.py:18` | live |
-| 128 | Tokenizer max_length for embeddings | `cache_matching.py:46` | live |
-| 5 | `majority_vote_predictions` n_predictions | `intent_detection.py:304` | dead (call commented out :122) |
+| 5 | `majority_vote_predictions` n_predictions | `intent_detection.py` (removed; no longer in the file) | gone |
 | 10 | max_workers cap in majority vote | `intent_detection.py:332` | dead |
 
 ## Intent-model training
 
 | Value | Meaning | file:line | Status |
 |---|---|---|---|
-| 0.65 | `ModelPipeline` default confidence threshold (used during training eval before tuning; runtime loads the trained value) | `fastworkflow/model_pipeline_training.py:346,360,1059` | live (transitional) |
+| 0.65 | `ModelPipeline` default confidence threshold (used during training eval before tuning; runtime loads the trained value) | `fastworkflow/train/model_pipeline_training.py:346,360,1059` | live (transitional) |
 | 12 | TinyBERT fine-tuning epochs | `model_pipeline_training.py:957` | live |
 | 5 | DistilBERT fine-tuning epochs | `model_pipeline_training.py:1020` (re-set :1026) | live |
 | 1e-4 | TinyBERT AdamW learning rate ("slightly higher" per comment) | `model_pipeline_training.py:956` | live |
@@ -59,29 +55,29 @@ executing path today; "dead" = present but unreached.
 
 | Value | Meaning | file:line | Status |
 |---|---|---|---|
-| 3 | `BestOfN` attempts | `fastworkflow/utils/signatures.py:297` | live |
+| 3 | `BestOfN` attempts | `fastworkflow/parameters/signatures.py:297` | live |
 | 1.0 | `BestOfN` reward threshold (i.e., must pass anti-parroting) | `signatures.py:299` | live |
 | 0.2 | `DatabaseValidator.fuzzy_match` difflib cutoff default | `signatures.py:70,96` | live |
 | 0.7 | Levenshtein threshold inside `DatabaseValidator.fuzzy_match` (NOTE: passed to a DISTANCE-thresholded function — 0.7 is very permissive; smells like a similarity/distance confusion, unconfirmed intent) | `signatures.py:86` | live |
 | 3 | difflib `get_close_matches` n | `signatures.py:95` | live |
 | -sys.maxsize / -sys.float_info.max | int/float "invalid" sentinels | `signatures.py:31-32`, `parameter_extraction.py:16-17` | live |
-| 2 | agent-call attempts on `AdapterParseError` | `fastworkflow/workflow_execution_context.py:700` | live |
+| 2 | agent-call attempts on `AdapterParseError` | `fastworkflow/engine/workflow_execution_context.py:700` | live |
 | 2000 | max_tokens for refine LM | `fastworkflow/build/genai_postprocessor.py:239` | live |
 
 ## Adjacent (owned by other skills, listed for completeness)
 
 | Value | Meaning | file:line | Owner skill |
 |---|---|---|---|
-| 25 | agent max_iters | `fastworkflow/workflow_agent.py:387` | architecture-contract |
+| 25 | agent max_iters | `fastworkflow/agent/workflow_agent.py:387` | architecture-contract |
 | 5 | conversation-history entries used for query refinement | `workflow_execution_context.py:981-991` | architecture-contract |
-| 3 | invalid-tool-selection coaching bail-out | `fastworkflow/utils/react.py:219-236` | architecture-contract |
+| 3 | invalid-tool-selection coaching bail-out | `fastworkflow/agent/react.py:219-236` | architecture-contract |
 
 ## Re-verification one-liner
 
 ```bash
 grep -n "0.5129\|alpha = 0.15\|linspace\|threshold=0.3\|0.85\|threshold=0.90\|N=3\|max_retries = 2" \
-  fastworkflow/model_pipeline_training.py \
+  fastworkflow/train/model_pipeline_training.py \
   fastworkflow/_workflows/command_metadata_extraction/intent_detection.py \
-  fastworkflow/cache_matching.py fastworkflow/utils/signatures.py \
-  fastworkflow/workflow_execution_context.py
+  fastworkflow/parameters/signatures.py \
+  fastworkflow/engine/workflow_execution_context.py
 ```

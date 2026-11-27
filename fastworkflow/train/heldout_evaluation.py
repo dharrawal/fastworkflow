@@ -59,8 +59,8 @@ from pydantic import BaseModel, Field
 # The reserved-label vocabulary (R7.1). Standard-library only by design, so importing
 # it here costs nothing and keeps the escalation set from drifting between the trainer,
 # the runtime and this module.
-from fastworkflow.nlu_labels import ESCALATION_LABELS as _ESCALATION_LABELS
-from fastworkflow.nlu_labels import NON_ROUTABLE_LABELS
+from fastworkflow.intent.nlu_labels import ESCALATION_LABELS as _ESCALATION_LABELS
+from fastworkflow.intent.nlu_labels import NON_ROUTABLE_LABELS
 
 #: Rows a label needs to survive training. Owned here rather than in the trainer only
 #: because the import runs this way; ``split_training_data`` is what enforces it, and
@@ -228,6 +228,11 @@ class HeldoutReport(BaseModel):
     seed: int = DEFAULT_SEED
     heldout_personas: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
+    #: How the large tier's ambiguity threshold was calibrated: ``failed_rows`` (misclassified
+    #: test rows it had), ``rule`` (`failed_mean`, `correct_quantile` or
+    #: `floor_no_statistics`), the published ``threshold`` and whether the head has a wildcard
+    #: class. None for reports written before this field existed.
+    large_ambiguity: dict | None = None
 
 
 class BenchmarkCase(BaseModel):

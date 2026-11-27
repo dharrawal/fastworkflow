@@ -35,9 +35,12 @@ class Signature:
 
     class Input(BaseModel):
         member: str = Field(description="the member's name",
+                            examples=["Raj Patel", "Ann Lee", "Mia Chen"],
                             json_schema_extra={"copied_from_command_text": True})
         text: str = Field(description="what the note says, without the request around it "
                                       "(to note that someone called: 'someone called')",
+                          examples=["prefers email reminders", "card renewed",
+                                    "asked for a call back"],
                           json_schema_extra={"copied_from_command_text": True})
 
         @model_validator(mode="after")
@@ -76,8 +79,9 @@ class PlanGenerator:
   written in the command text but holds more than the note. When the extractor takes the whole
   instruction ("Note on Mia Chen's record that she asked for an extension"), the text names the
   member, which a note on her own record does not. The validator's message says what to fix, and
-  the call is filled once more with it (page 9). It is a plain `ValueError`, so it refuses with
-  no field named (page 9 has the difference from `fastworkflow.Refused`).
+  the call is not made (page 9). It is a plain `ValueError`, so it refuses with
+  no field named: nothing is filled again and nobody is asked. `fastworkflow.Refused(message, field="text")`
+  would name the field, and the call would then be filled once more with the message (page 9).
 - **Both fields are required** (no default). A field is a `str`, a `bool`, an `int` or a
   `Literal[...]` of text values.
 - **Each description says what this command takes, for a person.** `member` is "the
@@ -95,6 +99,10 @@ class PlanGenerator:
   check matches the extractor's value against names the command text already writes; it does
   not read the description. A model chooses among those names again only when the field also
   has `classifier_confirms` and `JEV_API_KEY` is set (page 9).
+- **Say what a value looks like, and give examples.** Where a value has a shape, the description says it ("the book's
+  uid, such as b1"), and `examples` carry 2 to 5 realistic values of the real length and shape. The extraction model is not
+  shown the examples; the question hint, the chat placeholder and the preview sample use them. The
+  `author-planning-commands` skill has the full rules (bounds, `pattern`, `Literal`).
 - **`def note(self, input)`**: a phase method that names `input` gets the checked arguments
   as an `Input` instance.
 - **`run("add_note", text=input.text)`** writes the step `add_note text=...`, with the value
@@ -103,7 +111,7 @@ class PlanGenerator:
   build a step with an f-string: `f"add_note text={input.text}"` would lose "(not phone)"
   from the end of "prefers email (not phone)", with no error.
 - **`run("open_member", named=input.member)`** writes the step that opens the row of the
-  `find_member` listing named that way: `open_member with the uid of the Raj Patel match`.
+  `find_member` listing named that way: `open_member with the uid of the "Raj Patel" match`.
   Code finds that row in the listing the call read, and opens it. Page 4 is about `named=`,
   and page 5 about the record it moves the workflow to.
 - **`"say whose record the note was added to"`** is a plain string, so it is the agent's to
@@ -119,11 +127,11 @@ note from the request around it. "Mia Chen to call back", written as the note fo
 refused, with this message:
 
 ```text
-validate_extracted_parameters: text is 'Mia Chen to call back', which holds the member's name: that is the request around the note; give only the words the note says
+text is 'Mia Chen to call back', which holds the member's name: that is the request around the note; give only the words the note says
 ```
 
 The name is the member of the record the note goes on, so the words of the note are "to call
-back", and the member's name in them reads as the request. The call is filled once more. Write the note without the name ("to call back"), which is what the record holds anyway,
+back", and the member's name in them reads as the request. The call is not made. Write the note without the name ("to call back"), which is what the record holds anyway,
 since the record is already Mia Chen's. The rule is not narrowed on this page: the cost is
 shown here, so the next author can judge it.
 
@@ -185,14 +193,14 @@ For "add a note to Raj Patel: card renewed", the typed call fills `member=Raj Pa
 
 ```text
 Phase note
-  1. find_member query=Raj Patel
-  2. open_member with the uid of the Raj Patel match
-  3. add_note text=card renewed
+  1. find_member query="Raj Patel"
+  2. open_member with the uid of the "Raj Patel" match
+  3. add_note text="card renewed"
   4. say whose record the note was added to
-  code runs: find_member query=Raj Patel
+  code runs: find_member query="Raj Patel"
   code runs: open_member member_uid=m2
   now in: Member: Raj Patel (m2)
-  code runs: add_note text=card renewed
+  code runs: add_note text="card renewed"
   the agent writes the answer from these runs
 ```
 

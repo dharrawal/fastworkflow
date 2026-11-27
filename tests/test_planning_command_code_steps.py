@@ -11,12 +11,13 @@ import logging
 from typing import Optional
 
 import dspy
+import fastworkflow
 import pytest
 from pydantic import BaseModel, Field
 
-from fastworkflow import planning_phases
+from fastworkflow.planning import planning_phases
 from fastworkflow.observation_offloading import finish_check
-from fastworkflow.planning_phases import code_step, phase_query, plan_code_steps
+from fastworkflow.planning.planning_phases import code_step, phase_query, plan_code_steps
 
 CORE = ["IntentDetection/go_up", "IntentDetection/reset_context",
         "IntentDetection/what_can_i_do", "ErrorCorrection/abort"]
@@ -176,16 +177,16 @@ import types  # noqa: E402
 from types import SimpleNamespace  # noqa: E402
 
 import fastworkflow  # noqa: E402
-from fastworkflow import tracing  # noqa: E402
+from fastworkflow.observability import tracing  # noqa: E402
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import (  # noqa: E402
     ParameterExtraction)
-from fastworkflow.command_executor import CommandExecutor  # noqa: E402
-from fastworkflow.planning_commands import PlanningCommandCallPlan, call_phases  # noqa: E402
+from fastworkflow.engine.command_executor import CommandExecutor  # noqa: E402
+from fastworkflow.planning.planning_commands import PlanningCommandCallPlan, call_phases  # noqa: E402
 
-from fastworkflow.planning_phases import Phase  # noqa: E402
-from fastworkflow.turn import TurnStatus  # noqa: E402
-from fastworkflow.utils.react import _step_indexes  # noqa: E402
-from fastworkflow.workflow_agent import initialize_workflow_tool_agent  # noqa: E402
+from fastworkflow.planning.planning_phases import Phase  # noqa: E402
+from fastworkflow.core.turn import TurnStatus  # noqa: E402
+from fastworkflow.agent.react import _step_indexes  # noqa: E402
+from fastworkflow.agent.workflow_agent import initialize_workflow_tool_agent  # noqa: E402
 from tests.test_turn_result_capture import no_review_gate  # noqa: F401 - the review gate is off for these turns
 from tests.test_planning_command_phases import RecordingSink  # noqa: E402
 from tests.test_turn_result_capture import (  # noqa: E402,F401 - shared fixtures
@@ -200,7 +201,7 @@ def command_from_module(name, module, path):
     """The skill a module of runtime parts gives (``plan(input) -> list[Phase]`` and/or
     ``steps(input)``), through ``planning_commands.planning_command_from_parts``, as the loader builds it
     from a ``PlanGenerator``: these runtime tests hand-build their ``Phase`` lists."""
-    from fastworkflow import planning_commands
+    from fastworkflow.planning import planning_commands
     return planning_commands.planning_command_from_parts(name, module.Signature, path,
                                            steps_fn=getattr(module, "steps", None),
                                            plan_fn=getattr(module, "plan", None))
@@ -315,7 +316,7 @@ class Workflow:
         # As the CME walk does (3.9): a name on the lookup path runs bound to the record of its
         # scope. perform_action would reset the binding to the current object, so such a run
         # calls the response generator itself, after binding.
-        from fastworkflow.context_navigation import command_on_path
+        from fastworkflow.core.context_navigation import command_on_path
 
         found = command_on_path(wf, name)
         bound = found is not None and len(found[1]) == 1 and found[0].record is not wf._current_command_context
@@ -330,7 +331,7 @@ class Workflow:
             params = (ParameterExtraction._extract_parameters_from_key_values(command, cls, name)
                       or ParameterExtraction._extract_parameters_from_bare(command, cls, name))
         if bound:
-            from fastworkflow.command_executor import call_response_generator
+            from fastworkflow.engine.command_executor import call_response_generator
 
             wf._command_context_for_response_generation = found[0].record
             gen_cls = routing.get_command_class(
@@ -412,7 +413,7 @@ def todo(initialized_fastworkflow, todo_workflow_path, monkeypatch):
     errands.parent = root
     root.lists[8] = errands
     # A list prints its id as its instance label ("TodoList 8"), as a record does.
-    from fastworkflow.context_identity import context_class_for
+    from fastworkflow.core.context_identity import context_class_for
 
     monkeypatch.setattr(context_class_for(wf, "TodoList"), "instance_label_attr", "id",
                         raising=False)
@@ -452,12 +453,13 @@ def todo(initialized_fastworkflow, todo_workflow_path, monkeypatch):
         session._initial_plan_text = ""
         return user_query
 
-    monkeypatch.setattr("fastworkflow.workflow_agent.build_query_with_next_steps", fake_plan)
-    monkeypatch.setattr("fastworkflow.workflow_agent.planner_planning_command_for",
-                        lambda text, folder, **_: ("", state.planning_command or _planning_command(state.plan)))
-    monkeypatch.setattr("fastworkflow.workflow_agent.split_into_subtasks",
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.build_query_with_next_steps", fake_plan)
+    from tests.conftest import script_plan
+
+    script_plan(monkeypatch, lambda text: state.planning_command or _planning_command(state.plan))
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.split_into_subtasks",
                         lambda *args, **kwargs: ["show the list groceries"])
-    monkeypatch.setattr("fastworkflow.planning_phases.write_answer",
+    monkeypatch.setattr("fastworkflow.planning.planning_phases.write_answer",
                         lambda query: state.answered.append(query) or "written")
 
     def turn(text="show the list groceries"):
@@ -469,7 +471,7 @@ def todo(initialized_fastworkflow, todo_workflow_path, monkeypatch):
 
 
 def _phases(sink):
-    return sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
+    return sink.named(tracing.SPAN_PHASE)
 
 
 def test_a_phase_of_mechanical_steps_runs_with_no_model_call(todo):
@@ -504,18 +506,19 @@ def test_code_steps_are_ordinary_trajectory_steps_spans_and_archive_rows(todo):
     assert trajectory[f"tool_args_{first}"] == {"command": "get_properties"}
     # Code steps never count toward the budget (a finish ends the loop uncounted, as ever).
     assert todo.agent.iteration_counter == 0
-    steps = todo.sink.named(tracing.SPAN_AGENT_STEP)
-    assert len(steps) == 5 and all(s.attributes["by_code"] is True for s in steps[:4])
-    assert steps[4].attributes["tool_name"] == "finish" and "by_code" not in steps[4].attributes
-    calls = todo.sink.named(tracing.SPAN_AGENT_TOOL_CALL)
-    assert [c.parent_span_id for c in calls] == [s.span_id for s in steps[:4]]
+    steps = todo.sink.named(tracing.SPAN_STEP)
+    assert len(steps) == 5 and all(s.attributes["run_by"] == "code" for s in steps[:4])
+    assert steps[4].attributes["tool_name"] == "finish" and steps[4].attributes["run_by"] == "agent"
+    # Each code step records the command it dispatched (bd fix-qjne.34: was its fw.agent.tool_call child).
+    assert not todo.sink.named("fw.agent.tool_call")
+    assert all(s.attributes["raw_command"] for s in steps[:4]) and "raw_command" not in steps[4].attributes
     runs = todo.ctx._archived_command_runs()
     assert [(r["step_index"], r["command"].split("/")[-1]) for r in runs] == [
         (0, "list_todo_lists"), (1, "get_todo_list"), (2, "get_all_children"),
         (3, "get_properties")]
-    contract = tracing.SPAN_CONTRACTS[tracing.SPAN_AGENT_STEP].attributes
+    contract = tracing.SPAN_CONTRACTS[tracing.SPAN_STEP].attributes
     assert all(set(s.attributes) - tracing.ENVELOPE_ATTRIBUTES <= contract for s in steps)
-    phase_contract = tracing.SPAN_CONTRACTS[tracing.SPAN_PLANNING_COMMAND_PHASE].attributes
+    phase_contract = tracing.SPAN_CONTRACTS[tracing.SPAN_PHASE].attributes
     assert all(set(s.attributes) - tracing.ENVELOPE_ATTRIBUTES <= phase_contract
                for s in _phases(todo.sink))
 
@@ -610,8 +613,8 @@ def test_an_answer_step_and_a_negated_step_do_not_stop_code(todo):
 
 def test_a_phase_whose_answer_is_not_shown_makes_no_call_and_the_last_one_call(todo):
     todo.turn()
-    spans = todo.sink.named(tracing.SPAN_AGENT_EXECUTE)
-    assert len(spans) == 3
+    spans = todo.sink.named(tracing.SPAN_PHASE)     # one agent loop per phase (each phase records its own)
+    assert len(spans) == 3 and not todo.sink.named("fw.agent.execute")
     # One answer call in all: the last phase's.
     assert len(todo.model.answers) == 1 and "part 3 of 3 (report)" in todo.model.answers[0]
 
@@ -693,8 +696,8 @@ def test_code_reaches_the_context_of_a_step_by_a_no_value_path(todo, climbable):
 
 
 def test_a_path_that_needs_a_value_stops_code_with_the_refusal(todo, monkeypatch):
-    from fastworkflow import context_navigation
-    from fastworkflow.context_navigation import DescendEdge
+    from fastworkflow.core import context_navigation
+    from fastworkflow.core.context_navigation import DescendEdge
 
     monkeypatch.setattr(context_navigation, "collect_descend_edges", lambda path: (
         DescendEdge("TodoListManager", "get_todo_list", "TodoList", needs=("id",)),))
@@ -711,8 +714,8 @@ def test_a_path_that_needs_a_value_stops_code_with_the_refusal(todo, monkeypatch
 
 
 def test_opening_the_record_already_open_counts_as_done(todo, monkeypatch):
-    from fastworkflow import context_navigation
-    from fastworkflow.context_navigation import DescendEdge
+    from fastworkflow.core import context_navigation
+    from fastworkflow.core.context_navigation import DescendEdge
 
     monkeypatch.setattr(context_navigation, "collect_descend_edges", lambda path: (
         DescendEdge("TodoListManager", "get_todo_list", "TodoList", needs=("id",)),))
@@ -730,8 +733,8 @@ def test_opening_the_record_already_open_counts_as_done(todo, monkeypatch):
 
 
 def test_code_path_takes_only_one_shortest_no_value_path(monkeypatch):
-    from fastworkflow import context_navigation
-    from fastworkflow.context_navigation import DescendEdge, code_path
+    from fastworkflow.core import context_navigation
+    from fastworkflow.core.context_navigation import DescendEdge, code_path
 
     wf = SimpleNamespace(_current_command_context_name="Shelf", folderpath="/x")
     monkeypatch.setattr(context_navigation, "live_context_chain",
@@ -867,6 +870,37 @@ def test_code_reads_at_most_code_max_pages_then_stops_on_the_step(paged, monkeyp
     assert "Do not run it from page 1 again." in query
 
 
+def test_fw_code_max_pages_sets_how_many_pages_code_reads(paged, monkeypatch):
+    monkeypatch.setitem(fastworkflow._env_vars, planning_phases.CODE_MAX_PAGES_ENV, "2")
+    paged.plan = _plan(Phase("report", lambda: [
+        "list_items (full list: next page with start=<n> until complete)", "list_todo_lists"]))
+    paged.model.run("list_items start=20")
+    paged.model.run("list_todo_lists")
+    paged.model.finish()
+    paged.turn()
+
+    assert paged.workflow.sent == ["list_items", "list_items start=10", "list_items start=20",
+                                   "list_todo_lists"]
+    assert _phases(paged.sink)[0].attributes["steps_by_code"] == 2
+
+
+def test_the_page_cap_is_20_when_unset_and_a_bad_value_warns_and_means_20(monkeypatch, caplog):
+    monkeypatch.delenv(planning_phases.CODE_MAX_PAGES_ENV, raising=False)
+    monkeypatch.delitem(fastworkflow._env_vars, planning_phases.CODE_MAX_PAGES_ENV, raising=False)
+    monkeypatch.setattr(planning_phases, "_warned_code_max_pages", set())
+    assert planning_phases.CODE_MAX_PAGES == 20 and planning_phases.code_max_pages() == 20
+    log = logging.getLogger("fastWorkflow")
+    log.addHandler(caplog.handler)
+    try:
+        for raw in ("0", "-3", "abc"):
+            monkeypatch.setitem(fastworkflow._env_vars, planning_phases.CODE_MAX_PAGES_ENV, raw)
+            assert planning_phases.code_max_pages() == 20
+    finally:
+        log.removeHandler(caplog.handler)
+    messages = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert sum("FW_CODE_MAX_PAGES" in m and "using the default 20" in m for m in messages) == 3
+
+
 def _two_pages(command):
     """Two pages of ten items: the second is the last, so a list of two pages ends at a cap of 2."""
     start = int((command.split("start=") + ["0"])[1].split()[0]) if "start=" in command else 0
@@ -930,7 +964,7 @@ def test_a_note_list_that_fits_one_page_goes_on(paged):
 def climbable(monkeypatch):
     """The todo workflow's root object is a context of its own (TodoListManager): say
     so, so that go_up from a list is a path to it."""
-    from fastworkflow import context_navigation
+    from fastworkflow.core import context_navigation
 
     real_chain = context_navigation.live_context_chain
     monkeypatch.setattr(context_navigation, "live_context_chain", lambda wf: (
@@ -1050,7 +1084,12 @@ def test_a_pick_quotes_a_uid_containing_a_parenthesis_or_semicolon():
 
 def test_a_pick_names_the_lookup_value_and_has_one_required_uid():
     output = {"labels": ["Dune"], "book_uids": ["b1"]}
-    assert _pick("open_book_by_uid with the uid of the match", output)[1] == \
+    # A step naming no lookup value opens the only row (the call's previous run is the
+    # listing: ``pick_listing``, below); with several rows it stays open (fix-gyzq).
+    assert _pick("open_book_by_uid with the uid of the match", output) == (
+        "open_book_by_uid book_uid=b1", "only row")
+    assert _pick("open_book_by_uid with the uid of the match",
+                 {"labels": ["Dune", "Emma"], "book_uids": ["b1", "b2"]})[1] == \
         "names no lookup value"
     assert _pick("open_book_by_uid with the uid of the Emma match", output)[0] is None
     assert _pick("set_due for the Dune loan", output, (DueParams,))[1] == "not one required uid"
@@ -1116,6 +1155,164 @@ def test_the_agent_picks_when_no_one_row_matches(picks, labels, ids, text):
     assert len(picks.model.asked) == 2
     assert _phases(picks.sink)[0].attributes["code_stop"] == "open step 2"
     assert picks.workflow.sent == ["find_list query=errands", "get_todo_list id=8"]
+
+
+# A step that names no lookup value (fix-gyzq)
+
+UNNAMED = "get_todo_list with the id of the match"
+
+
+def _unnamed_plan(picks, *steps):
+    picks.plan = _plan(Phase("open", lambda: list(steps)))
+
+
+def test_code_runs_an_unnamed_pick_of_the_only_row_of_the_previous_step(picks):
+    _unnamed_plan(picks, "find_list query=errands", UNNAMED)
+    _found(picks, ["errands"], [8])
+    result = picks.turn()
+
+    assert result.status == TurnStatus.COMPLETED
+    assert picks.model.asked == []
+    assert picks.workflow.sent == ["find_list query=errands", "get_todo_list id=8"]
+    assert _phases(picks.sink)[0].attributes["code_stop"] == "done"
+
+
+@pytest.mark.parametrize("labels, ids, text", [
+    (["errands", "weekly"], [7, 8], "matches."),                   # two rows
+    (["errands"], [8], "1-10 of 12. Next page: start=10."),        # more pages
+])
+def test_an_unnamed_pick_stays_open_without_exactly_one_row(picks, labels, ids, text):
+    _unnamed_plan(picks, "find_list query=errands", UNNAMED)
+    _found(picks, labels, ids, text)
+    picks.model.run("get_todo_list id=8")
+    picks.model.finish()
+    picks.turn()
+
+    assert len(picks.model.asked) == 2
+    assert _phases(picks.sink)[0].attributes["code_stop"] == "open step 2"
+
+
+def test_an_unnamed_pick_stays_open_after_a_step_that_is_not_the_listing(picks):
+    # The one-row listing is two steps back: only the previous step counts.
+    _unnamed_plan(picks, "find_list query=errands", "list_todo_lists", UNNAMED)
+    _found(picks, ["errands"], [8])
+    picks.model.run("get_todo_list id=8")
+    picks.model.finish()
+    picks.turn()
+
+    assert _phases(picks.sink)[0].attributes["code_stop"] == "open step 3"
+
+
+def test_an_unnamed_pick_with_a_second_unwritten_field_is_not_a_pick():
+    output = {"labels": ["Dune"], "book_uids": ["b1"]}
+    assert _pick("set_due for the loan", output, (DueParams,))[0] is None
+
+
+def test_an_unnamed_pick_never_binds_a_listing_for_another_value():
+    runs = [{"command": "find_book", "input": {"query": "Emma"}, "success": True,
+             "output": {"labels": ["Emma"], "book_uids": ["b9"]}}]
+    named = _step("open_book_by_uid with the uid of the Dune match")
+    assert planning_phases.pick_listing(named, runs, [OpenParams]) is None
+    unnamed = _step("open_book_by_uid with the uid of the match")
+    assert planning_phases.pick_listing(unnamed, runs, [OpenParams]) is not None
+    # Only the last run counts; an earlier listing never does.
+    older = [runs[0], {"command": "get_properties", "input": {}, "success": True,
+                       "output": {"x": 1}}]
+    assert planning_phases.pick_listing(unnamed, older, [OpenParams]) is None
+
+
+def _two_lookups(first_output, last_output=None):
+    def run(query, output):
+        return {"command": "find_book", "input": {"query": query}, "success": True,
+                "output": output}
+    return [run("Dune", first_output),
+            run("Emma", last_output or {"labels": ["Emma"], "book_uids": ["b9"]})]
+
+
+@pytest.mark.parametrize("text", ["open_book_by_uid book_uid=<the Dune uid>",
+                                  "open_book_by_uid for the Dune book"])
+def test_a_step_naming_an_older_lookups_value_opens_that_lookups_row(text):
+    runs = _two_lookups({"labels": ["Dune"], "book_uids": ["b1"]})
+    found = planning_phases.pick_listing(_step(text), runs, [OpenParams])
+    assert found is not None and found[0] is runs[0]
+    assert planning_phases.pick_step(_step(text), *found, [OpenParams])[0] == \
+        "open_book_by_uid book_uid=b1"
+
+
+def test_a_step_naming_an_earlier_run_that_does_not_fit_never_uses_the_last_run():
+    runs = _two_lookups({"labels": ["Dune 1", "Dune 2"], "book_uids": ["b1", "b2"]})
+    step = _step("open_book_by_uid book_uid=<the Dune uid>")
+    found = planning_phases.pick_listing(step, runs, [OpenParams])
+    assert found is None or planning_phases.pick_step(
+        step, *found, [OpenParams])[0] is None
+
+
+# A field that declares its producer (fix-gyzq, option 2)
+
+class ThingParams(BaseModel):
+    thing_code: str = Field(
+        description="code", pattern=r"^[A-Z]{2}\d+$",
+        json_schema_extra={"from_command_output": "Shelf/list_things.thing_codes"})
+
+
+class UndeclaredParams(BaseModel):
+    thing_code: str = Field(description="code")
+
+
+class TwoFieldParams(BaseModel):
+    thing_code: str = Field(
+        description="code",
+        json_schema_extra={"from_command_output": "Shelf/list_things.thing_codes"})
+    note: str = Field(description="note")
+
+
+_THING_COMMANDS = ["Shelf/list_things", "Shelf/other_things", "Shelf/show_thing"]
+_THING_STEP = "show_thing thing_code=<that thing_code>"
+
+
+def _thing_step(text=_THING_STEP):
+    return finish_check.parse_plan(f"1. {text}", _THING_COMMANDS, CORE)[0]
+
+
+def _thing_run(codes, command="Shelf/list_things", column="thing_codes", more=False):
+    return {"command": command, "input": {}, "success": True, "more_pages": more,
+            "output": {column: codes, "labels": [f"t{i}" for i in range(len(codes))]}}
+
+
+def _thing_pick(runs, classes=(ThingParams,), text=_THING_STEP):
+    step = _thing_step(text)
+    found = planning_phases.pick_listing(step, runs, list(classes))
+    if found is None:
+        return None, "no listing"
+    return planning_phases.pick_step(step, *found, list(classes))
+
+
+def test_a_field_that_declares_its_producer_opens_the_only_row():
+    assert _thing_pick([_thing_run(["AB12"])]) == ("show_thing thing_code=AB12", "only row")
+
+
+@pytest.mark.parametrize("runs, classes", [
+    ([_thing_run(["AB12", "CD34"])], (ThingParams,)),                       # two rows
+    ([_thing_run(["AB12"], more=True)], (ThingParams,)),                    # more pages
+    ([_thing_run(["AB12"], command="Shelf/other_things")], (ThingParams,)),  # not the producer
+    ([_thing_run(["AB12"])], (UndeclaredParams,)),                          # no producer declared
+    ([_thing_run(["AB12"])], (TwoFieldParams,)),                            # a second field
+    ([_thing_run(["AB12"], column="codes")], (ThingParams,)),               # column missing
+    ([_thing_run(["AB12"]), _thing_run(["XY9"], command="Shelf/other_things")],
+     (ThingParams,)),                                                       # not the previous run
+])
+def test_a_producer_field_pick_keeps_the_stop_otherwise(runs, classes):
+    assert _thing_pick(runs, classes)[0] is None
+
+
+def test_an_undeclared_non_uid_field_is_not_one_required_uid():
+    assert planning_phases._uid_parameter(
+        _thing_step(), [UndeclaredParams])[2] == "not one required uid"
+
+
+def test_a_picked_producer_value_still_passes_the_command_validation():
+    # The pattern of the field refuses a value the producer's output gave.
+    assert _thing_pick([_thing_run(["bad value"])])[0] is None
 
 
 # ----------------------------------------------------------------------
@@ -1216,7 +1413,7 @@ def test_the_model_step_after_code_runs_a_command_the_plan_lacked(todo):
 def test_a_last_phase_of_say_that_lines_is_a_load_error():
     # Was: the answer-only last phase was written by code with no model step. A last phase
     # of 'say that' lines no longer loads (3.16): the answer is returned from __result__.
-    from fastworkflow.planning_commands import PlanningCommandFormatError
+    from fastworkflow.planning.planning_commands import PlanningCommandFormatError
 
     with pytest.raises(PlanningCommandFormatError, match="writes the answer as 'say that' lines"):
         _planning_command(_plan(
@@ -1249,7 +1446,7 @@ def test_a_flat_call_suspended_and_restored_resumes_without_running_code_again(t
     assert todo.workflow.sent == ["list_todo_lists"]
 
     # As after a restore: the one phase is rebuilt from the skill and the saved state.
-    monkeypatch.setattr("fastworkflow.workflow_agent.load_planning_command_map",
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.load_planning_command_map",
                         lambda folder: {"show_list": planning_command})
     todo.ctx._phase_live = None
     second = todo.ctx.process_turn("the errands list")

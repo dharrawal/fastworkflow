@@ -2,7 +2,7 @@ import tempfile
 import os
 
 import fastworkflow
-from fastworkflow.workflow import Workflow
+from fastworkflow.core.workflow import Workflow
 
 
 def test_current_context_object_property(tmp_path):

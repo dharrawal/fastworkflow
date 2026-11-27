@@ -95,7 +95,7 @@ When in doubt, run the re-verification command and check with Dhar before deleti
   and `fastworkflow/examples/simple_workflow_template/___command_info/*/ambiguous_threshold.json`.
 - **Why they exist:** a rename split the artifact into `tiny_ambiguous_threshold.json` and
   `large_ambiguous_threshold.json`; the loader reads only the tiny_/large_ variants
-  (`fastworkflow/model_pipeline_training.py:299-300`) and the writer writes only those
+  (`fastworkflow/train/model_pipeline_training.py:299-300`) and the writer writes only those
   (:1179, :1184-ish). The unprefixed files are pre-rename leftovers in committed/trained dirs.
 - **Status:** harmless; not proof of a live code path. Safe to ignore. If cleaning up, note
   most `___command_info` dirs are gitignored dev-local state — only a few (CME, some examples)

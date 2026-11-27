@@ -24,8 +24,8 @@ from fastworkflow._workflows.command_metadata_extraction.parameter_extraction im
     NOT_FOUND,
     ParameterExtraction,
 )
-from fastworkflow.utils import signatures
-from fastworkflow.utils.signatures import INVALID_INT_VALUE, InputForParamExtraction
+from fastworkflow.parameters import signatures
+from fastworkflow.parameters.signatures import INVALID_INT_VALUE, InputForParamExtraction
 
 COMMAND = "People/find_person"
 
@@ -87,17 +87,18 @@ def test_an_invalid_optional_field_stored_as_not_found_is_still_asked():
     assert (merged.filter, merged.name) == ("Ann", "Bob")
 
 
-def test_with_nothing_asked_an_unset_optional_field_still_takes_the_reply():
-    # Unchanged behaviour: no asked field, so the first unset field is filled.
+def test_with_nothing_asked_an_unset_optional_field_is_not_filled_by_the_reply():
+    # A reply never fills a field the question did not ask for (rule f of ``parameters.read``); it used to fill the
+    # first unset field.
     stored = _FilterThenName.model_construct(filter=None, name="Bob")
     merged = _merge(stored, "Ann")
-    assert (merged.filter, merged.name) == ("Ann", "Bob")
+    assert (merged.filter, merged.name) == (None, "Bob")
 
 
 def test_only_required_fields_unset_keeps_declaration_order():
-    # Unchanged behaviour when no Optional field is unset.
+    # Two open values: one part is unclear (rule e), two parts fill them in declaration order.
     stored = _FilterThenTwo.model_construct(filter="x", name=NOT_FOUND, dept=NOT_FOUND)
-    assert _merge(stored, "Ann").model_dump() == {"filter": "x", "name": "Ann", "dept": NOT_FOUND}
+    assert _merge(stored, "Ann").model_dump() == {"filter": "x", "name": NOT_FOUND, "dept": NOT_FOUND}
     assert _merge(stored, "Ann, Sales").model_dump() == {"filter": "x", "name": "Ann", "dept": "Sales"}
 
 

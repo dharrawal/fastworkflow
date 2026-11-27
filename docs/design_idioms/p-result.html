@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The answer, in code · Design idioms · fastWorkflow</title>
+<link rel="stylesheet" href="idioms.css">
+</head>
+<body data-page="p-result">
+<aside class="rail"></aside>
+
+<main id="top">
+  <section class="group planning">
+<!-- IDIOM BODY START -->
+    <article class="idiom" id="p-result">
+      <div class="prose">
+        <p class="num">05</p>
+        <h3>The answer, in code</h3>
+        <p>A planning command (a command whose <code>PlanGenerator</code> lists steps that run other commands; see <a href="p-plan.html">a plan in place of a body</a>) ends by answering the user. <code>__result__</code> is the method of <code>PlanGenerator</code> where you write that answer yourself, in plain Python, from what the steps found. Reach for it whenever the answer can be built from the facts: it costs no model call, so the same facts always give the same words.</p>
+        <p>The framework calls <code>__result__</code> once, after the last phase (a phase is one method of <code>PlanGenerator</code> that returns steps). It passes arguments by parameter name:</p>
+        <ul>
+          <li><code>input</code> is the command's <code>Signature.Input</code>, with the values of this call.</li>
+          <li>Any other parameter must be named after a phase. It receives that phase's facts, usually the <code>Output</code> of the command the phase ran (see <a href="p-facts.html">what a phase hands on</a>), as a Pydantic object you read with dots. A phase that ran once per item (see <a href="p-fan.html">once per item</a>) arrives as a list of them.</li>
+          <li>A phase that was skipped (it returned <code>[]</code>; see <a href="p-skip.html">a phase that does not run</a>) arrives as <code>None</code>; so does an <code>optional</code> phase that failed. A phase that ran once per item over zero items arrives as an empty list, not <code>None</code>. Test for it first. A default on the parameter changes nothing: the framework passes <code>None</code> for any phase that did not run.</li>
+        </ul>
+        <p>This is the whole command from the library example. The <code>find</code> phase runs <code>find_book</code>; <code>__result__</code> turns its <code>total</code> into a sentence.</p>
+      </div>
+      <figure>
+        <figcaption>fastworkflow/examples/library/_commands/Library/count_books.py</figcaption>
+        <pre><code>class PlanGenerator:
+    def find(self, input) -&gt; FindBook.Output:
+        return [run("find_book", query=input.query)]
+
+    <span class="c"># input: this call's Signature.Input; find: the find phase's FindBook.Output</span>
+    def __result__(self, input, find):
+        return f"{input.query} matches {count(find.total, 'book')}."</code></pre>
+      </figure>
+      <div class="prose">
+        <p>Run with <code>query</code> "Austen", <code>fastworkflow command run-code</code> on a copy of the example prints <code>answer written by __result__:</code> and, on the next line, indented, <code>Austen matches 2 books.</code> (<code>count</code>, from <code>fastworkflow.planning</code>, writes "1 book" or "2 books".)</p>
+        <p>What you may return, and what each leads to (only the value counts, except that a return annotation of <code>str</code> or another model on a command that declares an <code>Output</code> is refused when the workflow loads):</p>
+        <ul>
+          <li><strong>A non-empty <code>str</code></strong> (only when the command declares no <code>Output</code>): that text is the answer, exactly. No model is asked to write or reword it.</li>
+          <li><strong>A <code>Signature.Output</code></strong> (only when the command declares one, and exactly that class): the answer text is the <code>Output</code> as JSON, and the object rides along for a client or for a planning command that called this one. See <a href="e-return.html">what it returns</a>.</li>
+          <li><strong>A <code>fastworkflow.CommandResponse(response=..., output=...)</code></strong>: your sentence is the answer, and the <code>Output</code> rides along. Use it when the command declares an <code>Output</code> and a person should read a sentence, as in the second example below.</li>
+          <li><strong><code>fastworkflow.planning.ANSWER_BY_MODEL</code></strong>: the one way to leave the answer to a model, written on purpose, for a command that declares no <code>Output</code> (one that declares an <code>Output</code> and returns it fails the call: the <code>Output</code> is its answer). A model writes the answer from the facts, exactly as when there is no <code>__result__</code>; the constant lets one branch leave the answer to a model while another writes it. If no agent model is set (<code>LLM_AGENT</code> unset), there is no model to write it: the command does not fail, it ends as a stop. The answer text then states, in code, which steps ran, each step's own result and the facts recorded, then says that the wording needs a model; the same stop comes back as data in the <code>fw_not_run</code> artifact.</li>
+          <li><strong>Anything else</strong>, including <code>None</code> (a branch that forgot its <code>return</code> gives <code>None</code>), an empty string, a number, an object of another class, or a <code>str</code> when the command declares an <code>Output</code>, or an exception raised inside <code>__result__</code>: the command fails, as it does when an execution command's <code>__call__</code> goes wrong. For <code>None</code> the message reads "__result__ returned None; it must return the answer, or fastworkflow.planning.ANSWER_BY_MODEL to leave the answer to a model". The user is told which command failed and why, and no model writes an answer in its place, so a bug in <code>__result__</code> cannot hide behind a fluent sentence. <code>raise fastworkflow.Refused("...")</code> is the way to decline on purpose: it fails the command with your message. A command with no <code>__result__</code> at all still leaves the answer to a model.</li>
+        </ul>
+        <p>The framework may add a short note after your text, for example that a phase reading many items stopped at its cap. With no agent model set, the answer also ends with a line naming the command that ran, such as "(Ran Library/count_books.)". These notes are added to the answer text only, not to the command output's <code>response</code>. <code>__result__</code> itself makes no model call, but a plan with a step the code cannot run still runs the agent for that step.</p>
+      </div>
+      <figure>
+        <figcaption>fastworkflow/examples/library/_commands/Library/book_by_title.py</figcaption>
+        <pre><code>class PlanGenerator:
+    def find(self, input) -&gt; FindBook.Output:
+        return [run("find_book", query=input.title)]
+
+    def book(self, input, find) -&gt; OpenBook.Output:
+        if not find.book_uids:
+            return []                       <span class="c"># skipped: __result__ gets book=None</span>
+        return [run("open_book", named=input.title)]
+
+    def __result__(self, input, book):     <span class="c"># reads only the phase it needs</span>
+        if book is None:
+            return CommandResponse(response=f"No book matches {input.title}.",
+                                   output=Signature.Output(found=False))
+        return CommandResponse(
+            response=f"{book.title} is by {book.author}; the library owns {copies(book.copies)}.",
+            output=Signature.Output(found=True, **book.model_dump()))</code></pre>
+      </figure>
+      <div class="prose">
+        <p>Run on a copy of the example, "Dune" answers "Dune is by Frank Herbert; the library owns 3 copies." and "Nope" skips the <code>book</code> phase and answers "No book matches Nope.". Both carry the command's <code>Output</code>. To see the answer without running anything, <code>fastworkflow command preview</code> prints a line "Written by `__result__`:" with each fact shown as a placeholder, judged by the run's own rule: the command's <code>Output</code> is shown as the answer as JSON written by code, a text or a <code>CommandResponse</code> as the answer text, <code>ANSWER_BY_MODEL</code> as an answer a model writes, and every return the run refuses (another model class, a text when the command declares an <code>Output</code>, <code>ANSWER_BY_MODEL</code> when it declares one, <code>None</code>, an empty text or any other type) as a failed call with the run's message. <code>fastworkflow command run-code</code> prints "returned ANSWER_BY_MODEL, so a model writes it" and treats <code>None</code> as a run error (exit 1).</p>
+        <p>Beginner mistakes, each caught when the workflow loads (the command is skipped and the error names the file):</p>
+        <ul>
+          <li>A parameter that is not <code>input</code> or a phase name, for example <code>found</code> for a phase called <code>find</code>: "__result__ takes 'found', which is not a phase of this command".</li>
+          <li>Declaring <code>Signature.Output</code> with no <code>__result__</code>: "Signature.Output is declared, but nothing builds it; return it from __result__(self, input, ...)".</li>
+          <li>Writing the answer as a last phase of "say that ..." steps: "writes the answer as 'say that' lines, which code no longer copies; return the text from __result__(self, input, ...) instead".</li>
+        </ul>
+        <p class="see">See also <a href="p-plan.html">a plan in place of a body</a>, <a href="p-facts.html">what a phase hands on</a>, <a href="p-skip.html">a phase that does not run</a>, <a href="e-return.html">what it returns</a>.</p>
+      </div>
+    </article>
+<!-- IDIOM BODY END -->
+  </section>
+
+  <nav class="pager" aria-label="Previous and next">
+    <a class="prev" href="p-skip.html"><span>Previous</span>A phase that does not run</a>
+    <a class="next" href="p-fan.html"><span>Next</span>Once per item</a>
+  </nav>
+</main>
+<script src="nav.js"></script>
+<script src="idioms.js"></script>
+</body>
+</html>

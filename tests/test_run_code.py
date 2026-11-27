@@ -3,7 +3,7 @@
 The sample workflow (``fastworkflow/examples/library``) and ``tests/todo_list_workflow`` are copied to ``tmp_path``
 for every test, since a run changes the session's state (and a copy keeps the repository clean). No model is
 called: the run is checked for that with a seam that fails if one is reached, and by a CLI run with no LLM
-environment at all. The load-problem cases write a broken command into a copy and check ``fastworkflow run``
+environment at all. The load-problem cases write a broken command into a copy and check ``fastworkflow run_cli``
 (its output before the first prompt), ``fastworkflow train`` (it stops before training) and the FastAPI
 server's startup log.
 """
@@ -21,7 +21,7 @@ import pytest
 
 import fastworkflow
 from fastworkflow.planning import run_code
-from fastworkflow.planning_code_run import RunCodeError
+from fastworkflow.planning.planning_code_run import RunCodeError
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIBRARY = os.path.join(ROOT, "fastworkflow", "examples", "library")
@@ -185,6 +185,31 @@ def test_a_hook_that_raises_exits_1_naming_it(library, no_model):
     assert "__result__" in cli.stderr and "Library/book_loans" in cli.stderr
 
 
+# ------------------------------------------------------------------ the Input's validators, as the runtime runs them
+
+def test_a_validator_gets_the_workflow_and_its_correction_is_kept(library, no_model):
+    """run-code validates a planning call's arguments as the runtime does: the validator's context holds the session's
+    workflow (not None), and what the validator writes is the argument the call runs with."""
+    path = os.path.join(library, "_commands", "Library", "count_books.py")
+    with open(path, encoding="utf-8") as fh:
+        source = fh.read()
+    marker = '                           json_schema_extra={"copied_from_command_text": True})\n'
+    assert source.count(marker) == 1
+    source = source.replace("from pydantic import BaseModel, Field",
+                            "from pydantic import BaseModel, Field, ValidationInfo, model_validator")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(source.replace(marker, marker + """
+        @model_validator(mode="after")
+        def tidy(self, info: ValidationInfo):
+            workflow = (info.context or {}).get("workflow")   # None only while the plan is rendered unrun
+            if workflow is not None and workflow.folderpath:
+                self.query = self.query.strip()
+            return self
+"""))
+    result = run_code(library, "count_books", {"query": "  Emma  "})
+    assert result.answer.startswith("Emma matches "), result.text
+
+
 # ------------------------------------------------------------------ a command file that does not load
 
 def _break_a_command_file(folder: str) -> None:
@@ -195,7 +220,9 @@ def _break_a_command_file(folder: str) -> None:
 def test_fastworkflow_run_prints_the_load_problem_before_its_first_prompt(library):
     _break_a_command_file(library)
     env_files = [os.path.join(library, "fastworkflow.env"), os.path.join(library, "fastworkflow.passwords.env")]
-    cli = _cli("run", library, *env_files, env=_no_llm_env())
+    # The copy is not trained, and this test wants the run to stop there. Its passwords file holds the planner key,
+    # with which an untrained workflow now starts on the model matcher (fix-yu3l.3): the classifier is required here.
+    cli = _cli("run_cli", library, *env_files, env={**_no_llm_env(), "FW_REQUIRE_HEADS": "1"})
     out = cli.stdout + cli.stderr
     problem = "Load problem: Library/broken_thing: PlanningCommandFormatError"
     assert problem in out

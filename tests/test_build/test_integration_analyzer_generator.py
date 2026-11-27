@@ -72,14 +72,11 @@ def test_analyzer_and_generators_on_all_files():
             expected_file_path = os.path.join(class_specific_output_dir, esf)
             assert os.path.exists(expected_file_path), f"File {expected_file_path} does not exist for class {class_name}"
 
-    # Generate context model
-    # generate_context_model writes the file and returns the dictionary
-    context_data = generate_context_model(classes, os.path.dirname(CONTEXT_MODEL_FILE), os.path.basename(CONTEXT_MODEL_FILE))
-    assert os.path.exists(CONTEXT_MODEL_FILE), f"Context model file {CONTEXT_MODEL_FILE} was not created."
-
-    # Now, context_data is the loaded dictionary, no need to open and json.load again
-
-    # Global '*' context is optional in the new flat schema.
+    # Generate context model: build derives each context's inherits, writes it into a _<Context>.py it creates (none
+    # exists here: the folder was emptied above) and writes no context model file (bd fix-qjne.37.1). The generated
+    # folder is the workflow other tests load (tests/example_workflow is generated, not tracked).
+    context_data = generate_context_model(classes, os.path.dirname(OUTPUT_DIR))
+    assert not os.path.exists(CONTEXT_MODEL_FILE), f"{CONTEXT_MODEL_FILE} is a removed spelling and must not be written"
 
     for class_name, class_info in classes.items():
         expected_bases = [b for b in class_info.bases if b in all_class_names]
@@ -91,4 +88,8 @@ def test_analyzer_and_generators_on_all_files():
         )
 
     # Ensure the deprecated '/' key is not present anywhere in the generated model
-    assert all('/' not in k for k in context_data.keys()) 
+    assert all('/' not in k for k in context_data.keys())
+
+    declared = {name: open(os.path.join(OUTPUT_DIR, name, f"_{name}.py")).read()
+                for name in classes if os.path.exists(os.path.join(OUTPUT_DIR, name, f"_{name}.py"))}
+    assert declared == {'TodoList': 'class Context:\n    inherits = ["TodoItem"]\n'}

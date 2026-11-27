@@ -14,24 +14,25 @@ from dotenv import dotenv_values
 from pydantic import BaseModel, Field, model_validator
 
 import fastworkflow
-from fastworkflow import planning_commands, command_preview, workflow_agent
-from fastworkflow.capability_answer import context_commands
-from fastworkflow.command_executor import CommandExecutor, CommandNotFoundError
-from fastworkflow.command_metadata_api import CommandMetadataAPI
-from fastworkflow.command_routing import RoutingRegistry
-from fastworkflow.context_navigation import home_contexts
-from fastworkflow.mcp_server import FastWorkflowMCPServer
-from fastworkflow.model_pipeline_training import trained_command_labels
-from fastworkflow.plan_frame import TURN_MAX_STEPS_ENV
-from fastworkflow.planning_needs_agent import planning_command_needs_agent, refusal_message
-from fastworkflow.utils.signatures import InputForParamExtraction
-from fastworkflow.workflow_agent import (
+from fastworkflow.planning import planning_commands, command_preview
+from fastworkflow.agent import workflow_agent
+from fastworkflow.agent.capability_answer import context_commands
+from fastworkflow.engine.command_executor import CommandExecutor, CommandNotFoundError
+from fastworkflow.core.command_metadata_api import CommandMetadataAPI
+from fastworkflow.core.command_routing import RoutingRegistry
+from fastworkflow.core.context_navigation import home_contexts
+from fastworkflow.run_fastapi_mcp.mcp_server import FastWorkflowMCPServer
+from fastworkflow.train.model_pipeline_training import trained_command_labels
+from fastworkflow.planning.plan_frame import TURN_MAX_STEPS_ENV
+from fastworkflow.planning.planning_needs_agent import planning_command_needs_agent, refusal_message
+from fastworkflow.parameters.signatures import InputForParamExtraction
+from fastworkflow.agent.workflow_agent import (
     _explicit_agent_command,
     _parameter_fields,
     _what_can_i_do,
     planner_commands_text,
 )
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 from fastworkflow.examples.library._commands.Book.list_loans import Signature as ListLoans
 from fastworkflow.examples.library._commands.Library.book_loans import Signature as BookLoans
 from fastworkflow.examples.library._commands.Library.book_by_title import Signature as BookByTitle
@@ -40,8 +41,8 @@ from fastworkflow.examples.library._commands.Library.find_member import Signatur
 from fastworkflow.examples.library._commands.Library.open_book import Signature as OpenBook
 from fastworkflow.planning import run
 from fastworkflow.planning import phase
-from fastworkflow.planning_commands import PlanningCommandFormatError
-from fastworkflow.turn import TurnStatus, reset_missing_declared_output_warnings
+from fastworkflow.planning.planning_commands import PlanningCommandFormatError
+from fastworkflow.core.turn import TurnStatus
 from fastworkflow.utils import python_utils
 
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401 - the fixture, imported by name
@@ -49,7 +50,6 @@ from tests.test_turn_result_capture import no_review_gate  # noqa: F401 - the re
 from tests.test_field_sources import _build_workflow
 from tests.test_planning_command_contexts import LIBRARY_PLANNING_COMMAND, ROOT_PLANNING_COMMAND, RULE_CHECK, _with_rule_check
 from tests.test_planning_command_code_steps import Model
-from tests.test_text_planner_and_split import _fake_matcher
 from tests.test_step_helpers import (
     FoundBooks,
     LibraryRunner,
@@ -120,11 +120,6 @@ def _run_planning_command(env, planning_command, args: dict | None = None):
     return env.ctx.process_turn("look up the book")
 
 
-@pytest.fixture(autouse=True)
-def _clear_missing_output_warnings():
-    reset_missing_declared_output_warnings()
-    yield
-    reset_missing_declared_output_warnings()
 
 
 def test_result_str_gives_text_and_no_output(library_env):
@@ -145,7 +140,10 @@ def test_result_str_gives_text_and_no_output(library_env):
     assert outputs[0].command_response.output is None
 
 
-def test_missing_output_warning_once_for_planning_command(library_env, caplog):
+def test_text_result_for_a_declared_output_fails_the_call_instead_of_warning_of_a_missing_output(library_env, caplog):
+    # Was test_missing_output_warning_once_for_planning_command (fix-qjne.12): a command that declares an Output and
+    # writes text from __result__ used to get a once-per-process "declares an Output but returned none" warning
+    # (and a response with no Output); the one result rule now fails the call where the text is written.
     def build(output_cls):
         class Plan:
             def find(self, input) -> FoundBooks:
@@ -159,10 +157,10 @@ def test_missing_output_warning_once_for_planning_command(library_env, caplog):
     planning_command = _planning_command_with_output(build)
     with caplog.at_level(logging.WARNING):
         _run_planning_command(library_env, planning_command)
-        _run_planning_command(library_env, planning_command)
-    msgs = [r.message for r in caplog.records if "declares an Output but returned none" in r.message]
-    assert len(msgs) == 1
-    assert planning_command.name in msgs[0]
+    outputs = [o for o in library_env.ctx._turn_outputs if o.command_name == planning_command.name]
+    assert [o.success for o in outputs] == [False]
+    assert "declares an Output but its __result__ returned str" in outputs[0].command_response.response
+    assert not [r for r in caplog.records if "declares an Output but returned none" in r.message]
 
 
 def test_result_output_json_is_the_response(library_env):
@@ -209,7 +207,8 @@ def test_with_result_no_phase_agent_writes_the_answer(library_env):
     assert library_env.model.asked == []
 
 
-def test_result_raises_falls_back_to_one_model_call(library_env, caplog):
+def test_result_raises_fails_the_call_and_no_model_writes_the_answer(library_env, caplog):
+    # Was test_result_raises_falls_back_to_one_model_call: fix-qjne.12 made a failing __result__ fail the command.
     class Plan:
         def find(self, input) -> FoundBooks:
             return [run("find_book", query=input.title)]
@@ -221,11 +220,13 @@ def test_result_raises_falls_back_to_one_model_call(library_env, caplog):
     with caplog.at_level(logging.WARNING):
         result = _run_planning_command(library_env, planning_command)
 
-    assert result.answer == "written"
+    assert result.answer != "written"
     assert library_env.model.asked == []
     assert sum(1 for r in caplog.records if "__result__ failed" in r.message) == 1
     out = next(o for o in library_env.ctx._turn_outputs if o.command_name == planning_command.name)
     assert out.command_response.output is None
+    assert out.success is False
+    assert "boom" in out.command_response.response
 
 
 def test_skipped_phase_is_none_in_result(library_env):
@@ -545,7 +546,7 @@ def test_phase_annotated_find_book_output_hands_on_run(library_env):
 
     assert result.status == TurnStatus.COMPLETED
     assert result.answer == "total 2"
-    spans = library_env.sink.named(fastworkflow.tracing.SPAN_PLANNING_COMMAND_PHASE)
+    spans = library_env.sink.named(fastworkflow.observability.tracing.SPAN_PHASE)
     assert spans[0].attributes["facts"] == {
         "book_uids": ["b1", "b2"],
         "titles": ["Dune", "Dune Messiah"],
@@ -565,7 +566,7 @@ def test_full_list_step_joins_loan_pages(library_proof_env):
     result = library_proof_env.ctx.process_turn("list every loan")
 
     assert result.status == TurnStatus.COMPLETED
-    spans = library_proof_env.sink.named(fastworkflow.tracing.SPAN_PLANNING_COMMAND_PHASE)
+    spans = library_proof_env.sink.named(fastworkflow.observability.tracing.SPAN_PHASE)
     facts = spans[0].attributes["facts"]
     assert facts["total"] == 2
     assert len(facts["borrowers"]) == 2
@@ -588,7 +589,7 @@ def test_fan_out_phase_open_book_output_per_item(library_env):
     result = _run_planning_command(library_env, library_env.planning_command)
 
     assert result.status == TurnStatus.COMPLETED
-    spans = library_env.sink.named(fastworkflow.tracing.SPAN_PLANNING_COMMAND_PHASE)
+    spans = library_env.sink.named(fastworkflow.observability.tracing.SPAN_PHASE)
     open_span = next(s for s in spans if s.attributes["phase"] == "opened")
     assert open_span.attributes["item_count"] == 2
     assert open_span.attributes["facts"]["title"] in ("Dune", "Dune Messiah")
@@ -624,6 +625,36 @@ class PlanGenerator:
         in e.message
         for e in res.errors
     )
+
+
+def test_open_step_that_mentions_the_command_word_counts_as_naming_it(tmp_path):
+    """fix-rayk: a prose step naming find_book whole is the agent's step for it;
+    a phase that never mentions it is still the load error above."""
+    source = '''from pydantic import BaseModel, Field
+
+from fastworkflow.planning import run
+
+from .find_book import Signature as FindBook
+
+
+class Signature:
+    """Open typed phase."""
+
+    class Input(BaseModel):
+        query: str = Field(description="words")
+
+
+class PlanGenerator:
+    def find(self, input) -> FindBook.Output:
+        return ["look the title up with find_book"]
+'''
+    folder = _library_workflow(tmp_path)
+    path = os.path.join(folder, "_commands", "Library", "open_typed.py")
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(source)
+    planning_commands.resolve_field_sources.cache_clear()
+    res = planning_commands.resolve_field_sources(folder)
+    assert not [e for e in res.errors if "hands on find_book's Output" in e.message]
 
 
 def test_union_annotation_hands_on_whichever_member_ran(library_env):
@@ -678,7 +709,7 @@ def test_typed_facts_model_fills_output_input_and_optional_none(library_env):
     result = _run_planning_command(library_env, library_env.planning_command)
 
     assert result.status == TurnStatus.COMPLETED
-    spans = library_env.sink.named(fastworkflow.tracing.SPAN_PLANNING_COMMAND_PHASE)
+    spans = library_env.sink.named(fastworkflow.observability.tracing.SPAN_PHASE)
     facts = spans[0].attributes["facts"]
     assert facts["found"]["total"] == 2
     assert facts["open_args"]["book_uid"] == "b1"
@@ -742,7 +773,7 @@ def test_library_loan_report_result_uses_list_loans_output(library_proof_env):
     result = library_proof_env.ctx.process_turn("who has this book")
 
     assert result.status == TurnStatus.COMPLETED
-    spans = library_proof_env.sink.named(fastworkflow.tracing.SPAN_PLANNING_COMMAND_PHASE)
+    spans = library_proof_env.sink.named(fastworkflow.observability.tracing.SPAN_PHASE)
     assert spans[0].attributes["facts"]["borrowers"] == ["Ann Lee", "Raj Patel"]
     assert "Ann Lee" in result.answer
     out = next(o for o in library_proof_env.ctx._turn_outputs if o.command_name == sf.command.name)
@@ -759,7 +790,7 @@ def test_library_book_by_title_result_builds_output_from_two_phases(library_proo
     result = library_proof_env.ctx.process_turn(f"who wrote {title}")
 
     assert result.status == TurnStatus.COMPLETED
-    spans = library_proof_env.sink.named(fastworkflow.tracing.SPAN_PLANNING_COMMAND_PHASE)
+    spans = library_proof_env.sink.named(fastworkflow.observability.tracing.SPAN_PHASE)
     assert len(spans) >= 2
     assert [s.attributes["phase"] for s in spans[:2]] == ["find", "book"]
     out = next(o for o in library_proof_env.ctx._turn_outputs if o.command_name == sf.command.name)
@@ -811,12 +842,12 @@ def test_library_author_books_from_real_module_runs_fan_out(library_proof_env):
     # 3.9: open_book is a Library command, on the path from the Book it opened, so it runs in
     # place (bound to the library) and no go_up is inserted before the second book.
     assert library_proof_env.runner.sent == [
-        "find_book query=Frank Herbert",
+        'find_book query="Frank Herbert"',
         "open_book book_uid=b1",
         "open_book book_uid=b2",
     ]
     assert library_proof_env.wf._current_command_context.uid == "b2"
-    spans = library_proof_env.sink.named(fastworkflow.tracing.SPAN_PLANNING_COMMAND_PHASE)
+    spans = library_proof_env.sink.named(fastworkflow.observability.tracing.SPAN_PHASE)
     assert [s.attributes["phase"] for s in spans[:3]] == ["find", "book", "book"]
 
 
@@ -835,7 +866,7 @@ def test_library_count_books_from_real_module_uses_find_total(library_proof_env)
     assert out.success is True
     assert out.command_response.output is None
     assert out.command_response.response == expected
-    assert library_proof_env.runner.sent == [f"find_book query={query}"]
+    assert library_proof_env.runner.sent == [f'find_book query="{query}"']
 
 
 def test_library_member_report_from_real_module_lists_loans_and_notes(library_proof_env):
@@ -874,9 +905,9 @@ def test_library_note_member_from_real_module_writes_note_on_member(library_proo
     assert result.status == TurnStatus.COMPLETED
     assert lib.members["m1"].notes == before + [text]
     assert library_proof_env.runner.sent == [
-        f"find_member query={member}",
+        f'find_member query="{member}"',
         "open_member member_uid=m1",
-        f"add_note text={text}",
+        f'add_note text="{text}"',
     ]
     add_out = next(
         o for o in library_proof_env.ctx._turn_outputs if o.command_name == "Record/add_note"
@@ -903,7 +934,7 @@ def test_library_find_record_book_kind_from_real_module(library_proof_env):
     assert out.command_response.response == expected
     assert library_proof_env.runner.sent == [f"find_book query={name}"]
     assert not any(c.startswith("find_member") for c in library_proof_env.runner.sent)
-    spans = library_proof_env.sink.named(fastworkflow.tracing.SPAN_PLANNING_COMMAND_PHASE)
+    spans = library_proof_env.sink.named(fastworkflow.observability.tracing.SPAN_PHASE)
     assert "titles" in spans[0].attributes["facts"]
 
 
@@ -1012,11 +1043,11 @@ ASSISTANT_PLANNING_REFUSAL = (
 @pytest.fixture
 def planning_dispatch_library(tmp_path, initialized_fastworkflow):
     """Library copy with ``Library/count_books`` and ``Library/note_member``; real ``CommandExecutor`` dispatch."""
-    from fastworkflow.command_metadata_api import CommandMetadataAPI
-    from fastworkflow.command_routing import RoutingRegistry
-    from fastworkflow.mcp_server import FastWorkflowMCPServer
-    from fastworkflow.workflow_agent import _what_can_i_do
-    from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+    from fastworkflow.core.command_metadata_api import CommandMetadataAPI
+    from fastworkflow.core.command_routing import RoutingRegistry
+    from fastworkflow.run_fastapi_mcp.mcp_server import FastWorkflowMCPServer
+    from fastworkflow.agent.workflow_agent import _what_can_i_do
+    from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
     folder = _library_workflow(
         tmp_path, extra_commands=("_commands/Library/count_books.py",
@@ -1049,7 +1080,7 @@ def test_assistant_mode_refuses_planning_command(planning_dispatch_library):
     # test_assistant_mode_planning). A needs-agent command, note_member (a prose step and no
     # __result__), is still refused, with its reasons.
     ctx = planning_dispatch_library.ctx
-    ctx._cme_workflow.context["is_assistant_mode_command"] = True
+    ctx.start_round()
     out = CommandExecutor.invoke_command(ctx, "note_member Lee note=hello")
     needs, reasons = planning_command_needs_agent(planning_dispatch_library.folder, "Library/note_member")
     assert needs is True
@@ -1060,7 +1091,7 @@ def test_assistant_mode_refuses_planning_command(planning_dispatch_library):
 def test_slash_prefixed_refuses_planning_command(planning_dispatch_library):
     # Changed (fix-3rsq.10.8): the slash form of a needs-agent command, note_member (count_books runs).
     ctx = planning_dispatch_library.ctx
-    ctx._prepare_message_routing("/note_member Lee note=hello")
+    ctx._route_message("/note_member Lee note=hello")
     out = CommandExecutor.invoke_command(ctx, "/note_member Lee note=hello")
     needs, reasons = planning_command_needs_agent(planning_dispatch_library.folder, "Library/note_member")
     assert needs is True
@@ -1095,7 +1126,7 @@ def test_perform_mcp_tool_call_refuses_planning_command(planning_dispatch_librar
 def test_agent_step_runs_planning_command(planning_dispatch_library, monkeypatch):
     # Was a refusal ("it cannot be called as a step yet") before run_planning_command: an
     # agent step now extracts the arguments and runs the planning command as a nested frame.
-    from fastworkflow.workflow_agent import _execute_workflow_query
+    from fastworkflow.agent.workflow_agent import _execute_workflow_query
 
     ctx = planning_dispatch_library.ctx
     script_command_extraction(monkeypatch, planning_dispatch_library.wf)
@@ -1145,7 +1176,7 @@ def test_planning_command_absent_from_mcp_list_tools(planning_dispatch_library):
 _LIBRARY_PLANNING_FILES = (
     "_commands/Library/book_by_title.py",
     "_commands/Library/book_loans.py",
-    "_commands/Library/_wording.py",
+    "_commands/_shared/__init__.py", "_commands/_shared/wording.py",
     "_commands/Book/loan_report.py",
 )
 
@@ -1167,6 +1198,7 @@ _BOOK_LOANS_EXECUTOR_ENTRY = (
     "  Say who has a book on loan, given its title.\n"
     "  inputs:\n"
     "  - the book's title, type: str\n"
+    "    examples: ['Dune', 'Dune Messiah', 'Persuasion']\n"
 )
 
 _BOOK_LOANS_PLANNER_ENTRY = (
@@ -1214,8 +1246,11 @@ def test_library_planning_commands_listed_in_executor_catalog_with_signature(
         "  Show who wrote a book, and how many copies the library owns, given its title.\n"
         "  inputs:\n"
         "  - the book's title, type: str\n"
+        "    examples: ['Dune', 'Dune Messiah', 'Persuasion']\n"
         "  outputs:\n"
     ) in text
+    # An Input field's examples are listed; an Output field's are not (fix-xj0x).
+    assert "examples: ['b1', 'b3']" not in text
     assert "template:" not in text
 
 
@@ -1311,7 +1346,7 @@ def test_routing_contexts_keep_execution_commands_only(planning_catalog_library)
 
 def test_library_planning_commands_are_trained_labels_of_their_head(planning_catalog_library):
     """Phase 10 step 1 (production): a planning command labels the heads on its lookup path."""
-    from fastworkflow.model_pipeline_training import (
+    from fastworkflow.train.model_pipeline_training import (
         PLANNING_HEADS_NOT_HERE,
         experiment_planning_heads,
         experiment_reserved_class_arm,
@@ -1343,7 +1378,7 @@ _PLANNING_COMMAND_FILES = (
 @pytest.fixture
 def library_training_workflow(tmp_path, initialized_fastworkflow):
     """Library copy with planning commands that declare ``plain_utterances``."""
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     folder = _library_workflow(tmp_path, extra_commands=_PLANNING_COMMAND_FILES)
     RoutingRegistry.clear_registry()
@@ -1362,8 +1397,8 @@ def test_training_seed_collection_excludes_planning_commands(library_training_wo
 
 def test_trained_command_labels_hold_planning_commands_on_their_lookup_path(library_training_workflow):
     """Phase 10 step 1 (production): Library takes its planning command, never the Book one."""
-    from fastworkflow.command_routing import RoutingRegistry
-    from fastworkflow.model_pipeline_training import (
+    from fastworkflow.core.command_routing import RoutingRegistry
+    from fastworkflow.train.model_pipeline_training import (
         PLANNING_HEADS_NOT_HERE,
         experiment_planning_heads,
         experiment_reserved_class_arm,
@@ -1403,8 +1438,8 @@ def test_selective_training_fingerprints_exclude_planning_commands(library_train
 
 
 def test_param_example_training_list_excludes_planning_commands(library_training_workflow):
-    from fastworkflow.command_directory import CommandDirectory
-    from fastworkflow.model_pipeline_training import get_route_layer_filepath_model
+    from fastworkflow.core.command_directory import CommandDirectory
+    from fastworkflow.intent.router import get_route_layer_filepath_model
     from fastworkflow.train.__main__ import _get_commands_with_parameters
 
     cmd_dir = CommandDirectory.load(library_training_workflow)
@@ -1421,7 +1456,7 @@ def test_param_example_training_list_excludes_planning_commands(library_training
 # ------------------------------------------------------------------
 
 _CYCLE_COPIES = (
-    "_commands/Library/_wording.py",
+    "_commands/_shared/__init__.py", "_commands/_shared/wording.py",
     "_commands/Library/book_loans.py",
     "_commands/Library/book_by_title.py",
     "_commands/Library/count_books.py",
@@ -1549,7 +1584,7 @@ ALL_RULE_SENTENCES = (
     planning_commands.IN_REQUEST_STR_SENTENCE,
     planning_commands.IN_REQUEST_INT_SENTENCE,
     planning_commands.SUBJECT_SENTENCE,
-    planning_commands.VERIFY_BOOL_SENTENCE,
+    planning_commands.BOOL_SENTENCE,
 )
 TUTORIAL_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "planning_tutorial_workflow")
 
@@ -1562,7 +1597,7 @@ def test_each_rule_sentence_reaches_only_the_extractor_of_the_field_whose_check_
     assert planning_commands.extraction_sentences_for(folder, RULE_CHECK) == {
         "title": (planning_commands.SUBJECT_SENTENCE,),
         "copies": (planning_commands.IN_REQUEST_INT_SENTENCE,),
-        "loaned": (planning_commands.VERIFY_BOOL_SENTENCE,),
+        "loaned": (planning_commands.BOOL_SENTENCE,),   # the bool type's sentence
     }
     assert planning_commands.extraction_sentences_for(folder, "Library/book_by_title") == {
         "title": (planning_commands.IN_REQUEST_STR_SENTENCE,)}
@@ -1616,7 +1651,7 @@ DUNE_RECIPE = "Library/dune_search"
 RECIPE_COMMANDS = (
     "_commands/Library/book_by_title.py",
     "_commands/Library/book_loans.py",
-    "_commands/Library/_wording.py",
+    "_commands/_shared/__init__.py", "_commands/_shared/wording.py",
 )
 
 
@@ -1633,29 +1668,13 @@ def _start(tmp_path, initialized, monkeypatch, *, extra_planning_commands=None):
     )
 
 
-#: The real planner_planning_command_for, captured before any test stubs it (_make_library_runner_env does).
-REAL_PLANNER_PLANNING_COMMAND_FOR = workflow_agent.planner_planning_command_for
-
-
-def use_the_real_planner_planning_command_for(monkeypatch) -> None:
-    """Undo the stub the library harness puts on ``planner_planning_command_for`` for its whole test."""
-    monkeypatch.setattr(workflow_agent, "planner_planning_command_for", REAL_PLANNER_PLANNING_COMMAND_FOR)
-
-
 @pytest.fixture
 def recipe_env(tmp_path, initialized_fastworkflow, monkeypatch):
     """A library copy with a root skill (hours_overview) and a Library skill (dune_search)."""
     state = _start(tmp_path, initialized_fastworkflow, monkeypatch,
                    extra_planning_commands={HOURS_RECIPE: ROOT_PLANNING_COMMAND, DUNE_RECIPE: LIBRARY_PLANNING_COMMAND})
-    use_the_real_planner_planning_command_for(monkeypatch)
     yield state
     state.ctx.pop_active_workflow()
-
-
-def _match_only(monkeypatch, scope: str, value: str) -> None:
-    """Jev's match, stubbed: the request asks for skill *value*, confidently, along *scope*."""
-    monkeypatch.setattr(workflow_agent, "_planning_command_matcher",
-                        lambda folder: {scope: _fake_matcher(value, 0.9)})
 
 
 def test_the_matched_planning_commands_are_on_the_planner_listing(recipe_env):

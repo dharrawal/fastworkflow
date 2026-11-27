@@ -22,10 +22,10 @@ import pytest
 from dotenv import dotenv_values
 
 import fastworkflow
-from fastworkflow import tracing
-from fastworkflow.command_executor import CommandExecutor
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
-from fastworkflow.workflow_agent import _execute_workflow_query
+from fastworkflow.observability import tracing
+from fastworkflow.engine.command_executor import CommandExecutor
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.agent.workflow_agent import _execute_workflow_query
 
 from tests.todo_list_workflow.application.todo_manager import TodoListManager
 
@@ -43,7 +43,7 @@ def todo_workflow_path() -> str:
 @pytest.fixture
 def initialized_fastworkflow():
     fastworkflow.init({})
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     RoutingRegistry.clear_registry()
     yield
@@ -143,8 +143,9 @@ def test_prose_path_via_process_turn(
             sink=sink,
             turn_outputs=ctx._turn_outputs,
             turn_result=sink.turn_records[-1],
-            outer_span_name=tracing.SPAN_AGENT_TOOL_CALL,
-            inner_span_name=tracing.SPAN_COMMAND_EXECUTE,
+            # One dispatch, one span (bd fix-qjne.34: the "/" path opens no tool-call span of its own).
+            outer_span_name=tracing.SPAN_COMMAND,
+            inner_span_name=None,
         )
     finally:
         with suppress(Exception):
@@ -162,7 +163,7 @@ def test_direct_action_path_via_process_action_turn(
             sink=sink,
             turn_outputs=ctx._turn_outputs,
             turn_result=sink.turn_records[-1],
-            outer_span_name=tracing.SPAN_AGENT_TOOL_CALL,
+            outer_span_name=tracing.SPAN_COMMAND,
             inner_span_name=None,
         )
     finally:
@@ -174,13 +175,13 @@ def test_direct_action_path_via_process_action_turn(
 def hello_initialized():
     # `is_workflow_trained`, not "___command_info exists": an untrained
     # scaffold already has that directory (3.3 port adaptation).
-    from fastworkflow.model_pipeline_training import is_workflow_trained
+    from fastworkflow.intent.router import is_workflow_trained
 
     if not is_workflow_trained(HELLO_WORLD)[0]:
         pytest.skip("hello_world is not trained on this machine")
     env = dotenv_values("fastworkflow/examples/fastworkflow.env")
     fastworkflow.init(dict(env))
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     RoutingRegistry.clear_registry()
     yield
@@ -209,8 +210,9 @@ def test_agent_tool_path_via_execute_workflow_query(hello_initialized):
         sink=sink,
         turn_outputs=ctx._turn_outputs,
         turn_result=turn_result,
-        outer_span_name=tracing.SPAN_AGENT_TOOL_CALL,
-        inner_span_name=tracing.SPAN_COMMAND_EXECUTE,
+        # The agent's tool call is recorded on its step (none is open here) and the command on fw.command.
+        outer_span_name=tracing.SPAN_COMMAND,
+        inner_span_name=None,
     )
 
     ctx.pop_active_workflow()

@@ -13,7 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from fastworkflow.context_identity import (
+from fastworkflow.core.context_identity import (
     context_clause_for,
     context_identity,
     declared_instance_label,
@@ -34,7 +34,7 @@ from fastworkflow.observation_offloading.labels import (
     strip_alias_line,
 )
 from fastworkflow.observation_offloading.state import reset_observation_state
-from fastworkflow.workflow_agent import initialize_workflow_tool_agent
+from fastworkflow.agent.workflow_agent import initialize_workflow_tool_agent
 
 
 # --------------------------------------------------------------------------
@@ -268,8 +268,8 @@ class ExecuteStepPrintsTheContextItRanIn(unittest.TestCase):
             return AccountContext if name == "Account" else ItemExplorerContext
 
         patches = [
-            patch("fastworkflow.workflow_agent._execute_workflow_query", dispatch),
-            patch("fastworkflow.context_identity.context_class_for", context_class),
+            patch("fastworkflow.agent.workflow_agent._execute_workflow_query", dispatch),
+            patch("fastworkflow.core.context_identity.context_class_for", context_class),
         ]
         for item in patches:
             item.start()
@@ -281,7 +281,7 @@ class ExecuteStepPrintsTheContextItRanIn(unittest.TestCase):
             captured.update({getattr(tool, "name", None) or tool.__name__: tool for tool in tools})
             return SimpleNamespace()
 
-        with patch("fastworkflow.workflow_agent.build_tool_agent", build):
+        with patch("fastworkflow.agent.workflow_agent.build_tool_agent", build):
             initialize_workflow_tool_agent(self.session)
         self.execute = captured["execute_workflow_query"]
 

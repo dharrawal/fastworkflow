@@ -13,7 +13,7 @@ Depth: 1 (lower bound; open steps name no command)
 
 | input | type | default | sample | classifier_confirms / classifier_decides | copied_from_command_text / record_named_in_command_text | description |
 |---|---|---|---|---|---|---|
-| `branch` | str | `""` | `<branch>` |  | yes; ignore `the`, `branch` | the branch asked about, if named (such as Central or Riverside); empty for all |
+| `branch` | str | `""` | `Central` |  | yes; ignore `the`, `branch` | the branch asked about, if named (such as Central or Riverside); empty for all |
 
 - `branch` must be written in the command text (`copied_from_command_text`).
 
@@ -64,8 +64,8 @@ Reads: `branches`. Output: none. Settings: `when=branches.names`.
 
 _Steps below are rendered with placeholder facts: `<phase.fact>` stands for that fact as read at run time, and 999999 (or 999,999) for a number fact the code converted; values computed from facts (counts, comparisons, matches) are not real._
 
-1. `count_overdue branch=<branch>`
-2. `name the branches (<branches.names[0]>) and the number of overdue loans at <branch>`
+1. `count_overdue branch=Central`
+2. `name the branches (<branches.names[0]>) and the number of overdue loans at Central`
 
 ### Plan when branch = empty
 

@@ -61,14 +61,18 @@ class BindingHarness:
 
 
 @pytest.fixture
-def binding_harness(tmp_path, monkeypatch):
+def binding_harness(tmp_path, monkeypatch, env_files):
     package_path = fastworkflow.get_fastworkflow_package_path()
     workflow_path = os.path.join(package_path, "examples", "hello_world")
     if not os.path.isdir(workflow_path):
         pytest.skip(f"hello_world workflow not found at {workflow_path}")
 
     monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "state"))
-    sys.argv = ["pytest", "--workflow_path", workflow_path]
+    # The server's env files (``env_files``: the template's models, placeholder keys, live calls refused): its startup
+    # check needs an agent model. Before, a developer's .env that litellm loaded into the process supplied it.
+    env_file, passwords_file = env_files
+    sys.argv = ["pytest", "--workflow_path", workflow_path,
+                "--env_file_path", env_file, "--passwords_file_path", passwords_file]
     import fastworkflow.run_fastapi_mcp.__main__ as main
 
     main = importlib.reload(main)

@@ -76,8 +76,8 @@ from typing import Iterable, Mapping, Optional
 from pydantic import BaseModel, ValidationError
 
 import fastworkflow
-from fastworkflow.command_directory import CommandDirectory
-from fastworkflow.nlu_labels import (
+from fastworkflow.core.command_directory import CommandDirectory
+from fastworkflow.intent.nlu_labels import (
     NON_ROUTABLE_LABELS,
     PARAMETER_VALUE_PLACEHOLDERS,
     WILDCARD_LABEL,
@@ -86,6 +86,7 @@ from fastworkflow.train import (
     artifact_versioning,
     determinism,
     heldout_evaluation,
+    intent_model_layout,
     utterance_cache,
 )
 from fastworkflow.train.personas import active_persona_source_label
@@ -114,7 +115,7 @@ ARTIFACT_FORMAT_VERSION = 2
 
 # Full-module digests are intentionally conservative. A helper or comments-only edit
 # may trigger a full retrain; missing a helper edit could silently carry stale models.
-TRAINER_SOURCE_MODULE = "fastworkflow.model_pipeline_training"
+TRAINER_SOURCE_MODULE = "fastworkflow.train.model_pipeline_training"
 GENERATOR_SOURCE_MODULE = "fastworkflow.train.generate_synthetic"
 
 # Every file `train()` writes per context. All of them must exist before a context is
@@ -127,6 +128,29 @@ REQUIRED_CONTEXT_ARTIFACTS: tuple[str, ...] = (
     "tiny_ambiguous_threshold.json",
     "large_ambiguous_threshold.json",
     "label_encoder.pkl",
+)
+
+
+# The ``workflow`` intent model layout (INTENT_MODEL_LAYOUT=workflow, `intent_model_layout`):
+# one model folder per version, and two small files per context. A version of that layout is
+# complete when the model folder has its three entries and every context has its two files.
+REQUIRED_WORKFLOW_MODEL_ARTIFACTS: tuple[str, ...] = (
+    intent_model_layout.REQUIRED_WORKFLOW_MODEL_ARTIFACTS
+)
+REQUIRED_WORKFLOW_CONTEXT_ARTIFACTS: tuple[str, ...] = (
+    intent_model_layout.REQUIRED_WORKFLOW_CONTEXT_ARTIFACTS
+)
+# The single model's trainer (and the row assembly both one-model layouts share), digested into
+# the signature of a one-model-layout run only.
+WORKFLOW_MODEL_SOURCE_MODULE = "fastworkflow.train.workflow_model"
+# The embedding head's trainer, digested into the signature of an ``embedding``-layout run.
+EMBEDDING_HEAD_SOURCE_MODULE = "fastworkflow.train.embedding_head"
+# Signature fields that exist for the one-model layouts. They are left out of the saved file
+# while unset, so a per-context signature is the file it was before the layouts existed.
+_WORKFLOW_LAYOUT_SIGNATURE_FIELDS: tuple[str, ...] = (
+    "intent_model_layout",
+    "workflow_model_source_digest",
+    "embedding_head",
 )
 
 
@@ -204,7 +228,7 @@ class ContextSignature(BaseModel):
 def resolved_arm(reserved_class_arm: Optional[str]) -> str:
     """The arm the planner trains under: the explicit one, else the experiment override, else sparse_1."""
     # Lazy: model_pipeline_training imports torch, and the planner does not need it otherwise.
-    from fastworkflow.model_pipeline_training import resolve_reserved_class_arm
+    from fastworkflow.train.model_pipeline_training import resolve_reserved_class_arm
 
     return resolve_reserved_class_arm(reserved_class_arm)
 
@@ -215,7 +239,7 @@ def sparse_arm(reserved_class_arm: Optional[str]) -> bool:
     ``None`` is the shipped construction, which is sparse, so a shipped run is sparse too. The
     internal CME's construction is ``"none"``, which is not sparse.
     """
-    from fastworkflow.model_pipeline_training import arm_construction
+    from fastworkflow.train.model_pipeline_training import arm_construction
 
     return arm_construction(resolved_arm(reserved_class_arm)) == "not_here"
 
@@ -233,7 +257,8 @@ class TrainingSignature(BaseModel):
     seed: Optional[int] = None
     tiny_model: Optional[str] = None
     large_model: Optional[str] = None
-    syndata_model: Optional[str] = None
+    # No syndata model (bd fix-ygxo): generated utterances are cached and reused under any generator model, so changing
+    # LLM_SYNDATA_GEN (or the model it falls back to) changes nothing a run produces from the cache.
     persona_source: Optional[str] = None
     generator_source_digest: Optional[str] = None
     trainer_source_digest: Optional[str] = None
@@ -243,17 +268,33 @@ class TrainingSignature(BaseModel):
     #: from any current value, so the first train under the sparse construction retrains every
     #: head and never carries an old head forward.
     not_here: Optional[dict] = None
+    #: The artifact layout the run writes: None is ``per_context`` (also what every signature
+    #: saved before the setting existed means), ``"workflow"`` is one fine-tuned model for the
+    #: workflow and ``"embedding"`` one linear head over a frozen encoder.
+    #: A change of layout is a change of every artifact, hence a global input.
+    intent_model_layout: Optional[str] = None
+    #: The digest of the single model's trainer module, which also assembles the rows of the
+    #: embedding head; set for the one-model layouts only, where an edit to that module changes
+    #: what a run produces.
+    workflow_model_source_digest: Optional[str] = None
+    #: The ``embedding`` layout's inputs: the encoder id, its pooling, the two calibration
+    #: targets and the digest of the head's trainer module, as one JSON text. None in every
+    #: other layout.
+    embedding_head: Optional[str] = None
     command_fingerprints: dict[str, CommandFingerprint] = {}
     contexts: dict[str, ContextSignature] = {}
 
     def global_inputs(self) -> dict:
         """The header fields, as a plain dict, for a field-by-field diff."""
         return {
+            "intent_model_layout":
+                self.intent_model_layout or intent_model_layout.PER_CONTEXT,
+            "workflow_model_source_digest": self.workflow_model_source_digest,
+            "embedding_head": self.embedding_head,
             "format_version": self.format_version,
             "seed": self.seed,
             "tiny_model": self.tiny_model,
             "large_model": self.large_model,
-            "syndata_model": self.syndata_model,
             "persona_source": self.persona_source,
             "generator_source_digest": self.generator_source_digest,
             "trainer_source_digest": self.trainer_source_digest,
@@ -363,6 +404,11 @@ def compute_command_fingerprints(workflow_folderpath: str) -> dict[str, CommandF
     command would be reported unchanged. Hydration order is not a property anything
     else guarantees, so this cannot be left to luck.
     """
+    # Resolve once: a command's `source_path` is recorded in the signature, and a path spelled
+    # relative to the current directory (`.`, `workflow`) would bake that spelling in and make
+    # the same workflow look changed from another directory. `abspath` (not `realpath`) is what
+    # `fastworkflow train` always used, so signatures of absolute paths are unchanged.
+    workflow_folderpath = os.path.abspath(workflow_folderpath)
     crd = fastworkflow.RoutingRegistry.get_definition(workflow_folderpath)
     cmd_dir = crd.command_directory
 
@@ -524,13 +570,13 @@ def build_context_maps(
     scoped = head_scope == "scoped"
     if scoped:
         # Lazy: model_pipeline_training imports torch, and this module must not.
-        from fastworkflow.model_pipeline_training import own_command_names
+        from fastworkflow.train.model_pipeline_training import own_command_names
 
     context_commands: dict[str, set[str]] = {}
     unresolved: dict[str, list[str]] = {}
 
     # Lazy: model_pipeline_training imports torch, and this module must not.
-    from fastworkflow.model_pipeline_training import planning_labels_in_layout
+    from fastworkflow.train.model_pipeline_training import planning_labels_in_layout
 
     for context_name in context_names:
         if scoped:
@@ -567,15 +613,15 @@ def contexts_for_training(workflow_folderpath: str) -> set[str]:
     a version does not contain -- so the disagreement would present as part of a
     workflow silently becoming untrained.
 
-    The internal ``command_metadata_extraction`` and ``consultation`` contexts are
+    The internal ``command_metadata_extraction`` and ``plan`` contexts are
     excluded from an app workflow because their models live in those internal
     workflows, and the global wildcard context ``"*"`` is always included.
     """
     crd = fastworkflow.RoutingRegistry.get_definition(workflow_folderpath)
     cme_path = fastworkflow.get_internal_workflow_path("command_metadata_extraction")
-    consultation_path = fastworkflow.get_internal_workflow_path("consultation")
+    plan_path = fastworkflow.get_internal_workflow_path("plan_metadata_extraction")
     internal_contexts: set[str] = set()
-    for internal_path in (cme_path, consultation_path):
+    for internal_path in (cme_path, plan_path):
         if os.path.isdir(internal_path):
             internal_contexts |= set(
                 fastworkflow.CommandContextModel.load(internal_path)._command_contexts.keys()
@@ -598,9 +644,9 @@ def contexts_for_training(workflow_folderpath: str) -> set[str]:
         # `ErrorCorrection` is excluded because the internal workflow declares it as a
         # context but trains no classifier for it.
         return set(cme_contexts) - {'ErrorCorrection'}
-    if _targets_internal_workflow("consultation", consultation_path):
+    if _targets_internal_workflow("plan_metadata_extraction", plan_path):
         return set(
-            fastworkflow.CommandContextModel.load(consultation_path)._command_contexts.keys()
+            fastworkflow.CommandContextModel.load(plan_path)._command_contexts.keys()
         )
     return (set(crd.contexts.keys()) - internal_contexts) | {'*'}
 
@@ -647,6 +693,8 @@ def compute_context_signatures(
     sparse = sparse_arm(reserved_class_arm)
     if sparse and universe is None:
         universe = set().union(*context_commands.values()) if context_commands else set()
+    from fastworkflow.train.model_pipeline_training import BUILT_IN_VAGUE_SOURCE
+
     signatures: dict[str, ContextSignature] = {}
     for context_name in context_names:
         own = context_commands.get(context_name, set())
@@ -657,6 +705,11 @@ def compute_context_signatures(
                 command for command in (universe or set())
                 if command not in own and command.split("/")[-1] != WILDCARD_LABEL
             }
+
+        samples = (not_here_samples_by_context or {}).get(context_name) if sparse else None
+        if samples and BUILT_IN_VAGUE_SOURCE in samples:
+            # The head has no foreign seed, so its class is the built-in vague replies (fix-1hs8).
+            wildcard_sources.add(BUILT_IN_VAGUE_SOURCE)
 
         signatures[context_name] = ContextSignature(
             context_name=context_name,
@@ -680,8 +733,9 @@ def compute_planning_fingerprints(workflow_folderpath: str) -> dict[str, Command
     so a seed edit made in this process would otherwise be invisible to the planner. The
     file hash also moves on a docstring edit, which is the conservative direction.
     """
-    from fastworkflow.workflow_agent import _planning_command_files
+    from fastworkflow.agent.workflow_agent import _planning_command_files
 
+    workflow_folderpath = os.path.abspath(workflow_folderpath)  # see compute_command_fingerprints
     fingerprints: dict[str, CommandFingerprint] = {}
     root = os.path.join(workflow_folderpath, "_commands")
     for name, path in _planning_command_files(root):
@@ -695,6 +749,20 @@ def compute_planning_fingerprints(workflow_folderpath: str) -> dict[str, Command
     return fingerprints
 
 
+def built_in_vague_fingerprint() -> CommandFingerprint:
+    """The fingerprint of the built-in vague replies (a head's training input, fix-1hs8), by their text."""
+    from fastworkflow.train.model_pipeline_training import (
+        BUILT_IN_VAGUE_REPLIES,
+        BUILT_IN_VAGUE_SOURCE,
+        BUILT_IN_VAGUE_WEIGHT,
+    )
+
+    return CommandFingerprint(
+        command_name=BUILT_IN_VAGUE_SOURCE, source_path=None,
+        source_sha256=_sha256_strings([*BUILT_IN_VAGUE_REPLIES, f"weight={BUILT_IN_VAGUE_WEIGHT}"]),
+        seed_utterances_sha256=None)
+
+
 def compute_training_signature(
     workflow_folderpath: str,
     context_names: Iterable[str],
@@ -702,8 +770,16 @@ def compute_training_signature(
     reserved_class_arm: Optional[str] = None,
     head_scope: Optional[str] = None,
     recorded_samples: Optional[Mapping[str, Optional[Mapping[str, list[str]]]]] = None,
+    intent_model_layout_name: Optional[str] = None,
 ) -> tuple[TrainingSignature, dict[str, list[str]]]:
     """Build the signature this workflow would train under right now.
+
+    ``intent_model_layout_name`` is the artifact layout the run writes (None or
+    ``"per_context"``: a classifier pair per context; ``"workflow"``: one fine-tuned model for
+    the workflow; ``"embedding"``: one linear head over a frozen encoder). The per-context body
+    is computed the same way under all three, so the promotion-time checks read one shape; the
+    layout itself, the trainer modules of a one-model layout and, for ``embedding``, the encoder
+    id, its pooling and the two calibration targets are header fields.
 
     ``recorded_samples`` is each head's not-here samples from the version being carried from
     (design 2.50). A recorded sample is kept while its seed text exists; ``None`` chooses every
@@ -712,13 +788,17 @@ def compute_training_signature(
     Returns ``(signature, unresolved)``; ``unresolved`` names contexts the context
     model could not describe, which the caller must retrain regardless of the diff.
     """
+    workflow_folderpath = os.path.abspath(workflow_folderpath)  # see compute_command_fingerprints
     contexts = sorted(context_names)
     context_commands, unresolved = build_context_maps(
         workflow_folderpath, contexts, head_scope=head_scope)
 
-    from fastworkflow.model_pipeline_training import not_here_construction
+    from fastworkflow.train.model_pipeline_training import (
+        BUILT_IN_VAGUE_SOURCE,
+        not_here_construction,
+    )
 
-    from fastworkflow.model_pipeline_training import arm_for_workflow
+    from fastworkflow.train.model_pipeline_training import arm_for_workflow
 
     reserved_class_arm = arm_for_workflow(workflow_folderpath, reserved_class_arm)
     command_fingerprints = compute_command_fingerprints(workflow_folderpath)
@@ -729,7 +809,7 @@ def compute_training_signature(
         command_fingerprints = {**command_fingerprints, **planning}
         universe = set().union(*context_commands.values()) | set(planning)
         # After the fingerprints, which hydrate every command the samples are read from.
-        from fastworkflow.model_pipeline_training import not_here_samples_for_context
+        from fastworkflow.train.model_pipeline_training import not_here_samples_for_context
 
         crd = fastworkflow.RoutingRegistry.get_definition(workflow_folderpath)
         not_here_samples_by_context = {
@@ -743,8 +823,33 @@ def compute_training_signature(
             for context_name in contexts
         }
 
+    if any(BUILT_IN_VAGUE_SOURCE in (samples or {})
+           for samples in (not_here_samples_by_context or {}).values()):
+        # A head seeded from the built-in vague replies: they are a training input like a planning
+        # command file, fingerprinted by their text so editing the list retrains that head.
+        command_fingerprints = {
+            **command_fingerprints, BUILT_IN_VAGUE_SOURCE: built_in_vague_fingerprint()}
+
+    workflow_layout = intent_model_layout_name in intent_model_layout.ONE_MODEL_LAYOUTS
+    embedding_layout = intent_model_layout_name == intent_model_layout.EMBEDDING
     signature = TrainingSignature(
         format_version=ARTIFACT_FORMAT_VERSION,
+        intent_model_layout=intent_model_layout_name if workflow_layout else None,
+        workflow_model_source_digest=(
+            _global_input(
+                lambda: _module_source_digest(WORKFLOW_MODEL_SOURCE_MODULE),
+                "workflow model trainer module source")
+            if workflow_layout else None
+        ),
+        embedding_head=(
+            _global_input(
+                lambda: json.dumps({
+                    **intent_model_layout.embedding_settings(workflow_folderpath),
+                    "source_digest": _module_source_digest(EMBEDDING_HEAD_SOURCE_MODULE),
+                }, sort_keys=True),
+                "embedding head settings")
+            if embedding_layout else None
+        ),
         not_here=not_here_construction(reserved_class_arm, workflow_folderpath),
         seed=(
             int(seed)
@@ -760,8 +865,6 @@ def compute_training_signature(
             lambda: fastworkflow.get_env_var(
                 "INTENT_DETECTION_LARGE_MODEL", default="distilbert-base-uncased"),
             "INTENT_DETECTION_LARGE_MODEL"),
-        syndata_model=_global_input(
-            lambda: fastworkflow.get_env_var("LLM_SYNDATA_GEN"), "LLM_SYNDATA_GEN"),
         persona_source=_global_input(
             active_persona_source_label, "persona source"),
         generator_source_digest=_global_input(
@@ -821,7 +924,11 @@ def save_training_signature(
 ) -> str:
     path = signature_path(workflow_folderpath, version_id)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(signature.model_dump(), indent=2, sort_keys=True))
+    payload = signature.model_dump()
+    for name in _WORKFLOW_LAYOUT_SIGNATURE_FIELDS:
+        if payload.get(name) is None:
+            payload.pop(name, None)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True))
     return str(path)
 
 
@@ -895,7 +1002,7 @@ def context_contribution_manifest_fields(
     def _arm_fields(context_signature: ContextSignature) -> dict:
         if context_signature.reserved_class_arm is None:
             return {}  # shipped runs: the manifest is unchanged
-        from fastworkflow.model_pipeline_training import arm_construction
+        from fastworkflow.train.model_pipeline_training import arm_construction
 
         not_here = sparse_arm(context_signature.reserved_class_arm)
         own_union = set()
@@ -975,6 +1082,10 @@ def context_artifacts_complete(
         return False
     if not folder.is_dir():
         return False
+    if intent_model_layout.is_workflow_scope_folder(str(folder)):
+        # A one-model layout: the context's two small files, and the version's one model
+        # folder with the entries of its layout. One missing model makes every context incomplete.
+        return intent_model_layout.workflow_context_complete(str(folder))
     # save_pretrained writes tinymodel.pth / largemodel.pth as DIRECTORIES, the
     # threshold files as files. `exists()` covers both without asserting which.
     return all((folder / name).exists() for name in REQUIRED_CONTEXT_ARTIFACTS)
@@ -1099,8 +1210,15 @@ def compute_training_plan(
     cache_mode: Optional[str] = None,
     reserved_class_arm: Optional[str] = None,
     head_scope: Optional[str] = None,
+    intent_model_layout_name: Optional[str] = None,
 ) -> tuple[TrainingPlan, TrainingSignature]:
     """Decide which contexts to retrain and which to carry forward.
+
+    ``intent_model_layout_name`` is the artifact layout this run writes. A layout that differs
+    from the one the baseline was trained in is a changed global input: a full retrain. In the
+    ``workflow`` and ``embedding`` layouts there is one model for every context, so nothing can be carried
+    forward piecemeal: the plan is every context when anything at all is dirty, and empty
+    (a no-op) when nothing is.
 
     The default is automatic change detection. It falls back to a full retrain whenever
     no trustworthy baseline exists, a global input changed, artifacts are incomplete, or
@@ -1117,7 +1235,8 @@ def compute_training_plan(
     the caller because it must be written into the version that this plan produces,
     and recomputing it after training could pick up a source edit made mid-run.
     """
-    from fastworkflow.model_pipeline_training import arm_for_workflow
+    workflow_folderpath = os.path.abspath(workflow_folderpath)  # see compute_command_fingerprints
+    from fastworkflow.train.model_pipeline_training import arm_for_workflow
 
     candidates = sorted(candidate_contexts)
     # The internal CME keeps its control construction whatever the caller passes (see arm_for_workflow).
@@ -1138,7 +1257,8 @@ def compute_training_plan(
     current_signature, unresolved = compute_training_signature(
         workflow_folderpath, candidates, seed=seed,
         reserved_class_arm=reserved_class_arm, head_scope=head_scope,
-        recorded_samples=recorded_samples)
+        recorded_samples=recorded_samples,
+        intent_model_layout_name=intent_model_layout_name)
 
     if not (only_commands or only_contexts or changed_only):
         return (
@@ -1224,6 +1344,18 @@ def compute_training_plan(
 
     to_train = sorted(ctx for ctx in candidates if ctx in reasons)
     carried = sorted(ctx for ctx in candidates if ctx not in reasons)
+
+    if intent_model_layout_name in intent_model_layout.ONE_MODEL_LAYOUTS and to_train:
+        # One model answers for every context, so a change that reaches any context retrains
+        # it, and a model cannot be carried forward for some of its contexts.
+        reason = (
+            f"full retrain (INTENT_MODEL_LAYOUT={intent_model_layout_name}: one model serves "
+            f"every context, so any change retrains it)")
+        plan = _full_retrain(candidates, reason)
+        plan.dirty_commands = sorted(dirty)
+        for context_name in to_train:
+            plan.reasons[context_name] = [reason, *reasons[context_name]]
+        return plan, current_signature
 
     # The mode check above asks whether the cache is ALLOWED to be reused. It does not
     # ask whether there is anything in it. A deleted cache directory, a fresh clone, or

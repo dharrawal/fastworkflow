@@ -1,6 +1,6 @@
 """Unit tests for distillation's pure comparison/formatting/persistence logic.
 
-These cover the LLM-free core of fastworkflow/distillation.py — trajectory and
+These cover the LLM-free core of fastworkflow/evaluation/distillation.py — trajectory and
 plan comparison, trajectory formatting for the insight LLM, and numbered-insight
 persistence — without any network/LLM dependency.
 """
@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from fastworkflow.distillation import (
+from fastworkflow.evaluation.distillation import (
     DistillationSession,
     PlanningStep,
     DistillationResult,

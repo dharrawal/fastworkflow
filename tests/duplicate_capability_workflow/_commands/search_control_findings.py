@@ -10,15 +10,15 @@ import fastworkflow
 from pydantic import BaseModel, Field
 
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
-from fastworkflow.workflow import Workflow
+from fastworkflow.core.workflow import Workflow
 
 
 class Signature:
     """Search the control findings for a scope."""
 
     class Input(BaseModel):
-        scope: str = Field(default="NOT_FOUND", description="Scope to search findings in")
-        severity: str = Field(default="NOT_FOUND", description="Severity filter")
+        scope: str = Field(description="Scope to search findings in")
+        severity: str = Field(description="Severity filter")
 
     class Output(BaseModel):
         findings: str = Field(description="The findings that matched.")

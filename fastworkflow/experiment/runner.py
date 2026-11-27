@@ -47,7 +47,7 @@ from typing import Any, Callable, Iterable, Optional, Sequence
 
 import fastworkflow
 from fastworkflow.observability import evidence_run as evidence_run_module
-from fastworkflow import state_paths
+from fastworkflow.session import state_paths
 from fastworkflow.observability import store as observability_store
 from fastworkflow.observability.archive_files import (
     archive_file_for,
@@ -55,14 +55,24 @@ from fastworkflow.observability.archive_files import (
 )
 from fastworkflow.benchmark.catalog import load_version
 from fastworkflow.utils.logging import logger
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 # The env knobs `[XR16]` needs in the process before any attempt starts. Both
 # are process-wide by nature: `fastworkflow.init()` installs one global env dict
 # (`__init__.py:244-286`), so an arm that needs different values needs a
 # different process.
 LM_CACHE_VAR = "FW_LM_CACHE"
-UTTERANCE_CACHE_SCOPE_VAR = "FW_UTTERANCE_CACHE_SCOPE"
+# Learning from use changes the intent head while a round runs, so the harness turns both off itself.
+LEARNING_OFF_SETTINGS = {"INTENT_LEARNING_REFIT": "off", "INTENT_LEARNING_RECORD": "off"}
+
+
+def _force_setting(name: str, value: str) -> None:
+    """Set *name* for this process whatever the env files or the shell say: into the env dict ``init`` loaded, and
+    over a process value too, because the process environment wins (``fastworkflow.get_env_var``). The process is
+    left alone when it does not set the name, so nothing leaks past the env dict's own lifetime."""
+    fastworkflow._env_vars[name] = value
+    if name in os.environ and os.environ[name] != value:
+        os.environ[name] = value
 
 
 class ExperimentAborted(RuntimeError):
@@ -542,6 +552,10 @@ class ExperimentController:
         # ID is protected.
         if registration is not None:
             benchmark_setup.bind_experiment(self.workflow_folderpath, experiment_id)
+        # A driver that names no workflow is this controller's own folder's.
+        workflow_name = workflow_name or benchmark_setup.workflow_name_for(
+            self.workflow_folderpath
+        )
         # The experiment joins its contest in the store it is recorded into
         # (`fix-9eg.17.1`), in the same transaction; one registered at UI
         # creation is already a member there and keeps its group.
@@ -876,9 +890,9 @@ class ExperimentHarness:
         )
         posture["sink"] = "in-process" if self._sink is not None else "none"
         if self.defeat_caches:
-            # `[XR16]`, both contaminants. Set through `fastworkflow`'s env dict
-            # rather than os.environ so `get_env_var` sees them; the process is
-            # the experiment, so process-wide is the right scope.
+            # `[XR16]`, both contaminants. Forced over the env files and a shell
+            # export alike (`_force_setting`); the process is the experiment, so
+            # process-wide is the right scope.
             #
             # MERGED, never `fastworkflow.init({...})`. `init` REPLACES the
             # process env dict wholesale (`__init__.py:253`), so calling it with
@@ -886,10 +900,13 @@ class ExperimentHarness:
             # every threshold the run needs -- and the failure would surface as
             # "DSPy Language Model not provided" from somewhere unrelated, long
             # after the harness had already been blamed and cleared.
-            fastworkflow._env_vars[LM_CACHE_VAR] = "0"
-            fastworkflow._env_vars[UTTERANCE_CACHE_SCOPE_VAR] = "workflow"
+            _force_setting(LM_CACHE_VAR, "0")
             posture[LM_CACHE_VAR] = "0"
-            posture[UTTERANCE_CACHE_SCOPE_VAR] = "workflow"
+        # Same mechanism, forced whether or not the caches are defeated: a head refitted or a row recorded
+        # mid-round is a different model under test for the attempts that follow.
+        for name, value in LEARNING_OFF_SETTINGS.items():
+            _force_setting(name, value)
+            posture[name] = value
 
         # The DSPy memory policy. A long agentic sweep in one process fills
         # DSPy's retention structures unbounded, and unlike the
@@ -947,8 +964,8 @@ class ExperimentHarness:
         try:
             from pathlib import Path
 
-            from fastworkflow.command_routing import RoutingRegistry
-            from fastworkflow.model_pipeline_training import CommandRouter
+            from fastworkflow.core.command_routing import RoutingRegistry
+            from fastworkflow.intent.router import CommandRouter
 
             RoutingRegistry.get_definition(self.workflow_folderpath)
             with contextlib.suppress(Exception):
@@ -975,7 +992,7 @@ class ExperimentHarness:
         try:
             from pathlib import Path
 
-            from fastworkflow.workflow_agent import warm_planning_commands
+            from fastworkflow.agent.workflow_agent import warm_planning_commands
 
             warm_planning_commands(str(Path(self.workflow_folderpath).resolve()))
         except Exception as exc:
@@ -1179,6 +1196,11 @@ class ExperimentHarness:
             "scores": self._store.experiment_scores(self.experiment_id),
         }
 
+    def _head_version(self) -> Optional[str]:
+        from fastworkflow.train.artifact_versioning import resolve_current_version
+
+        return resolve_current_version(self.workflow_folderpath)
+
     # -- one attempt ------------------------------------------------------
 
     def _run_attempt(
@@ -1263,6 +1285,8 @@ class ExperimentHarness:
             # forces the grader to be fixed and the attempt re-run.
             outcome, source, reward = "incomplete", "grader_error", None
             detail = {"grader_error": repr(exc)}
+        # Additive: the intent head version in force when the attempt ended (None when untrained).
+        detail = {**(detail or {}), "intent_head_version": self._head_version()}
         with self._lock:
             self._controller.finish_attempt(
                 self.experiment_id,

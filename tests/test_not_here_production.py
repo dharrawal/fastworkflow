@@ -19,8 +19,8 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow.command_routing import RoutingRegistry
-from fastworkflow.model_pipeline_training import (
+from fastworkflow.core.command_routing import RoutingRegistry
+from fastworkflow.train.model_pipeline_training import (
     INTERNAL_CME_ARM,
     NOT_HERE_SEEDS,
     PLANNING_HEADS_NOT_HERE,
@@ -38,7 +38,7 @@ from fastworkflow.model_pipeline_training import (
     select_escalation_rows,
     trained_command_labels,
 )
-from fastworkflow.workflow_agent import planning_command_utterances
+from fastworkflow.agent.workflow_agent import planning_command_utterances
 from fastworkflow.train import artifact_versioning as av
 from fastworkflow.train import selective_training
 from tests.test_not_here_class import (
@@ -229,7 +229,7 @@ def test_a_workflow_with_no_artifacts_is_not_refused_here(tmp_path):
 
 
 def test_chat_session_refuses_an_old_artifact_before_it_creates_a_workflow(tmp_path):
-    from fastworkflow.chat_session import ChatSession
+    from fastworkflow.engine.chat_session import ChatSession
 
     workflow = str(tmp_path / "old_chat_app")
     _write_version(workflow, "20260101T000000Z-oldchat", manifest={"seed": 1})
@@ -282,21 +282,22 @@ def test_a_matching_recorded_baseline_carries_nothing_forward_under_the_record_e
 
 # ---------------------------------------------------------------- the CME-path predicate
 
-def test_the_automatic_cme_check_skips_only_the_package_and_its_cme_workflow(tmp_path):
-    from fastworkflow.train.__main__ import _trains_the_fastworkflow_package
+def test_the_automatic_cme_check_skips_only_the_framework_workflows(tmp_path):
+    from fastworkflow.train.intent_model_layout import is_framework_workflow
 
     package = fastworkflow.get_fastworkflow_package_path()
     cme = os.path.join(package, "_workflows", "command_metadata_extraction")
-    assert _trains_the_fastworkflow_package(package)
-    assert _trains_the_fastworkflow_package(cme)
+    # the package root is no workflow (fix-bl97.2); only the framework's own workflows skip the check
+    assert not is_framework_workflow(package)
+    assert is_framework_workflow(cme)
     # an app that lives inside a checkout named "fastworkflow" is not the package: the CME is checked
-    assert not _trains_the_fastworkflow_package(os.path.join(package, "examples", "library"))
-    assert not _trains_the_fastworkflow_package(str(tmp_path / "fastworkflow" / "my_app"))
+    assert not is_framework_workflow(os.path.join(package, "examples", "library"))
+    assert not is_framework_workflow(str(tmp_path / "fastworkflow" / "my_app"))
 
 
 def test_every_execution_context_refuses_an_old_cme_before_it_builds_anything(tmp_path, monkeypatch):
     """The CME serves every session, so the context's constructor is the gate for every runtime path."""
-    from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+    from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
     old_cme = str(tmp_path / "old_cme")
     _write_version(old_cme, "20260101T000000Z-oldcme", manifest={"seed": 1})
@@ -311,7 +312,7 @@ def test_the_internal_cme_keeps_today_s_construction_with_no_wildcard_class(tmp_
     The real CME folder is never opened: the internal-CME path is pointed at a private copy, which
     is what the detection compares against.
     """
-    from fastworkflow.model_pipeline_training import (
+    from fastworkflow.train.model_pipeline_training import (
         arm_for_workflow,
         construction_records,
         is_internal_cme_folder,

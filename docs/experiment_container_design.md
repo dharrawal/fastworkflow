@@ -348,7 +348,7 @@ bead's sketch is **removed** — §6.4 says why.
 conversation_id=None, embedder_owns_conversations=None)`
 (`workflow_execution_context.py:251-277`) is the sole public identity setter; it
 is called before the first turn by every embedder (`chat_session.py:126`,
-`run/__main__.py:230`, `run_fastapi_mcp/utils.py:586,670,1495`,
+`run_cli/__main__.py:230`, `run_fastapi_mcp/utils.py:586,670,1495`,
 `run_fastapi_mcp/__main__.py:2232`), and it already carries the "a `None`
 argument leaves the binding unchanged" contract.
 
@@ -410,7 +410,7 @@ inserting for.
 **Verified 2026-08-29: `DistillationResult.run_id` already exists**
 (`distillation.py:627`, comment citing `fix-sb8.2`), is set on both return paths,
 is accumulated in `WEC._distillation_run_ids`, and is printed by the `//exit`
-summary at `run/__main__.py:288-296`. The bead's third bullet is **already
+summary at `run_cli/__main__.py:288-296`. The bead's third bullet is **already
 shipped**; re-implementing it would create a second, colliding path — the exact
 "work shipped under a neighbouring issue" pattern `CLAUDE.md` warns about.
 
@@ -926,9 +926,11 @@ f"exp:{experiment_id}:{task_id}:{attempt}"`, so attempts never share a
    `_get_cache_path(workflow_id, …)` is sharded per workflow id (so `[XR18]`'s
    unique `workflow_id_str` already isolates it), but
    `_get_cache_path_cache(convo_path)` (`:595-604`) is the **fixed literal**
-   `cache.sqlite3`, keyed on nothing. It is read at `cache_match` (`:482`) and
-   written at `store_utterance_cache` (`:577`) on the runtime turn path. So
-   attempt 2 inherits attempt 1's disambiguation decisions — correlated attempts,
+   `cache.sqlite3`, keyed on nothing. (Update, fix-o5wi.8: the similarity cache that read and wrote it is gone; it then held only the suggested
+   commands of an ambiguity question. Update, fix-o1lg S7: that store is gone too. The pending which-command question is plain
+   data in the CME context (`intent_loop`), saved with the session, so attempts cannot share it and there is nothing to shard.) It was read at `cache_match` and
+   written at `store_utterance_cache` on the runtime turn path. So
+   attempt 2 inherited attempt 1's disambiguation decisions — correlated attempts,
    which is exactly what `pass^k` must not have — and, worse, the **treatment arm
    inherits the baseline arm's**, because both run against the same workflow
    folder.

@@ -4,7 +4,7 @@ from typing import Dict, List, Tuple
 from fastworkflow.build.class_analysis_structures import ClassInfo, MethodInfo, PropertyInfo, FunctionInfo
 from fastworkflow.build.command_file_template import create_command_file, create_function_command_file
 from fastworkflow.utils.python_utils import get_module_import_path, find_module_dependencies
-from fastworkflow.command_context_model import CommandContextModel
+from fastworkflow.core.command_context_model import CommandContextModel
 import importlib.util
 import traceback
 import json
@@ -165,15 +165,17 @@ def validate_command_file_components_in_dir(directory: str) -> list:
     Returns a list of (file_path, error_message) for files missing required components.
     Prints errors if any are found.
     
-    Files starting with underscore (_) are skipped as they are not command files.
-    Files named 'startup.py' are also skipped as they have a different structure.
+    Files starting with underscore (_) are skipped as they are not command files. An execution command file with no
+    Signature (a startup command) is skipped too: such a command runs only as an action and has no Signature to check
+    (``command_directory.declares_signature``, the one test; its file name does not matter). A planning command
+    still needs its Signature.
     """
     import ast
     errors = []
     for root, _, files in os.walk(directory):
         for file in files:
-            # Skip files starting with underscore, __init__.py, and startup.py
-            if file.startswith('_') or file == '__init__.py' or file == 'startup.py':
+            # Skip files starting with underscore and __init__.py
+            if file.startswith('_') or file == '__init__.py':
                 continue
             if file.endswith('.py'):
                 file_path = os.path.join(root, file)
@@ -242,7 +244,9 @@ def validate_command_file_components_in_dir(directory: str) -> list:
                                     has_response_call = True
                     # Collect errors
                     if not has_signature:
-                        errors.append((file_path, 'Missing Signature class'))
+                        if has_plan_generator:
+                            errors.append((file_path, 'Missing Signature class'))
+                        # else: an execution command with no Signature runs only as an action (a startup command)
                         continue
                     # A planning command has no ResponseGenerator; only its Signature is checked
                     if has_plan_generator:

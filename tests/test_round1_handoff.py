@@ -20,21 +20,26 @@ from types import SimpleNamespace
 import pytest
 from dspy.utils import DummyLM
 
-from fastworkflow import review_engine, review_proposals, run_listing, workflow_agent
-from fastworkflow import approval_binding as ab
-from fastworkflow.review_engine import AWAITING, EXPIRED, REVISED
-from fastworkflow.review_proposals import SubTaskProposal
-from fastworkflow.turn import TurnStatus
-from fastworkflow.workflow_agent import initialize_workflow_tool_agent
+from fastworkflow.review import review_engine, review_proposals
+from fastworkflow.agent import run_listing, workflow_agent
+from fastworkflow.observability import tracing
+from fastworkflow.review import approval_binding as ab
+from fastworkflow.review.review_engine import AWAITING, EXPIRED, REVISED
+from fastworkflow.review.review_proposals import SubTaskProposal
+from fastworkflow.core.turn import TurnStatus
+from fastworkflow.agent.workflow_agent import initialize_workflow_tool_agent
 from tests.test_approval_binding import (  # noqa: F401 - the fixtures and the scripted agent
     Script, annotated_library, no_live_model, no_model_call_for_parameters, todo)
 from tests.test_planning_command_phases import RecordingSink
 from tests.test_round1_gate import (  # noqa: F401 - the gated context and the gate's helpers
-    EMMA, FIND, JOKE, _confirmed, _marker, _open_review, _ran, _split_into, gated)
+    EMMA, FIND, JOKE, _confirmed, _marker, _open_review, _ran, _split_into, gated, remote_decides_emma_and_joke)
 from tests.test_turn_result_capture import (  # noqa: F401 - the shared fixtures
     _make_agent_ctx, _set_agents, initialized_fastworkflow)
 
-pytestmark = pytest.mark.usefixtures("initialized_fastworkflow")
+# The free-text reply tests reach the plan head through the reader (``process_turn`` -> the CME wildcard
+# command); they run on the head's recorded answers (tests/recorded_router.py) so a retrain cannot turn them red and a
+# clean checkout runs them. The others never ask the head.
+pytestmark = pytest.mark.usefixtures("initialized_fastworkflow", "recorded_review_router")
 
 
 @pytest.fixture(autouse=True)
@@ -74,7 +79,7 @@ def _planner_stub(monkeypatch, queries: list):
         session._initial_plan_text = "1. find_member" if "Ann Lee" in user_query else ""
         return user_query
 
-    monkeypatch.setattr("fastworkflow.workflow_agent.build_query_with_next_steps", fake)
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.build_query_with_next_steps", fake)
 
 
 # ----------------------------------------------------------------------
@@ -82,7 +87,7 @@ def _planner_stub(monkeypatch, queries: list):
 # ----------------------------------------------------------------------
 
 
-def test_a_free_text_edit_is_read_by_one_model_call_and_shown_back_until_confirmed(gated, monkeypatch):
+def test_a_free_text_edit_is_read_by_one_model_call_and_shown_back_until_confirmed(gated, monkeypatch, remote_decides_emma_and_joke):
     _split_into(monkeypatch, [EMMA, JOKE])
     gated.ctx.process_turn(f"{EMMA} and {JOKE}")
     record = _open_review(gated)
@@ -104,7 +109,7 @@ def test_a_free_text_edit_is_read_by_one_model_call_and_shown_back_until_confirm
     assert _marker(gated) == "reviewed"
 
 
-def test_a_free_text_drop_is_read_and_the_confirmed_edit_applies(gated, monkeypatch):
+def test_a_free_text_drop_is_read_and_the_confirmed_edit_applies(gated, monkeypatch, remote_decides_emma_and_joke):
     _split_into(monkeypatch, [EMMA, JOKE])
     gated.ctx.process_turn(f"{EMMA} and {JOKE}")
     record = _open_review(gated)
@@ -125,7 +130,7 @@ def test_a_free_text_drop_is_read_and_the_confirmed_edit_applies(gated, monkeypa
 ])
 def test_the_reader_reads_add_merge_and_split_as_typed_edits_the_engine_applies(gated, edit, expected):
     """The reader's output is the typed edit list: each op becomes the engine's edit, and the engine applies it."""
-    from fastworkflow.review_proposals import SubTask
+    from fastworkflow.review.review_proposals import SubTask
 
     proposal = SubTaskProposal(items=[SubTask(goal=EMMA), SubTask(goal=JOKE)])
     read = review_proposals.model_edit_reader(planner_lm=_reply_lm(edit))
@@ -134,7 +139,7 @@ def test_the_reader_reads_add_merge_and_split_as_typed_edits_the_engine_applies(
     assert [item.goal for item in edited.items] == expected
 
 
-def test_a_reply_the_reader_cannot_read_asks_again_and_counts_toward_the_cap(gated, monkeypatch):
+def test_a_reply_the_reader_cannot_read_asks_again_and_counts_toward_the_cap(gated, monkeypatch, remote_decides_emma_and_joke):
     _split_into(monkeypatch, [EMMA, JOKE])
     gated.ctx.process_turn(f"{EMMA} and {JOKE}")
     record = _open_review(gated)
@@ -157,7 +162,7 @@ def test_a_reply_the_reader_cannot_read_asks_again_and_counts_toward_the_cap(gat
 # ----------------------------------------------------------------------
 
 
-def test_an_accepted_plan_runs_its_plain_goal_with_its_inputs_and_a_narrowed_listing(gated, monkeypatch):
+def test_an_accepted_plan_runs_its_plain_goal_with_its_inputs_and_a_narrowed_listing(gated, monkeypatch, remote_decides_emma_and_joke):
     queries: list = []
     _planner_stub(monkeypatch, queries)
     listings: list = []
@@ -188,7 +193,7 @@ def test_an_accepted_plan_runs_its_plain_goal_with_its_inputs_and_a_narrowed_lis
     assert queries[-1] == JOKE                              # the from-scratch goal runs as its own goal
 
 
-def test_a_from_sub_task_input_takes_the_output_of_that_sub_task(gated, monkeypatch):
+def test_a_from_sub_task_input_takes_the_output_of_that_sub_task(gated, monkeypatch, remote_decides_emma_and_joke):
     queries: list = []
     _planner_stub(monkeypatch, queries)
     _split_into(monkeypatch, [JOKE, FIND])
@@ -206,7 +211,7 @@ def test_a_from_sub_task_input_takes_the_output_of_that_sub_task(gated, monkeypa
     assert queries[-1] == f"{FIND} (inputs: query=the answer)"
 
 
-def test_a_from_sub_task_input_takes_the_typed_output_of_a_run_that_produced_one(gated, monkeypatch):
+def test_a_from_sub_task_input_takes_the_typed_output_of_a_run_that_produced_one(gated, monkeypatch, remote_decides_emma_and_joke):
     """find_member returns a typed Output (member_uids, names, total): the 'from sub-task 1' input of the next goal is
     that Output, not the agent's answer text (fix-3rsq.plan-review.2.11)."""
     queries: list = []
@@ -218,7 +223,7 @@ def test_a_from_sub_task_input_takes_the_typed_output_of_a_run_that_produced_one
         session._initial_plan_text = "1. find_member" if "query=Ann Lee" in user_query else ""
         return user_query
 
-    monkeypatch.setattr("fastworkflow.workflow_agent.build_query_with_next_steps", fake)
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.build_query_with_next_steps", fake)
     _split_into(monkeypatch, [FIND, JOKE])
     gated.ctx.process_turn(f"{FIND} and {JOKE}")
     _open_review(gated)
@@ -235,7 +240,7 @@ def test_a_from_sub_task_input_takes_the_typed_output_of_a_run_that_produced_one
     assert "found=the answer" not in queries[-1]
 
 
-def test_a_goal_whose_command_succeeded_but_whose_finish_check_fails_is_not_complete(gated, monkeypatch):
+def test_a_goal_whose_command_succeeded_but_whose_finish_check_fails_is_not_complete(gated, monkeypatch, remote_decides_emma_and_joke):
     """Inv. 3: the goal's plan names find_member. A different command that succeeds does not satisfy it, the finish check
     sends the agent back, and the goal completes only once find_member has run."""
     queries: list = []
@@ -274,7 +279,7 @@ def test_a_goal_whose_command_succeeded_but_whose_finish_check_fails_is_not_comp
 
 def _scripted_context(annotated_library, monkeypatch):
     """A fresh agent-mode context on the annotated library, scripted as the todo fixture scripts one (the same seams)."""
-    from fastworkflow.context_identity import context_class_for
+    from fastworkflow.core.context_identity import context_class_for
     from fastworkflow.examples.library.application.library import Library
 
     ctx, wf = _make_agent_ctx(str(annotated_library), monkeypatch)
@@ -304,7 +309,7 @@ def _scripted_context(annotated_library, monkeypatch):
     return SimpleNamespace(ctx=ctx, wf=wf, sink=sink, script=script, library=library)
 
 
-def test_an_accept_after_a_process_restart_resumes_the_review_and_runs_its_goals(annotated_library, monkeypatch):
+def test_an_accept_after_a_process_restart_resumes_the_review_and_runs_its_goals(annotated_library, monkeypatch, remote_decides_emma_and_joke):
     queries: list = []
     _planner_stub(monkeypatch, queries)
     _split_into(monkeypatch, [EMMA, JOKE])
@@ -320,7 +325,7 @@ def test_an_accept_after_a_process_restart_resumes_the_review_and_runs_its_goals
     second.ctx.apply_serialized_state(state)
     restored = ab.store_for(second.wf).active()
     assert restored is not None and restored.id == record.id and restored.state == REVISED
-    assert second.ctx._turn_frame().subtask_review_open is True
+    assert second.ctx._waiting.kind == "review" and second.ctx._waiting.payload["record_id"] == record.id
 
     second.script.steps = [("finish", {})] * 3              # the review frame, then the two goals
     out = second.ctx.process_turn("accept")
@@ -328,8 +333,8 @@ def test_an_accept_after_a_process_restart_resumes_the_review_and_runs_its_goals
     accepted = review_proposals.accepted_subtask_proposal(second.wf)
     assert accepted is not None and accepted.items[1].inputs[0].value == "Ann Lee"
     assert second.ctx._turn_subtask_plan == accepted
-    spans = [span for span in second.sink.spans if span.name == "fw.turn"]
-    assert spans and spans[-1].attributes.get("subtask_review") == "reviewed"
+    spans = [span for span in second.sink.spans if span.name == tracing.SPAN_REVIEW]     # its outcome (contract 63)
+    assert spans and spans[-1].attributes.get("outcome") == "reviewed"
 
 
 # ----------------------------------------------------------------------
@@ -340,28 +345,30 @@ def test_an_accept_after_a_process_restart_resumes_the_review_and_runs_its_goals
 def test_the_fast_path_check_the_draft_and_the_run_share_one_head_lookup_and_one_jev_match(gated, monkeypatch):
     """A single unsure sub-task: the fast-path check and the draft ask the heads for it once, and the Jev match runs once
     per scope in the draft; the accepted run asks neither again."""
-    workflow_agent._planning_command_matcher.cache_clear()
-    jev = CountingLM([{"job": "none"}] * 50)
-    monkeypatch.setattr(workflow_agent, "_jev_lm", lambda: jev)
+    # The remote decision model is asked once per part by the one intent decision (fix-o1lg.1): scripted, counted.
+    from tests.conftest import script_matcher
+    jev_asks = script_matcher(monkeypatch, {JOKE: {"none": 0.95}})
+    # The heads are asked inside the one intent decision (fix-o1lg.1), no longer through run_listing.head_answers:
+    # count that decision (and so the head lookup it makes) for the part.
+    from fastworkflow.intent import intent_loop
     head_asks: list = []
-    real_head_answers = run_listing.head_answers
+    real_decide = intent_loop.resolve
 
-    def counting_head_answers(workflow, sub_task, command_info_root=None):
-        head_asks.append(sub_task)
-        return real_head_answers(workflow, sub_task, command_info_root)
+    def counting_decide(workflow, text, core=False):
+        head_asks.append(text)
+        return real_decide(workflow, text, core=core)
 
-    monkeypatch.setattr(run_listing, "head_answers", counting_head_answers)
+    monkeypatch.setattr(intent_loop, "resolve", counting_decide)
     try:
         _split_into(monkeypatch, [JOKE])
         gated.ctx.process_turn(JOKE)
         _open_review(gated)
-        after_draft_jev = jev.calls
+        after_draft_jev = len(jev_asks)
         after_draft_heads = head_asks.count(JOKE)
         gated.script.steps = [("finish", {}), ("finish", {})]   # the review frame, then the goal
         out = gated.ctx.process_turn("accept")
         assert out.status is TurnStatus.COMPLETED
     finally:
-        workflow_agent._planning_command_matcher.cache_clear()
-    assert after_draft_jev > 0                              # the Jev match did run (once per scope)
-    assert jev.calls == after_draft_jev                     # and the accepted run did not ask it again
+        assert after_draft_jev > 0                              # the Jev match did run (once per scope)
+    assert len(jev_asks) == after_draft_jev                  # and the accepted run did not ask it again
     assert after_draft_heads == 1 and head_asks.count(JOKE) == 1

@@ -17,8 +17,8 @@ import shutil
 import pytest
 
 import fastworkflow
-from fastworkflow.command_routing import RoutingRegistry
-from fastworkflow.model_pipeline_training import (
+from fastworkflow.core.command_routing import RoutingRegistry
+from fastworkflow.train.model_pipeline_training import (
     PLANNING_HEADS_LABELLED,
     PLANNING_HEADS_NOT_HERE,
     active_experiment_planning_heads,
@@ -30,7 +30,7 @@ from fastworkflow.model_pipeline_training import (
     planning_head_labels,
     trained_command_labels,
 )
-from fastworkflow.planning_commands import resolve_field_sources, visible_planning_commands
+from fastworkflow.planning.planning_commands import resolve_field_sources, visible_planning_commands
 from fastworkflow.train import planning_test_set as pts
 from fastworkflow.train import score_planning_match as spm
 

@@ -10,9 +10,10 @@ import textwrap
 import pytest
 from dspy.utils import DummyLM
 
-from fastworkflow import planning_commands as sc
-from fastworkflow import command_preview, workflow_agent
-from fastworkflow.planning_commands import PlanningCommandCallError
+from fastworkflow.planning import planning_commands as sc
+from fastworkflow.planning import command_preview
+from fastworkflow.agent import workflow_agent
+from fastworkflow.planning.planning_commands import PlanningCommandCallError
 from tests.scripted_extractor import script_extractor
 from tests.test_text_planner_and_split import (  # noqa: F401 - workflow_env is a fixture
     RecordingTraceSink, _prompt, _session, _text_answer, workflow_env)
@@ -249,7 +250,7 @@ def test_a_planning_command_file_imports_a_helper_of_its_folder_and_of_its_packa
 
 def test_a_workflow_that_still_has_a_skills_folder_fails_to_load(tmp_path):
     # Phase 7: _skills/ is no longer read; the load fails with the retired message, not a silent skip.
-    from fastworkflow.command_directory import CommandDirectory, get_cached_command_directory
+    from fastworkflow.core.command_directory import CommandDirectory, get_cached_command_directory
 
     folder = _write(tmp_path, {"close_out": CLOSE_OUT})
     (tmp_path / "_skills").mkdir()
@@ -358,7 +359,7 @@ class PlanGenerator:
 
 @pytest.mark.parametrize("field, message", [
     ("ratios: list[int] = []", "has type"),
-    ("count: Optional[int] = None", "Optional is for an argument the command text may leave out"),
+    ("count: Optional[int] = None", "a planning command.s arguments reach it as text"),
     ("name: Optional[str] = 'x'", "Optional is for"),
     ("name: str = None", "default must be a value of its type"),
     ("flag: bool = 1", "bool parameter .* default must be true or false"),
@@ -368,12 +369,12 @@ class PlanGenerator:
     ("name: str = Field(json_schema_extra={'classifier_confirms': True})", "option classifier_confirms does not apply to field 'name' of type str"),
     ("name: str = Field(json_schema_extra={'strip': ['group']})", "strip: \\[\"group\"\] is removed: write \"copied_from_command_text\": \\{\"ignore\""),
     ("name: str = Field(json_schema_extra={'subject': 'yes'})", "subject: \"yes\" is removed: write \"record_named_in_command_text\": True"),
-    ("name: str = Field(json_schema_extra={'in_request': 'yes'})", "in_request: \"yes\" is removed: write"),
+    ("name: str = Field(json_schema_extra={'in_request': 'yes'})", "in_request: \"yes\" is removed: leave the key out"),
     ("count: int = Field(default=1, json_schema_extra={'requires': 'name'})",
      "requires is not a planning command option; .*a model validator on Input"),
     ("kind: Literal['a', 'b'] = Field(json_schema_extra={'classifier_confirms': {'meanings': {'c': 'x'}}})", "'c' is not a value of it"),
     ("kind: Literal['a', 'b'] = Field(json_schema_extra={'means': {'a': 'x'}})", "means: \\{\"a\": \"x\"\} is removed: write \"classifier_confirms\": \\{\"meanings\""),
-    ("reasoning: int = 1", "bad parameter name 'reasoning'"),
+    ("reasoning: int = 1", "field 'reasoning' is reserved for the framework's own planner inputs"),
 ])
 def test_a_malformed_input_field_fails_the_load(tmp_path, field, message):
     assert re.search(message, _load_error(_write(tmp_path, {"bad": FIELD.format(field=field)})))
@@ -439,7 +440,8 @@ def test_steps_that_fail_on_placeholder_inputs_need_a_declared_template(tmp_path
 def test_only_the_python_files_of_the_planning_commands_folder_not_starting_with_an_underscore_are_planning_commands(tmp_path, caplog):
     folder = _write(tmp_path, {"close_out": CLOSE_OUT, "_helpers": "import no_such_module_anywhere\n"})
     planning_commands = tmp_path / "_commands"
-    (planning_commands / "_split.py").write_text('class Signature:\n    """Split it my way."""\n')
+    (planning_commands / "_workflow.py").write_text(
+        "class Context:\n    split_examples = [('Find Dune.', ['Find Dune.'])]\n")
     (planning_commands / "notes.md").write_text("Not read.")
     (planning_commands / "__pycache__").mkdir()
     # a subfolder of _commands is a context (Phase 7: one tree), so its planning command is a skill of it
@@ -515,7 +517,7 @@ def test_the_input_validator_can_refuse_or_correct_a_call(tmp_path):
     notes: list[str] = []
     args = sc._validate_arguments(replace(command, input_model=Correcting), _args(), "who is in Payroll", "WF", notes)
     assert args["name"] == "PAYROLL" and seen == [("WF", "show_record", "who is in Payroll")]
-    assert notes == ["name='Payroll' -> 'PAYROLL' (validate_extracted_parameters)"]
+    assert notes == ["name='Payroll' -> 'PAYROLL' (validator)"]
 
     class Raising(command.input_model):
         @model_validator(mode="after")
@@ -547,10 +549,12 @@ def _plan_planning_command(ctx, wf, lm, request, command):
 
 
 def test_a_planning_command_file_is_planned_as_a_call_and_its_hook_refusal_falls_back(tmp_path, workflow_env,
-                                                                                       monkeypatch):
+                                                                                       monkeypatch, no_planner_key):
     workflow_env()
-    command = _example(tmp_path)
+    # A developer's JEV_API_KEY would run the classifier check of ``kind`` and may turn 'group' into 'unit'
+    # (a live model); this test pins the typed call's plan, so it runs keyless (no_planner_key).
     request = "Who is in Payroll? Is Ann Lee one of them?"
+    command = _example(tmp_path)
 
     sink = RecordingTraceSink()
     ctx, wf = _session(sink)
@@ -558,8 +562,8 @@ def test_a_planning_command_file_is_planned_as_a_call_and_its_hook_refusal_falls
     script_extractor(monkeypatch, _arguments(_typed(person="Ann Lee")))
     lm = DummyLM([_typed(person="Ann Lee")])
     result = _plan_planning_command(ctx, wf, lm, request, command)
-    span = sink.named("fw.planner.plan")[-1]
-    assert span.attributes["plan_source"] == "skill_call" and span.attributes["skill"] == "show_record"
+    span = sink.named("fw.plan")[-1]
+    assert span.attributes["plan_source"] == "skill_call" and span.attributes["command"] == "show_record"
     assert span.attributes["plan"].splitlines()[:3] == [
         "1. find_group query=Payroll", "2. list_members filter=Ann Lee", "3. open member 1"]
     assert "show_record(name: str, kind: group|unit" in _prompt(lm, 0)
@@ -570,15 +574,16 @@ def test_a_planning_command_file_is_planned_as_a_call_and_its_hook_refusal_falls
     # Unattended: an attended turn would put a refusal to the user (Topology B) instead of falling
     # back, and this test pins the fallback to the text planner.
     ctx._begin_turn(request, unattended=True)
-    # the hook's refusal is shown to the extractor once; refused again (a rule, not a missing argument: no typed
-    # fill fallback), the text planner plans
-    extractor = script_extractor(monkeypatch, *[_arguments(_typed(person="Ann Lee", include_risk=True))] * 2)
+    # the hook's refusal names no field (a rule of the call as a whole), so the extractor is NOT asked again (bd
+    # fix-ftdl.9: a fieldless refusal gets no second fill) and, with no missing argument (no typed fill fallback), the
+    # text planner plans
+    extractor = script_extractor(monkeypatch, _arguments(_typed(person="Ann Lee", include_risk=True)))
     lm = DummyLM([_text_answer()])
     _plan_planning_command(ctx, wf, lm, request, command)
-    span = sink.named("fw.planner.plan")[-1]
+    span = sink.named("fw.plan")[-1]
     assert span.attributes["plan_source"] == "text"
-    assert "the risk is assessed for the whole record" in span.attributes["skill_fallback"]
-    assert "was refused: validate_extracted_parameters: the risk is assessed" in extractor.prompts[1]
+    assert "the risk is assessed for the whole record" in span.attributes["command_fallback"]
+    assert len(extractor.prompts) == 1 and "was refused" not in extractor.prompts[0]
     assert "TEMPLATE TEXT" in _prompt(lm, 0)
 
 
@@ -609,7 +614,7 @@ def test_warm_planning_commands_never_raises_and_skips_a_workflow_without_planni
 def test_chat_session_startup_warms_the_planning_commands_of_the_workflow_it_binds(workflow_env, monkeypatch):
     """The warm-up gets the bound workflow's own ``folderpath`` string, the skill cache's key."""
     import uuid
-    from fastworkflow.chat_session import ChatSession
+    from fastworkflow.engine.chat_session import ChatSession
     from tests.test_text_planner_and_split import TODO_WORKFLOW
 
     workflow_env()
@@ -622,3 +627,28 @@ def test_chat_session_startup_warms_the_planning_commands_of_the_workflow_it_bin
     finally:
         session._keep_alive = False
         session.stop_workflow()
+
+
+def test_a_list_argument_and_a_literal_argument_load_and_merge_the_template(tmp_path):
+    """The template builder keys the other arguments' values; a list argument's value must not break it."""
+    text = '''"""mixed: a list and a literal."""
+from typing import Literal
+from pydantic import BaseModel, Field
+
+
+class Signature:
+    """Mixed."""
+
+    class Input(BaseModel):
+        tags: list[str] = Field(description="the tags", json_schema_extra={"copied_from_command_text": True})
+        kind: Literal["a", "b"] = Field(default="a", description="the kind")
+        more: list[str] = Field(default_factory=list, description="more tags")
+
+
+class PlanGenerator:
+    def steps(self, input):
+        return [f"say {', '.join(input.tags)} as {input.kind}"] if input.kind == "a" else ["say other"]
+'''
+    command = workflow_agent.load_planning_command_map(_write(tmp_path, {"mixed": text}))["mixed"]
+    assert [(p.name, p.required) for p in command.params] == [("tags", True), ("kind", False), ("more", False)]
+    assert command.template == ("say <<tags> as a or other, by kind>",)

@@ -6,9 +6,9 @@ import time
 
 import pytest
 
-from fastworkflow import approval_binding as ab
-from fastworkflow.review_engine import CONFIRMED, DECLINED, EXPIRED, PROPOSAL_TTL_SECONDS, REVISED, open_review
-from fastworkflow.turn import TurnStatus
+from fastworkflow.review import approval_binding as ab
+from fastworkflow.review.review_engine import CONFIRMED, DECLINED, EXPIRED, PROPOSAL_TTL_SECONDS, REVISED, open_review
+from fastworkflow.core.turn import TurnStatus
 from tests.test_approval_binding import (  # noqa: F401
     _added,
     _ask,

@@ -20,8 +20,8 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from fastworkflow.utils.model_roles import ROLE_KEY_VARS
 from fastworkflow.observability.provenance import (
-    LLM_ROLE_VARS,
     LOCK_FILENAMES,
     ORPHAN_ROLE_VARS,
     WORKFLOW_SCOPE_RULE_VERSION,
@@ -58,7 +58,7 @@ def _write_workflow(root, files: dict[str, str]) -> str:
 # ======================================================================
 
 
-@pytest.mark.parametrize("module", ["observability/provenance.py"])
+@pytest.mark.parametrize("module", ["observability/provenance.py", "utils/model_roles.py"])
 def test_leaf_modules_import_only_stdlib_pydantic_and_other_leaves(module):
     """Arch §22, checked structurally so it cannot rot.
 
@@ -66,7 +66,7 @@ def test_leaf_modules_import_only_stdlib_pydantic_and_other_leaves(module):
     rule is about what they import, so read the imports rather than trusting a
     comment: any `fastworkflow.*` import must name another declared leaf.
     """
-    leaves = {"fastworkflow.observability.provenance"}
+    leaves = {"fastworkflow.observability.provenance", "fastworkflow.utils.model_roles"}
     tree = ast.parse((REPO_ROOT / "fastworkflow" / module).read_text(encoding="utf-8"))
 
     imported: list[str] = []
@@ -378,17 +378,34 @@ def test_the_caller_supplied_values_land_where_they_are_labelled(tmp_path):
 
 
 def test_every_role_in_the_registry_is_snapshotted():
-    env = {model_var: f"vendor/{model_var.lower()}" for model_var, _ in LLM_ROLE_VARS}
+    env = {model_var: f"vendor/{model_var.lower()}" for model_var in ROLE_KEY_VARS}
     provenance = capture_model_provenance(env)
-    assert set(provenance.roles) == {model_var for model_var, _ in LLM_ROLE_VARS}
-    assert len(provenance.model_identifiers) == len(LLM_ROLE_VARS)
+    assert set(provenance.roles) == set(ROLE_KEY_VARS)
+    assert len(provenance.model_identifiers) == len(ROLE_KEY_VARS)
+
+
+def test_a_role_is_recorded_with_the_model_it_falls_back_to_and_where_it_came_from():
+    """The resolved model, not the unset setting (bd fix-ygxo): a role with no model of its own records the base
+    model, the role it came from, and the key that follows it; a role with no fallback records nothing."""
+    provenance = capture_model_provenance(
+        {"LLM_AGENT": "vendor/agent", "LITELLM_API_KEY_AGENT": "agent-key",
+         "LLM_PLANNER": "vendor/planner"})
+
+    extraction = provenance.roles["LLM_PARAM_EXTRACTION"]
+    assert (extraction.model, extraction.model_from) == ("vendor/agent", "LLM_AGENT")
+    assert extraction.api_key_fingerprint == secret_fingerprint("agent-key")
+    planner = provenance.roles["LLM_PLANNER"]
+    assert (planner.model, planner.model_from) == ("vendor/planner", None)
+    assert planner.api_key_fingerprint == secret_fingerprint("agent-key")   # the same provider as the base model
+    assert provenance.roles["LLM_RESPONSE_GEN"].model is None
+    assert provenance.roles["LLM_AGENT"].model_from is None
 
 
 def test_the_command_metadata_key_pairing_is_the_irregular_one():
     """LLM_COMMAND_METADATA_GEN pairs with LITELLM_API_KEY_COMMANDMETADATA_GEN —
     no underscore. Deriving the key name from the role name silently reads an
     unset variable for this one role, which is why the pairing is a table."""
-    pairs = dict(LLM_ROLE_VARS)
+    pairs = dict(ROLE_KEY_VARS)
     assert pairs["LLM_COMMAND_METADATA_GEN"] == "LITELLM_API_KEY_COMMANDMETADATA_GEN"
 
     derived_would_be = "LITELLM_API_KEY_" + "LLM_COMMAND_METADATA_GEN".removeprefix("LLM_")
@@ -404,15 +421,23 @@ def test_the_command_metadata_key_pairing_is_the_irregular_one():
 
 
 def test_the_orphan_role_var_is_snapshotted_but_not_an_active_role():
-    """LLM_RESPONSE_GEN is in every env file and AGENTS.md, and no Python reads
-    it. A setting an operator believes is in effect belongs in the record; it
-    does not belong in the active-role set."""
+    """LLM_RESPONSE_GEN was an orphan until run_chatbot.composer began reading it, so it is
+    an active role now: snapshotted under `roles`, with its own key variable, and
+    no longer an orphan. `ORPHAN_ROLE_VARS` is empty until another unread setting
+    turns up."""
     provenance = capture_model_provenance(
-        {"LLM_RESPONSE_GEN": "vendor/unused", "LLM_AGENT": "vendor/real"}
+        {
+            "LLM_RESPONSE_GEN": "vendor/composer",
+            "LITELLM_API_KEY_RESPONSE_GEN": "secret",
+            "LLM_AGENT": "vendor/real",
+        }
     )
-    assert provenance.orphan_role_vars == {"LLM_RESPONSE_GEN": "vendor/unused"}
-    assert "LLM_RESPONSE_GEN" not in provenance.roles
-    assert set(ORPHAN_ROLE_VARS) == {"LLM_RESPONSE_GEN"}
+    assert provenance.orphan_role_vars == {}
+    assert provenance.roles["LLM_RESPONSE_GEN"].model == "vendor/composer"
+    assert provenance.roles["LLM_RESPONSE_GEN"].api_key_fingerprint is not None
+    assert provenance.model_identifiers["LLM_RESPONSE_GEN"] == "vendor/composer"
+    assert ROLE_KEY_VARS["LLM_RESPONSE_GEN"] == "LITELLM_API_KEY_RESPONSE_GEN"
+    assert ORPHAN_ROLE_VARS == ()
 
 
 def test_api_keys_are_fingerprinted_never_recorded():
@@ -533,7 +558,12 @@ def test_capture_runtime_provenance_assembles_all_three_sections(tmp_path):
     assert provenance.schema_version == 1
     assert provenance.engine.python_version
     assert provenance.workflow.workflow_source_hash.startswith("sha256:")
-    assert provenance.models.model_identifiers == {"LLM_AGENT": "vendor/a"}
+    # Every role that falls back to the base model resolves to it (bd fix-ygxo); the roles with no fallback
+    # (the response composer, the distillation roles) have none.
+    from fastworkflow.utils.model_roles import FALLS_BACK
+
+    assert provenance.models.model_identifiers == {
+        "LLM_AGENT": "vendor/a", **{role: "vendor/a" for role in FALLS_BACK}}
 
 
 def _reproducible_record(tmp_path, **overrides):

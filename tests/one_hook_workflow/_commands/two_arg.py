@@ -1,6 +1,6 @@
 """A two-argument __call__: a load error (the call takes workflow, command and input)."""
 
-from fastworkflow.workflow import Workflow
+from fastworkflow.core.workflow import Workflow
 from pydantic import BaseModel, Field
 
 

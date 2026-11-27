@@ -1,6 +1,6 @@
 import os
 import pytest
-from fastworkflow.command_directory import CommandDirectory, CommandMetadata
+from fastworkflow.core.command_directory import CommandDirectory, CommandMetadata
 
 @pytest.fixture(scope="module")
 def sample_workflow_path():
@@ -45,9 +45,8 @@ class TestCommandDirectory:
             "IntentDetection/what_can_i_do",
             "IntentDetection/reset_context",
             "IntentDetection/what_is_current_context",
-            # Framework commands shipped with the review engine (fastworkflow/_framework_commands,
-            # fix-3rsq.10 / Phase 9-10 review_plan, review_subtasks, review_proposal).
-            "review_plan",
+            # Framework commands shipped with the review engine (fastworkflow/review/commands,
+            # fix-3rsq.10 / Phase 9-10 review_subtasks, review_proposal).
             "review_subtasks",
             "review_proposal",
         }

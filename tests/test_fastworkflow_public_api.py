@@ -23,9 +23,9 @@ PUBLIC = (
     ("Action", "ModelMetaclass", "fastworkflow"),
     ("Any", "_AnyMeta", "typing"),
     ("BaseModel", "ModelMetaclass", "pydantic.main"),
-    ("ChatSession", "type", "fastworkflow.chat_session"),
+    ("ChatSession", "type", "fastworkflow.engine.chat_session"),
     ("ChatSessionDescriptor", "type", "fastworkflow"),
-    ("CommandCancelledError", "type", "fastworkflow.workflow_execution_context"),
+    ("CommandCancelledError", "type", "fastworkflow.engine.workflow_execution_context"),
     ("CommandContextModel", "NoneType", ""),
     ("CommandOutput", "ModelMetaclass", "fastworkflow"),
     ("CommandResponse", "ModelMetaclass", "fastworkflow"),
@@ -34,71 +34,65 @@ PUBLIC = (
     ("EPHEMERAL", "_Ephemeral", "fastworkflow"),
     ("Enum", "EnumType", "enum"),
     ("FW_ARTIFACT_REF_KEY", "str", ""),
-    ("LoggingMetricsSink", "type", "fastworkflow.metrics"),
+    ("LoggingMetricsSink", "type", "fastworkflow.observability.metrics"),
     ("MCPContent", "ModelMetaclass", "fastworkflow"),
     ("MCPToolCall", "ModelMetaclass", "fastworkflow"),
     ("MCPToolResult", "ModelMetaclass", "fastworkflow"),
-    ("MetricsSink", "_ProtocolMeta", "fastworkflow.metrics"),
+    ("MetricsSink", "_ProtocolMeta", "fastworkflow.observability.metrics"),
     ("ModelPipelineRegistry", "NoneType", ""),
     ("ModuleType", "EnumType", "fastworkflow"),
-    ("NLUPipelineStage", "EnumType", "fastworkflow"),
-    ("NoOpMetricsSink", "type", "fastworkflow.metrics"),
-    ("NoOpTraceSink", "type", "fastworkflow.tracing"),
+    ("NoOpMetricsSink", "type", "fastworkflow.observability.metrics"),
+    ("NoOpTraceSink", "type", "fastworkflow.observability.tracing"),
     ("Optional", "_SpecialForm", "typing"),
     ("Recommendation", "ModelMetaclass", "fastworkflow"),
     ("Refused", "type", "fastworkflow"),
     ("RoutingDefinition", "NoneType", ""),
     ("RoutingRegistry", "NoneType", ""),
-    ("Span", "type", "fastworkflow.tracing"),
-    ("TraceSink", "_ProtocolMeta", "fastworkflow.tracing"),
-    ("TurnOutput", "ModelMetaclass", "fastworkflow.turn"),
-    ("TurnResult", "ModelMetaclass", "fastworkflow.turn"),
-    ("TurnStatus", "EnumType", "fastworkflow.turn"),
+    ("SOURCE_ENV_FILE", "str", ""),
+    ("SOURCE_PROCESS", "str", ""),
+    ("Span", "type", "fastworkflow.observability.tracing"),
+    ("TraceSink", "_ProtocolMeta", "fastworkflow.observability.tracing"),
+    ("TurnOutput", "ModelMetaclass", "fastworkflow.core.turn"),
+    ("TurnResult", "ModelMetaclass", "fastworkflow.core.turn"),
+    ("TurnStatus", "EnumType", "fastworkflow.core.turn"),
     ("Union", "_SpecialForm", "typing"),
-    ("UserApproval", "EnumType", "fastworkflow.command_declarations"),
+    ("UserApproval", "EnumType", "fastworkflow.core.command_declarations"),
     ("UnsupportedStateVersion", "type", "fastworkflow"),
-    ("Workflow", "type", "fastworkflow.workflow"),
-    ("WorkflowExecutionContext", "type", "fastworkflow.workflow_execution_context"),
-    ("active_workflow", "module", "fastworkflow.active_workflow"),
-    ("chat_session", "module", "fastworkflow.chat_session"),
-    ("clear_workflow_stack", "function", "fastworkflow.active_workflow"),
-    ("context_budget", "module", "fastworkflow.context_budget"),
+    ("Workflow", "type", "fastworkflow.core.workflow"),
+    ("WorkflowExecutionContext", "type", "fastworkflow.engine.workflow_execution_context"),
+    ("clear_workflow_stack", "function", "fastworkflow.engine.active_workflow"),
     ("contextlib", "module", "contextlib"),
     ("dataclass", "function", "dataclasses"),
     ("datetime", "type", "datetime"),
-    ("ConfirmsOptions", "_TypedDictMeta", "fastworkflow.field_options"),
-    ("CopiedOptions", "_TypedDictMeta", "fastworkflow.field_options"),
-    ("FieldOptions", "_TypedDictMeta", "fastworkflow.field_options"),
-    ("RecordNamedOptions", "_TypedDictMeta", "fastworkflow.field_options"),
-    ("descends_to", "function", "fastworkflow.command_declarations"),
-    ("get_active_workflow", "function", "fastworkflow.active_workflow"),
+    ("ConfirmsOptions", "_TypedDictMeta", "fastworkflow.parameters.field_options"),
+    ("CopiedOptions", "_TypedDictMeta", "fastworkflow.parameters.field_options"),
+    ("FieldOptions", "_TypedDictMeta", "fastworkflow.parameters.field_options"),
+    ("RecordNamedOptions", "_TypedDictMeta", "fastworkflow.parameters.field_options"),
+    ("UiOptions", "_TypedDictMeta", "fastworkflow.parameters.field_options"),
+    ("chat_session", "NoneType", ""),
+    ("descends_to", "function", "fastworkflow.core.command_declarations"),
+    ("get_active_workflow", "function", "fastworkflow.engine.active_workflow"),
+    ("env_source", "function", "fastworkflow"),
     ("get_env_var", "function", "fastworkflow"),
     ("get_fastworkflow_package_path", "function", "fastworkflow"),
     ("get_internal_workflow_path", "function", "fastworkflow"),
     ("get_workflow_id", "function", "fastworkflow"),
     ("init", "function", "fastworkflow"),
-    ("kvstore", "module", "fastworkflow.kvstore"),
     ("load_startup_action", "function", "fastworkflow"),
-    ("metrics", "module", "fastworkflow.metrics"),
-    ("mint_turn_key", "function", "fastworkflow.turn"),
+    ("mint_turn_key", "function", "fastworkflow.core.turn"),
     ("mmh3", "module", "mmh3"),
     ("model_validator", "function", "pydantic.functional_validators"),
     ("observability", "module", "fastworkflow.observability"),
     ("os", "module", "os"),
-    ("pop_active_workflow", "function", "fastworkflow.active_workflow"),
-    ("push_active_workflow", "function", "fastworkflow.active_workflow"),
-    ("session_state_store", "module", "fastworkflow.session_state_store"),
-    ("state_paths", "module", "fastworkflow.state_paths"),
-    ("state_serialization", "module", "fastworkflow.state_serialization"),
-    ("storage_keys", "module", "fastworkflow.storage_keys"),
+    ("pop_active_workflow", "function", "fastworkflow.engine.active_workflow"),
+    ("raw_env_var", "function", "fastworkflow"),
+    ("push_active_workflow", "function", "fastworkflow.engine.active_workflow"),
+    ("resolve_startup_action", "function", "fastworkflow"),
     ("time", "module", "time"),
-    ("tracing", "module", "fastworkflow.tracing"),
-    ("turn", "module", "fastworkflow.turn"),
-    ("user_approval_for_execution", "function", "fastworkflow.command_declarations"),
+    ("user_approval_for_execution", "function", "fastworkflow.core.command_declarations"),
     ("utils", "module", "fastworkflow.utils"),
-    ("workflow", "module", "fastworkflow.workflow"),
-    ("workflow_execution_context", "module", "fastworkflow.workflow_execution_context"),
-    ("writes", "function", "fastworkflow.command_declarations"),
+    ("workflow_startup_action", "function", "fastworkflow"),
+    ("writes", "function", "fastworkflow.core.command_declarations"),
 )
 
 
@@ -106,10 +100,10 @@ PUBLIC = (
 # so in a process where any earlier test called init() they are no longer None.
 # The None captured above is asserted in a fresh interpreter instead.
 INIT_ASSIGNED = {
-    "CommandContextModel": "fastworkflow.command_context_model",
-    "RoutingDefinition": "fastworkflow.command_routing",
-    "RoutingRegistry": "fastworkflow.command_routing",
-    "ModelPipelineRegistry": "fastworkflow.model_pipeline_training",
+    "CommandContextModel": "fastworkflow.core.command_context_model",
+    "RoutingDefinition": "fastworkflow.core.command_routing",
+    "RoutingRegistry": "fastworkflow.core.command_routing",
+    "ModelPipelineRegistry": "fastworkflow.intent.router",
 }
 
 
@@ -169,7 +163,7 @@ def test_public_names_still_resolve():
     assert fresh_types == {name: "NoneType" for name in INIT_ASSIGNED}
 
 
-def test_get_env_var_reads_the_env_files_then_the_process_then_the_default(monkeypatch):
+def test_get_env_var_reads_the_process_then_the_env_files_then_the_default(monkeypatch):
     """The process environment is read with or without a default (fix-hia1.40)."""
     name = "FW_TEST_GET_ENV_VAR"
     monkeypatch.delitem(fastworkflow._env_vars, name, raising=False)
@@ -181,6 +175,8 @@ def test_get_env_var_reads_the_env_files_then_the_process_then_the_default(monke
     assert fastworkflow.get_env_var(name, default="1") == "0"
     assert fastworkflow.get_env_var(name, int, default=5) == 0
     assert fastworkflow.get_env_var(name, bool, default=True) is False
-    # The env files fastworkflow.init loaded outrank the process environment.
+    # The process environment outranks the env files fastworkflow.init loaded (bd fix-ygxo), which outrank the default.
     monkeypatch.setitem(fastworkflow._env_vars, name, "7")
+    assert fastworkflow.get_env_var(name, int, default=5) == 0
+    monkeypatch.delenv(name)
     assert fastworkflow.get_env_var(name, int, default=5) == 7

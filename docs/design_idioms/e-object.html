@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The record it acts on · Design idioms · fastWorkflow</title>
+<link rel="stylesheet" href="idioms.css">
+</head>
+<body data-page="e-object">
+<aside class="rail"></aside>
+
+<main id="top">
+  <section class="group execution">
+<!-- IDIOM BODY START -->
+    <article class="idiom" id="e-object">
+      <div class="prose">
+        <p class="num">02</p>
+        <h3>The record it acts on</h3>
+        <p>A command's code almost always needs one object of your application to work on: the library, this book, this member. Read it from <code>workflow.record</code>. Assign it when the user should pick one object ("open book b1") and then talk about it without naming it again ("who wrote it?"). One attribute does both jobs: reading it gives the object the command acts on, and assigning it moves the user onto another one.</p>
+        <p>Some words first. A <em>record</em> is a live object of your application, an instance of one of your own classes, such as <code>Library</code>, <code>Book</code> or <code>Member</code>. Its <em>context</em> is its class name, and the folder <code>_commands/Member/</code> holds the commands that act on a <code>Member</code> (see <a href="c-folder.html">a folder for one kind of object</a>). The workflow <em>stands on</em> one record at a time, the <em>current context</em>. It starts on the root record that the startup command builds (see <a href="e-root.html">the root object</a>) and moves only when a command moves it.</p>
+        <h4>Read it</h4>
+        <p>The framework calls your <code>ResponseGenerator.__call__</code> with <code>workflow</code>, the live workflow, as its first argument. <code>workflow.record</code> returns the record this command was invoked on. In <code>show_member</code> below that is the member the workflow stands on. The type annotation <code>member: Member</code> is only for you and your editor; the framework does not read it. Reading <code>workflow.record</code> never moves anything. Read outside any command (in a test or a harness), it is the record the workflow stands on.</p>
+      </div>
+      <figure>
+        <figcaption>fastworkflow/examples/library/_commands/Member/show_member.py</figcaption>
+        <pre><code>class ResponseGenerator:
+    def __call__(self, workflow: fastworkflow.Workflow, command: str,
+                 input: None) -&gt; Signature.Output:
+        member: Member = workflow.record   <span class="c"># the Member this command was invoked on</span>
+        return Signature.Output(member_uid=member.uid, name=member.name,
+                                on_loan=len(member.library.loans_of_member(member.uid)))</code></pre>
+      </figure>
+      <div class="prose">
+        <h4>Where a request is looked up</h4>
+        <p>The record is not always the one the workflow stands on. A request is looked up along a path, nearest first: the current context's own commands, then those of any base it shares commands through (see <a href="c-base.html">commands shared through a base</a>), then those of each enclosing record, one level up at a time to the root (see <a href="c-parent.html">the enclosing record</a>), then the global commands, the files directly in <code>_commands/</code> (see <a href="c-folder.html#c-global">commands with no object</a>). That is the order for a name typed exactly. For plain words in a workflow with a trained global model, the global scope is asked first and a confident answer there runs before the nearer scopes are asked. A command found this way runs on the record where it was found. A command reached by its name with no lookup (an MCP tool call, a direct HTTP action, a step of <code>fastworkflow command run-code</code>, an approved call run after its yes) runs on the same record: that of the nearest scope on this path that has it, the root for a global command; the workflow does not move.</p>
+        <p>So in the library workflow, standing on the member Ann Lee, the request "how many loans are overdue" finds no such command in <code>Member</code>. The framework climbs to her library, finds <code>count_overdue</code> in <code>_commands/Library/</code>, and runs it with <code>workflow.record</code> set to the <code>Library</code>. The workflow still stands on Ann Lee afterwards, so her commands stay one request away. The same rule gives the other cases: a command shared through a base, such as <code>_commands/Record/add_note.py</code>, gets the <code>Book</code> or <code>Member</code> it was invoked on, never a plain <code>Record</code>, and a global command gets the root record. <code>workflow.is_record_root</code> tells you whether <code>workflow.record</code> is the root.</p>
+        <h4 id="e-move">Move onto a record</h4>
+        <p><code>open_book</code> moves the workflow from the library onto one book, in three parts:</p>
+        <ul>
+          <li><code>library = workflow.record</code> reads the record the command was invoked on, the library, into a local.</li>
+          <li><code>workflow.record = book</code> is the move. From now on the workflow stands on the book, and the next request is looked up along the path above starting at <code>Book</code>: <code>Book</code>, then its base <code>Record</code>, then <code>Library</code>, then the global commands. So <code>show_book</code> runs on the book, and <code>find_book</code> still runs on the library.</li>
+          <li><code>@fastworkflow.descends_to("Book")</code> on the <code>ResponseGenerator</code> class tells the framework, before anything runs, that this command is the way into <code>Book</code>. A name that is no context of the workflow, such as <code>"Bok"</code>, fails the load of the command: <code>@descends_to("Bok") names no context of the workflow; did you mean "Book"?</code> So does a target whose records cannot sit in the record the command runs on: the target's <code>parents</code> (see <a href="c-parent.html">the enclosing record</a>) must name the command's context, a context it inherits, or one that inherits it. <code>Book</code> declares <code>parents = ["Library"]</code>, so <code>Library/open_book</code> loads; without it the load says <code>@descends_to("Book") enters a context whose records do not sit in a Library: Book declares no parents (a top-level context, enclosed only by the global commands) in _commands/Book/_Book.py, which names neither Library nor a context it inherits. Add "Library" to the parents of Book, or name the context the command enters</code>. A global command runs on the root and is not checked. The framework reads it to plan routes: when a request needs a <code>Book</code> command while the workflow stands on the library, the agent is told to run <code>open_book</code> with a <code>book_uid</code> first. Its required input <code>book_uid</code> is the value that route needs (see <a href="e-from.html">a handle's producer</a>).</li>
+        </ul>
+      </div>
+      <figure>
+        <figcaption>fastworkflow/examples/library/_commands/Library/open_book.py</figcaption>
+        <pre><code><span class="c"># Signature (the book_uid input and the Output fields) omitted.</span>
+@fastworkflow.descends_to("Book")
+class ResponseGenerator:
+
+    def __call__(self, workflow: fastworkflow.Workflow, command: str,
+                 input: Signature.Input) -&gt; Signature.Output:
+        library: Library = workflow.record      <span class="c"># the record it was invoked on</span>
+        book = library.books.get(input.book_uid)
+        if book is None:
+            raise fastworkflow.Refused(
+                f"no book has the uid {input.book_uid}; find_book lists the uids")
+        workflow.record = book                  <span class="c"># the move</span>
+        return Signature.Output(book_uid=book.uid, title=book.title, author=book.author,
+                                copies=book.copies)</code></pre>
+      </figure>
+      <div class="prose">
+        <p>The user leaves the book with the built-in <code>go_up</code> or <code>reset_context</code>.</p>
+        <p><code>@descends_to</code> always declares an unconditional move: the plans and the agent assume the command enters <code>Book</code> whenever it runs. A command that moves only sometimes still declares it, and assigns <code>workflow.record</code> only on the runs that move; give such a command a required input, because a plan's code runs a mover with no required input unasked on its way into the context, and a run that does not move leaves the plan's next step looked up from the wrong record. A context that no object ever is, such as a base that only shares commands, is not a place to move to: its class says <code>occupiable = False</code> (see <a href="c-base.html">commands shared through a base</a>), and a <code>@descends_to</code> that names it fails the load of the command. A command that always moves into a context other than its own and takes no required input does nothing but move, so the framework never offers it to the remote model as the answer to a request; the local model and its exact name still reach it. <code>open_book</code> needs <code>book_uid</code>, so it is matched like any other command.</p>
+        <h4>Beginner mistakes</h4>
+        <ul>
+          <li>Reading <code>workflow.record</code> again after assigning it. It still gives the library, not the book: until your command returns, the getter keeps the record the command was invoked on. Keep the book in a local.</li>
+          <li>Assigning <code>workflow.record</code> without <code>@descends_to</code>. A command may move the session only onto a context it declares: the command fails with "open_book moved the workflow onto a Book record but declares no @descends_to ... Declare @descends_to("Book") on its ResponseGenerator. The move was undone", and the workflow stays where it was. When <code>@descends_to</code> names another context, the failure names the declared one ("... but declares @descends_to("Member"), and Book is not Member nor a context that inherits from it"). "Onto the declared context" means the record's context is the declared one or one that inherits from it (its <code>class Context</code> declares <code>inherits</code>, see <a href="c-base.html">commands shared through a base</a>): <code>@descends_to("User")</code> covers a <code>PremiumUser</code>. A move onto another record of the command's own context (one work item to the next) is a move too, and is declared the same way. Setting <code>workflow.root</code> in the startup command is not a move (see <a href="e-root.html">the root object</a>), and a command that declares a move and, on this run, does not make it has not moved.</li>
+          <li>Assigning <code>workflow.record</code> and then raising, <code>Refused</code> included. The framework puts the workflow back on the record it stood on before the command, so the user sees a failed command and has not moved (an <code>ask_user</code> question keeps the move, since the command resumes where it stood). Still assign last, after every check, as <code>open_book</code> does.</li>
+          <li>Assigning a record whose class is no context of the workflow (a typo in the class, or a folder named apart from the class). The command fails with "open_shelf moved the workflow onto a Shelf record, but Shelf is no context of the workflow: a context is the folder _commands/Shelf/ ...", and the record is put back. In a workflow with a root, a move onto a record other than the root whose context has no <code>get_parent</code> fails the same way (see <a href="c-parent.html">the enclosing record</a>).</li>
+          <li>Treating <code>workflow.record</code> as "where the user is". In <code>count_overdue</code> run from a member it is the library, not the member. Put a command in the folder of the record it needs, and that is the record it gets.</li>
+          <li>Using the old names <code>workflow.current_command_context</code> or <code>workflow.command_context_for_response_generation</code>. Both are gone: reading or assigning either raises <code>AttributeError</code> naming <code>workflow.record</code> as the replacement.</li>
+        </ul>
+      </div>
+    </article>
+<!-- IDIOM BODY END -->
+  </section>
+
+  <nav class="pager" aria-label="Previous and next">
+    <a class="prev" href="e-file.html"><span>Previous</span>One file, two classes</a>
+    <a class="next" href="e-purpose.html"><span>Next</span>How a request finds your command</a>
+  </nav>
+</main>
+<script src="nav.js"></script>
+<script src="idioms.js"></script>
+</body>
+</html>

@@ -151,7 +151,7 @@ nano ./examples/fastworkflow.passwords.env
 fastworkflow train ./examples/hello_world ./examples/fastworkflow.env ./examples/fastworkflow.passwords.env
 
 # 5. Run it
-fastworkflow run ./examples/hello_world ./examples/fastworkflow.env ./examples/fastworkflow.passwords.env
+fastworkflow run_cli ./examples/hello_world ./examples/fastworkflow.env ./examples/fastworkflow.passwords.env
 ```
 
 You'll get a `User >` prompt. Try **"what can you do?"** or **"add 49 + 51"**. Run `fastworkflow examples list` to see the rest.
@@ -168,7 +168,7 @@ You'll get a `User >` prompt. Try **"what can you do?"** or **"add 49 + 51"**. R
 > intentionally want to discard the generated-data caches.
 
 > [!tip]
-> Get a free API key from [Mistral AI](https://mistral.ai) (works with `mistral-small-latest`) or [OpenRouter](https://openrouter.ai/openai/gpt-oss-20b:free). You can assign different models to different roles in the same workflow.
+> Get a free API key from [Mistral AI](https://mistral.ai) (works with `mistral-small-latest`) or [OpenRouter](https://openrouter.ai/openai/gpt-oss-20b:free). You can assign different models to different roles in the same workflow; a role you leave unset falls back to `LLM_AGENT` (see "Environment variables reference").
 
 ---
 
@@ -193,7 +193,7 @@ Open fastworkflow/skills_for_coding_fastworkflows/integrate-chat-agent/SKILL.md
 Prompt: "Integrate a fastWorkflow chat agent for OrderService in orders.py"
 ```
 
-The agent introspects your code and generates `_commands/cancel_order.py`, `_commands/get_order_status.py`, the `context_inheritance_model.json`, and env scaffolding — then trains and smoke-tests it with you. **Your `orders.py` is never modified.**
+The agent introspects your code and generates `_commands/cancel_order.py`, `_commands/get_order_status.py`, each context's `inherits` declaration, and env scaffolding — then trains and smoke-tests it with you. **Your `orders.py` is never modified.**
 
 ### Or write a command wrapper by hand (~5 minutes per command)
 
@@ -240,7 +240,7 @@ class ResponseGenerator:
         return Signature.Output(status=str(result))  # returning the Output is enough
 ```
 
-Then `fastworkflow train` and `fastworkflow run` against your workflow directory. That's the entire integration pattern: a thin command layer over code you already have.
+Then `fastworkflow train` and `fastworkflow run_cli` against your workflow directory. That's the entire integration pattern: a thin command layer over code you already have.
 
 > [!TIP]
 > `plain_utterances` is the highest-leverage thing you write. Training expands your seeds
@@ -277,20 +277,26 @@ User                                ← always visible
         └── escalate_to_human()
 ```
 
-Inheritance lives in **one file**, `context_inheritance_model.json` — not code. Each entry's `base` names the contexts whose commands it inherits:
+A context is a folder of `_commands/` named after a class of your application. Its facts are declared in its own `class Context`, in `_commands/<Context>/_<Context>.py`. From the library example (`fastworkflow examples fetch library`), `_commands/Book/_Book.py` begins:
 
-```json
-{
-  "Order": {
-    "base": ["User"]
-  },
-  "Refund": {
-    "base": ["Order"]
-  }
-}
+```python
+class Context:
+    inherits = ["Record"]
+    parents = ["Library"]
+
+    state_version = 1
+
+    @classmethod
+    def get_parent(cls, record: Book) -> Library:
+        return record.library
 ```
 
-The enclosing object of each context comes from its `get_parent` method, read from the live object chain at run time; there is no separate hierarchy file.
+- **`inherits`** names the contexts whose commands this context also has (a book and a member both get `Record`'s `add_note`); `inherits = ["*"]` adds the global commands to the context's own set.
+- **`get_parent`** returns the record that encloses this one, and **`parents`** names every context that record can be, the context itself when records nest (a todo list inside a todo list). A context with no `parents` is top level, enclosed only by the global commands; the root record needs neither.
+
+Both are lists of context names written as string literals, read without importing the file, and checked when the workflow loads: every name must be a context (a misspelling gets a did-you-mean), named once, with no context inheriting itself; `parents` goes with `get_parent` and one without the other stops the workflow; and a command's `@descends_to("Book")` must enter a context whose `parents` name the command's own context. At run time, a `get_parent` that returns a record of a context its `parents` do not name fails the climb, naming both. `fastworkflow command preview` draws the declarations of every context, with the commands that enter each one, as a generated object-model page (`_object_models/<workflow>.md`); nobody writes it by hand.
+
+**Migrating an existing workflow.** `_commands/context_inheritance_model.json` is a removed spelling: a workflow that still has one does not load, and the message names the file. Run `fastworkflow migrate-contexts <workflow>`: it writes each context's `inherits` from the file (creating a `_<Context>.py` where none exists), deletes the file, and lists every context that has a `get_parent`. Write those contexts' `parents` by hand: read what each `get_parent` can return and name those contexts. A `context_hierarchy_model.json` in the workflow folder is ignored, with a warning that it can be deleted.
 
 A request is matched along one lookup path: the current context and its bases, then each enclosing record and its bases, then the global commands. The nearest scope that recognises the request wins, and the command runs on that scope's object. For a natural-language request, a confident global command runs first. Exact command names take the nearest scope.
 
@@ -308,6 +314,21 @@ fastworkflow command preview <workflow_dir> --check   # CI: fails on stale previ
 ```
 
 Coding agents: use the wheel-shipped [author-planning-commands](fastworkflow/skills_for_coding_fastworkflows/author-planning-commands/SKILL.md) skill (file shape, input rules, phases, and the step wording the framework reads). Full reference: [`docs/planning_command_file_layout.md`](docs/planning_command_file_layout.md) and [`docs/planning_command_phases.md`](docs/planning_command_phases.md). Workflows that still keep planning commands in `_skills/` (a load error now) should follow [`docs/migrating_skills_to_commands.md`](docs/migrating_skills_to_commands.md).
+
+---
+
+### Running without an agent model
+
+If your client is itself an agent (an MCP or HTTP client), you may not want a second one inside the server. Leave `LLM_AGENT` unset (or empty) and the framework runs in **no-agent mode**. Only the ReAct agent is absent: the intent classifier, parameter extraction, the planner and splitter (`LLM_PLANNER`) and Jev (`JEV_API_KEY`) still run, and **Jev is mandatory** here, since it matches each sub-task to a planning command. `LLM_PLANNER` is then the base model every other role falls back to, so it is required too. With neither `LLM_AGENT` nor `JEV_API_KEY` set, or with neither `LLM_AGENT` nor `LLM_PLANNER`, startup stops: `fastworkflow run_cli` prints the problem and exits non-zero (it does not fall back to deterministic mode in that case), and the server refuses to start. `fastworkflow train` is unaffected.
+
+- A single command runs, and its own response is the answer.
+- A predefined planning command runs its code steps. At a step code cannot run it either **pauses and asks the client** (a decision step, below) or, for free work (a prose step, a value that has to be found, a step that failed, no path to its command, a page cap) and where its answer would need a model (no `__result__` text), it **ends as a completed turn that carries a stop**. The turn's answer text is a short plain explanation written in code (what ran, where it stopped and why, that the remaining steps are in the data); how to word the final answer is left to your client.
+- A **decision step** pauses the turn like `ask_user` and resumes on the reply: the turn is `awaiting_user`, the entry has `question_kind: "phase_step"` and its data in `artifacts.phase_step`, and the answer is a plain question that says what ran, what is asked, how to answer and how to decline. Two steps are decisions: a conditional step `when("<condition>", run(...))` whose inner step code can run (reply `yes` to have the server run that step itself, through the same path and guards as any code step, or `no` to skip it) and a command step that leaves out one plain required value (a `str`, `int`, `float`, `bool`, enum or literal that is not found from a listing; reply with the value, which is checked as a code-written step is). The command then carries on with its remaining steps and its later phases; a later decision step asks again, a free-work step ends it with the stop (listing what ran after the resume), and `__result__` runs as usual at the end. A reply that cannot be read (`yes`/`y`/`true`/`no`/`n`/`false` and nothing else for a condition) is asked once more, and a second one ends the command with its stop. Reply `cancel` (or `abort`, `stop`, `decline`, `never mind`) to decline: the command ends with the stop at that step, `reason` "declined", not an error. The data is `{"command", "phase", "step": {"number", "text", "kind"}, "decision": {"kind": "conditional", "condition", "run_if_yes", "replies": ["yes", "no"]} or {"kind": "missing_value", "field", "type", "description", "reply"}, "decline": "cancel", "asked": 1 or 2, "done", "facts", "remaining", "later_phases"}` (`remaining` is the rest of THIS phase's steps, so it is `[]` when the work left is in later phases; `later_phases` names those phases, in order, as `fw_not_run` does, and the question text says "and its later phases" when there are any). The question needs no verified identity (it is not an approval; an inner command that needs approval is approved by the normal rules after the yes). It is asked only on an attended turn of the agent path: on an unattended turn, a `/` command or when the questions block on a queue, the step ends the command with the stop as before. While the question is pending, what a message does depends on the endpoint. On the agent endpoint (`POST /invoke_agent`, the MCP `invoke_agent` tool) every message is the reply, one with a leading `/` included: that endpoint strips leading `/` characters before the turn sees the message (it is never the deterministic endpoint), exactly as it does for an `ask_user` question. A `/` message there is not a separate command; it is read as the reply, and an unreadable one uses up the single re-ask. On the assistant endpoint (`POST /invoke_assistant`, the MCP `invoke_assistant` tool) the message is a deterministic command handled on its own, it is not the reply, and the question stays open for a later plain reply. To run a separate command while a decision is pending, send it to the assistant endpoint (or reply `cancel` first). `POST /cancel_pending` drops the pause with no stop.
+- An ad hoc request, one that no planning command fits, is **not planned here**. On a turn that can ask (attended, the questions do not block on a queue, and nothing ran in that part yet) the turn **asks which planning command is meant**: it is `awaiting_user`, the entry has `question_kind: "plan_choice"` and its data in `artifacts.plan_choice` (`{"request", "sub_task", "choices": [{"name", "description", "closest"}], "none_reply": "none", "decline": "cancel"}`), and the question lists the planning commands available here, numbered, with their descriptions (at most 12, with a count of the rest). The reply is read in code, with no model call: a name (with or without its context, in any case, or written with spaces), the number of a listed option, or a close misspelling picks that plan; `none` (also `no`, `neither`, `something else`) says none fits; `cancel` declines. A picked plan is bound to that part and the part resumes where the turn stood: a required value that is missing is asked for as for any matched plan, then the plan runs and the later parts follow; the parts before it are not run again. A reply that cannot be read is asked once more. After `none`, `cancel` or a second unreadable reply, and on a turn that cannot ask (an unattended turn, a queue-driven session), the part is **not run**: it comes back as the same kind of stop, with the planner's text plan as a suggestion. A split turn asks about each such part when it reaches it. Its answer text says plainly that no matching plan was found, then lists the planning commands available here with their one-line descriptions, the matcher's closest ones first (at most 12 shown, with a count of the rest), so a client or user can name one.
+- A multi-part request runs the runnable parts; the part that is not run says so, and the turn is completed.
+- `fastworkflow run_cli` with no agent model starts in deterministic mode and says so at the start (an exactly named planning command that needs an agent runs to its first open step instead of being refused). The server names the mode once in its startup log.
+
+The stop is data, in the artifact `fw_not_run` of the turn's last command output: a list with one entry per stopped part, each `{"kind": "not_run_here", "command", "phase", "open_step": {"number", "text", "kind", "reason"}, "done", "facts", "remaining", "suggested_plan", "means", "sub_task"}` (an ad hoc part's entry also has its own `request` text and `available_plans`, a list of `{"name", "description", "closest"}`, in the order its answer text lists them; on a turn that ran no command it rides on an output of its own, marked `framework`; `command`, `phase` and `open_step` are `null` for an ad hoc part; `facts` are the typed facts the finished phases filled; `suggested_plan` is a numbered continuation written with no model call: the open step, the rest of its phase, then each later phase's steps as the phase's template has them (marked `(phase <name>)`, or `(phase <name>, for each <item>)` for a phase that fans out over an earlier phase's results; a fact not found yet reads `<phase.field>`), and last the line that asks the client to write the answer; `later_phases` names those later phases). The `open_step` kinds are `conditional`, `prose`, `missing_value`, `failed`, `no_path`, `page_cap`, `extra`, `nested` (a planning command it called stopped; that stop is in `nested`) and `answer` (the answer needs a model). Numbering: `open_step.number` is the step's own number in its phase's plan, and `done` and `remaining` keep those own numbers (`done` lines are prefixed with the phase name when the command has several phases); `suggested_plan` is renumbered from 1, and `open_step.plan_number` is the open step's place in it (`null` when the suggestion does not carry the step, as with a nested stop). `facts` holds the finished phases only, not the partial results of the phase that stopped. A request a command was bound to by a confident match runs and its answer names the command ("(Ran <command>.)"); a match the heads or Jev are not confident about is not run, it is an ad hoc part, and a write command never runs from such a match. On the default host surface the plan review is opened only for a verified end user (the identity the approval path itself requires); otherwise the runnable parts run and the ad hoc parts come back as `fw_not_run` entries in the completed turn. In the `fastworkflow run_cli` fallback, a request that cannot be routed is answered with one added sentence saying no agent model is configured. With `LLM_AGENT` set, nothing here applies.
 
 ---
 
@@ -340,29 +361,33 @@ Use that printed URL. It carries a one-off token, and requests without it are re
 Debug mode nests turns directly beneath their conversations (with a separate conversation-less group when needed), and opens any turn into a span tree — the nested record of the stages that ran, each with its duration, status, and attributes:
 
 ```
-fw.turn                        the whole logical turn (stable across ask_user suspensions)
-├── fw.planner.plan            the agent's plan for the turn (fw.planner.replan on a re-plan)
-│   └── fw.llm.call            the planner's LLM request/response
-└── fw.agent.execute           the ReAct loop as a whole (attempts, final answer)
-    └── fw.agent.step          one reasoning step: thought, chosen tool, observation
-        ├── fw.llm.call        the step's reasoning LLM call (+ provider-native reasoning)
-        └── fw.agent.tool_call the agent invoking a command
-            └── fw.command.execute   resolution + your business logic running
-                ├── fw.nlu.intent            which matching layer decided, classifier
-                │                            confidence vs threshold, candidates on ambiguity
-                └── fw.nlu.param_extraction  extraction method, missing/invalid fields,
-                    │                        validation-hook outcomes (changed and refused fields)
-                    └── fw.llm.call          the LLM extraction call, when one ran
-fw.ask_user                    a clarifying question, and how long the user took
+fw.turn                        the whole logical turn (stable across questions to the user)
+├── fw.split                   how the request was split into parts (gate, splitter, merge)
+├── fw.resolve
+│   └── fw.resolve.part        one part: which command, which values
+│       ├── fw.intent          which matching layer decided, classifier confidence vs
+│       │                      threshold, candidates on ambiguity
+│       ├── fw.parameters      extraction method, missing/invalid fields, validation outcomes
+│       │   └── fw.llm.call    the LLM extraction call, when one ran
+│       └── fw.question        a question asked about this part, and how long the user took
+├── fw.review                  the review of the whole turn, its replies and revisions
+├── fw.run
+│   └── fw.run.part            one part as it ran: outcome ran | not_run | refused, and why
+│       ├── fw.plan            the text plan of a part no command fits
+│       ├── fw.phase           a phase of a planning command
+│       └── fw.step            one step, run by code or by the agent (thought, tool, observation)
+│           ├── fw.llm.call    the agent's reasoning call, when the agent ran it
+│           └── fw.command     resolution + your business logic running
+└── fw.answer                  who wrote the answer, and the conversation summary call
 
-(Deterministic "/"-mode turns skip the planner/agent layers: fw.command.execute
-sits directly under fw.turn.)
+(Deterministic "/"-mode turns have one part under fw.resolve and fw.run, and no split or
+review. A store written before span contract 63 uses other names and is not read.)
 ```
 
-The diagnosis lives in the attributes of `fw.command.execute`. It records `raw_command` (the natural-language command the agent sent), `command_name` (what intent detection *resolved* it to), the extracted `parameters`, the `response_text`, and `success`. Comparing the first two is the whole trick:
+The diagnosis lives in the attributes of `fw.command`. It records `raw_command` (the natural-language command the agent sent), `command_name` (what intent detection *resolved* it to), the extracted `parameters`, the `response_text`, and `success`. Comparing the first two is the whole trick:
 
 - **`raw_command` was reasonable but `command_name` is the wrong command** → an intent-detection miss. Add seed utterances for that command and retrain.
-- **`command_name` is right but `parameters` are wrong** → a parameter-extraction miss. Strengthen the `Field(description=…, examples=[…])` in that command's Signature.
+- **`command_name` is right but `parameters` are wrong** → a parameter-extraction miss. Strengthen the `Field(description=…)` (and `examples=[…]`, which feed the generated sample requests) in that command's Signature.
 - **Both right, span status is `error`** → the bug is in your own code, and `response_text` usually says how.
 
 Two turn-level fields are worth knowing because they are deliberately independent. `status` is the turn's lifecycle (`completed`, `failed`, …) and `success` means every command in it succeeded. A turn that is `completed` but not `success` is the case worth hunting: a command failed and the agent wrote a confident answer over it.
@@ -377,11 +402,81 @@ The Chat tab is connected the moment the workflow's server is ready (the first s
 
 Messages go to `/invoke_agent`; prefix one with `/` to force deterministic execution via `/invoke_assistant`, the same convention as the CLI prompt. **New conversation** in the header archives the current thread and starts a fresh one, like the CLI's `//new`. Sessions are single-developer by design: the chatbot manages one fixed private channel (`chatbot`), so there is nothing multi-user to configure and your history is in one place across launches.
 
-There is deliberately no box for a startup command or a per-session context: the session is driven by what you type, so pre-seeding it from a chat form makes no sense. Those stay launch-time decisions — `run_fastapi_mcp --startup_command`, or the `/initialize` request fields if you are calling the API yourself.
+#### The answer text and the same facts as data
+
+The turn's `answer` is the default plain-text rendering. Every part of it that the core writes in code is also available as data, and a client may present from the data and ignore the text. Where a key is listed, it is in `command_outputs[*].command_response.artifacts` of the entry named; the answer text is the same with or without it.
+
+| Text the core writes | Data | Where, and shape |
+|---|---|---|
+| Parts of a multi-part answer (`### N. title` headings, "Part i of n:" labels of a step-cap hand-off) | `fw_sub_tasks` | the turn's last command output; one entry per sub-task: `number`, `text`, `title`, `answered` (the part has text under its heading), `not_run` (`true` only in no-agent mode, for a part with an `fw_not_run` entry: its text is the stop's explanation, not a command's answer; absent otherwise), `start`, `end` (offsets of the part's answer in `answer`), and `runs` only for a part that was continued: `[{index, of, start, end}]`, the offsets of each run's answer after its label |
+| A review or plan proposal and the replies it accepts | `review` with `question_kind: "review"` | the waiting entry; `kind`, `title`, `revision`, `items`, `changes_data`, `reply_forms`: `[{kind: accept/decline/edit/add/drop, reply or pattern or free_text, per_item, separator?}]`, the replies the shown hint promises (the reply reader's own cues are wider); an ambiguous part is asked the `plan_choice` question before the review, so a review lists no other plans; the typed reply `step N: use NAME` switches a step to any planning or execution command of the workflow (it has no entry in `reply_forms`) |
+| An approval question | `approval` with `question_kind: "approval"` | the waiting entry; `command`, `parameters`, `origin`, `can_always` |
+| A which-command question (one shape on every path) | `plan_choice` with `question_kind: "plan_choice"` | `request` (the text asked about), `sub_task` (its number in a split turn, else `null`), `choices` (`{name, description, closest}` each), `none_reply` (`"none"`), `decline` (`"cancel"`), `ambiguous` (the choices are the commands one request fits) and `misunderstood` (nothing fitted and the choices are every command). Plan path: a part no planning command matched or more than one command fits, the waiting entry of an `awaiting_user` turn. Deterministic ("/") path: an ambiguous or unmatched request, the last output of a failed COMPLETED turn (human session only). Reply with a name or the number the question lists it under, `none`, or `cancel`; a name may be followed by its parameter text on the deterministic path |
+| A refused planning call or a failed "/" command's missing values | `parameter_request` | `command`, `missing`, `invalid`, `values` (one question names every argument the call lacks; `values` are the ones already obtained; with no agent model it is asked again while each reply makes progress, and a second reply with none ends the part as not run naming exactly what is missing) |
+| A capability answer written in code (agent mode, a workflow with planning commands) | `capabilities` | the answer's own `CommandResponse` (the `CommandOutput` that `process_message` returns and the CLI shows); it is not in `command_outputs`, which has no entry for that turn. `{planning_commands: [{name, title, example}], commands: [{name, title}], other_contexts: [{context, title, commands, more}]}` |
+| The `what_can_i_do` listing | `capabilities` and `command_response.output` | `{workflow: {name, contexts, context_inheritance}, context, commands: [{name, qualified_name, context, planning, approval_marker, description, parameters, outputs, sample_utterances}]}` |
+| `abort` ("command aborted") | `aborted` and `output` | what it ended: `{waiting_for, command?, command_name?}`; `output` is `{command, command_name}` |
+| `you_misunderstood` | `command_choices` and `output.valid_command_names` | the command names it lists, in its order |
+| A command's own result | `command_response.output` | the typed `Signature.Output` |
+
+The FastAPI and MCP surfaces return the same turn JSON (`answer` and `command_outputs`), so an MCP client reads these keys from it too.
+
+#### What the turn is doing while you wait
+
+While a message runs, the Activity panel shows how long the turn has run (a timer that ticks each second) and, for a request that is split into sub-tasks, which stage is running: "Splitting the request", "Matching sub-task 2 of 3", "Drafting sub-task 1 of 2", "Preparing the sub-task review". The stage comes from `progress` frames on `/invoke_agent_stream` (a stage key, a generic label and counts, no request text); the timer stops when the turn completes, fails or waits for you, and a stored turn shows neither.
+
+#### Results as cards
+
+A command that declares `Signature.Output` returns it as `command_outputs[*].command_response.output`, and the chat puts it in a panel beside the answer when the turn ends, with no model call and no author hint. A **Show results (N)** link under the answer opens that panel (closed by default; **Escape** closes it; on a narrow window it opens below the answer). Up to four short scalar fields become a stat strip; lists of records become tables, and parallel lists of scalars become one table only when their fields share a declared `table` group (an integer `total` beside equal-length lists no longer makes one in the panel; `fastworkflow command preview <folder> --check` prints a notice for each output that needs the hint; the answer card below still infers a table from that until a later step); a string becomes a badge only when its field declares `format: badge` (toned green, amber or red only for generic words such as ok, done, pending, failed or rejected, neutral otherwise; the chat knows no domain words). **A field's name never decides how it is drawn**: type and shape give the plain default, and everything else is a hint the workflow author declares; a field called `status` or `state` without `format: badge` is plain text. A label is the field's `Field(title=...)`, else its name made readable. A JSON string held in an output field, and a one-key wrapper around a record, are decoded first (`retail_workflow` returns its orders that way). A result that a later command of the same turn reads through `from_command_output` is folded under **Supporting lookups**. The answer itself is never folded. Optional `Field(json_schema_extra={"ui": {...}})` hints (with `Field(title=...)` for the label) change the view; `fastworkflow command preview <workflow> --check` prints a `notice:` for an `Output` with two or more visible list-of-scalar fields in no `table` group, and never fails on it: `hidden`, `hero` (pin to the stat strip), `format` (`currency`, which groups and shows two decimals in the browser's locale with no symbol unless `currency` gives a code, `percent`, `code`, `badge`), `tones` (with `format` `badge`: a map from a value to `good`, `warning`, `bad` or `neutral`, read before the generic words; checked at load), `currency` (with `format` `currency`: an ISO code such as `"EUR"`, so the browser shows that currency's symbol; without it, no symbol) and `table` (a group name: the list fields of one output sharing it are the columns of one table; checked at load, and drawn only when the lists have one length, otherwise as bullets; the chat never infers columns from equal lengths alone) on an `Output` field, `widget` (`textarea`, `radio`) on an `Input` field. A wrong hint on an `Input` fails the load; on an `Output` it is reported as a field-source error by `fastworkflow command preview --check`, and the command is skipped when the command directory loads.
+
+#### Rich answers: a model-composed card and question form
+
+The **Rich answers** checkbox next to the composer is on by default. It lets the chat call a small model, `LLM_RESPONSE_GEN`, for two things:
+
+- **An answer card**, offered on a turn that is not a `/` command and has more than one primary result or an answer longer than 400 characters. The chat composes it by itself, once per turn: the bubble shows the whole plain answer and a "Composing answer..." line while the call is out, then the card, which replaces the text answer in the bubble; a quiet **Show full text** / **Show summary** button under it switches back to the agent's own text and keeps its state for the turn. Whenever no card is drawn (skipped, failed, not needed) the text answer stays. A card is cached by turn, and a restored turn composes only once its record is loaded (the most recent turns, or after **show results and artifacts**). The chat sends the user's message, the answer, and each result's command, parameters and output to `POST /compose_answer_card`. The model only chooses a one-or-two sentence lead and, per sub-task or topic, a section (a short heading, a one-sentence verdict and up to 4 blocks: at least 5 sections, or one per part of a multi-part request up to a safety ceiling of 24, and 10 blocks, or 2 per section up to 48); every value on the card is read from the turn's own data. An answer of up to 150,000 characters is accepted; above 20,000 characters the model is shown an excerpt of about 12,000 (the numbered headings with the opening of each part), while every check, including quotes and numbers, reads the full answer. Up to 60 results are sent, with each field's schema description and ui hint (hidden fields are left out), row counts such as "60 of 167", and the parts of the answer (its numbered sub-task headings); when the turn was split, each result also carries the request part it was produced for (the recorded `sub_task`), which the composer uses only for its log line (the union of the headings and the numbers, to count the parts no section covers); the model is not shown the numbers, and what it reads, the section caps and its section order come from the parts of the turn alone: the parts the core recorded for a split turn (the `fw_sub_tasks` artifact of its last command output, which the chat forwards as `parts` and does not draw), or, when a turn carries none (an older record, another client), the answer's numbered headings, with the same result. A table on the card shows 8 rows and then a "+M more" control that opens the results panel, and the card ends with one line, written by the page and not the model, for every primary result group that no block shows, so no result is left out of reach. A lead, heading or verdict that holds a number or ID not in that data is dropped (a heading then falls back to the answer's own `### N.` title, or to the command's name), a block that points at no real field is dropped, and a quote must appear in the answer. Small models' habits are repaired from the data, never from their words: a record or table pointed at one value becomes a stat bound to it, a path with a list index (`orders.0`) becomes one table over that list, a table pointed at one flat record (a result of single values only) is shown as that record, and a table that names fewer than two columns shows all of them. A table of several lists is built only from a **page** as the server defines it (an integer `total` and every list field of one length); two unrelated lists of one length are not one. A card that would be only a lead restating the answer is not shown, so the full answer stays visible. A turn that is a `/` command never composes.
+- **A question form**, for an agent's open-ended `ask_user` question (`POST /compose_question_form`). The model proposes fields; code keeps only what the question asks for. Options must be values or dict keys from the turn's results, or appear in the question; a field that only restates a value already in the results is dropped; a yes/no question gets one boolean; a list in the results becomes the options of a pick; and only one field is required, when the form has one. A form is shown only when it gives you something the composer does not (a pick among two or more options, a yes/no, a date). A form of only free-text and number fields is not shown, and neither is a pick the question did not ask for: you see the plain question and answer in the composer. Genuine open questions are rare, so a missing form is the cheap mistake and a wrong one the costly one.
+
+The model sees the command outputs of every turn you compose a card for. That includes a long non-`/` answer in an assistant-mode session, where no model saw those outputs before. Uncheck **Rich answers** to keep them local. If `LLM_RESPONSE_GEN` is unset, or the call fails or takes more than 35 seconds, the plain answer, the deterministic results and the plain question stay as they are. The **LLM cache** checkbox is sent as `use_dspy_cache` and applies to that one call only. The shipped `fastworkflow.env` template sets `LLM_RESPONSE_GEN=mistral/mistral-small-latest`; unset it to turn both off. See the [environment table](#environment-variables-reference).
+
+**Reading the composer's log line.** Each composition logs one INFO line, for example `compose answer_card: results=23 digest_chars=5002 collapsed=11 sections=0/3 blocks=0/7 lead=kept drops=ref_unresolved:5,verdict_ungrounded:2 retry=used drops2=none sections2=2/3 blocks2=5/7 outcome=card duration_ms=1693`. `sections=0/3` means the model proposed 3 and none survived; `drops=` says why, by reason code (`ref_unresolved`, `verdict_ungrounded`, `lead_ungrounded`, `empty_section`, `bad_kind`, `block_cap`, `section_cap`, `lead_only_with_results`, `model_failed`, and so on; the full list is on `ComposeDiagnostics`). When validation dropped something a second look can fix, the composer calls the model once more with the specific problems and keeps the better answer: `retry=` is `none` (nothing to fix, or nothing a retry can change such as caps), `used` (the second answer was strictly better), `kept_first`, `failed` (the second call failed; the first answer stands) or `skipped_slow` (the first pass took more than 17.5 s); after a retry `drops2=`, `sections2=` and `blocks2=` are the second answer's tally, and `duration_ms` covers both calls. Three counters are not drops: `repaired=N` (refs the model wrote as an index or a digest path that code mapped to the list or page it meant, and tables written over one flat record that code showed as a record), `merged=N` (sections about a result an earlier section shows, folded into it) and `truncated=1` (the provider cut the answer at its token limit; one second call with a larger limit follows when time allows). The line holds counts and codes, never user text or data. To see the raw model output and the offending ref or text of each drop, run the server with `LOG_LEVEL=DEBUG` (in `fastworkflow.env` or the process environment); they are logged at DEBUG only, to the server's stderr.
+
+**The same facts as a trace span.** Every compose call (the answer card and the question form) also writes one `fw.compose` span to the observability store, so a composed answer can be inspected beside its turn in the trace viewer. Its attributes are the log line's, as data and not as a string: `compose_kind`, `outcome` (`ok`, `not_needed`, `no_model`, `failed`, `timeout`), `results`, `model`, `duration_ms`, `digest_chars`, `answer_chars` / `excerpt_chars` (the answer's length and the length of the excerpt the model read; 0 when it read the whole answer), `sections_kept` / `sections_proposed`, `blocks_kept` / `blocks_proposed`, `lead`, `drops` (reason code to count), `retry`, `sections_unnested`, `refs_repaired`, `sections_merged`, `truncated`, `token_limit` and `second_pass` (the correction pass's tally; the answer-card counts are null for a question form). It carries no user text, no answer text, no result values and no raw model output. The page sends the `turn_key` it already holds in the request; the span is filed under that turn (`turn_attached` true) when the observability store holds the turn for the caller's own channel, and under its own `compose-<id>` trace otherwise, so a request without a key is still recorded. Writing the span happens after the response is built and never fails it. The model call inside the composer does not leave an `fw.llm.call` span.
+
+#### Forms for every question the chat asks you
+
+When a turn waits for you, the chat shows a form instead of only a text prompt. The server's own text stays visible (under **Details** where there is a form), the form shows only on the latest message, and every reply is ordinary chat text recorded in the transcript as sent.
+
+| The turn waits because | The chat shows | What it sends | Model |
+|---|---|---|---|
+| a `/` command lacks or has a rejected parameter | a form of the command's `Input` fields, the asked ones marked | `/add_two_numbers first_num=2 second_num=3` (**Run**); **Edit as text** copies it to the composer; **Cancel** sends `abort` | none |
+| a `/` command name is ambiguous | one button per candidate command, **See all commands**, **Cancel** | the command's name; `what can i do?`; `abort` | none |
+| an agent's planning command call was refused for an input | a form of only the asked `Input` fields | `<field name>: <value>`, one line per field; the extraction model reads these lines, no code parses them | none |
+| a command needs your approval | **Approve**, **Always allow** (hidden when the server has no identity to grant to, and for a command that must be confirmed every time; a standing approval made here applies in this chat page only, not in the CLI, and never to an unattended run; list or revoke it with `/approvals` and `/revoke_approval <command>`), **Decline** | exactly `yes`, `always`, `no`; plus `approval_token` when the server delivered one (never shown or stored) | none |
+| a sub-task or plan review | an editable list of the steps | `yes`, `no`, or edits in the review grammar (`change 1: goal=...; drop 2`) | none |
+| the agent asks an open question | a form composed from the question, only when it offers a pick, a yes/no or a date; otherwise the plain question | `<Label>: <value>`, one line per field; **Edit in composer** copies them instead | `LLM_RESPONSE_GEN` |
+
+In assistant mode (a `/` message) a `name=value` message is bound in code before any model runs: `/add_two_numbers first_num=2 second_num=3` runs with no parameter-extraction call. XML tags and positional values are still read only in agent mode; in assistant mode they go to the model as before.
+
+Limits. The `/` form does not collect a password parameter (`format: password` or `writeOnly`, as a pydantic `SecretStr` gives): **Run** sends the reply as ordinary chat text, which is echoed and recorded, so a masked input would imply protection it cannot give. The form shows a note in place of the field and leaves the parameter out of **Run** and **Edit as text**; when the parameter is required, **Run** is disabled and a status line says which one to supply another way (or type the command yourself if you accept that it is recorded). The review form refuses, with a note and a disabled button, the edits the server's reply grammar cannot take as written (a value of `none` or `null`, which clear an input; a value that needs quotes but holds both kinds, with a `, name=` in it; skipping every step). The server's own rules, for a reply typed by hand: `none` or `null` after `name=` clears that input, and a quoted `"none"` is refused with a message, so the literal word cannot be set; a comma, `;` or ` and ` followed by `name=` or `name:` starts another input unless the value is quoted, and a quoted value that holds its own quote mark and such a separator is refused (quote it with the other mark, or reword); one `inputs=` edit that packs an input named like a step field (`inputs=member=Z, check=x`) is refused naming the part, because it would be dropped (write `change 1: inputs=check=x` for an input of that name, `change 1: check=x` for the step's check); a reply that holds a `change N:`, `drop N` or `add after N` clause is never an acceptance, so wording such as "run it as shown" inside an edit is part of the edit, and "yes" or "run it as shown" must be sent on its own. In no-agent mode the chat page shows the question "which plan should run this part?" (`question_kind` `plan_choice`) as one button per plan, the closest first and marked, with **None of these** and **Cancel**; a click sends the plan's name (or `none`, `cancel`) as the reply to the waiting question, so the part resumes in the same turn. It also shows the plans listed for a part that was not run as buttons under its answer (the closest first and marked, the first 12 with a "show all" toggle, one group per part of a split turn); a click starts a new turn that sends only that part's request with `use_plan` set to the plan, and the buttons are disabled once a later message exists. `use_plan` (optional on `/invoke_agent`, `/invoke_agent_stream` and the MCP `invoke_agent` tool) runs one request bound to a planning command available here (one the matcher could have chosen), named as `available_plans[].name` lists it: the message is one part (not split), the match is skipped, and its parameters are drafted from the message and asked as one parameter form for that plan instead of a review (its name and description, every parameter with the drafted value prefilled, missing required ones marked; the goal is not shown or editable; a value still missing is asked for again while replies make progress, and `cancel` stops), and an unknown or out-of-context name is refused with HTTP 400 (MCP isError); an ad hoc `fw_not_run` entry carries its own `request` text for exactly this. A restored conversation shows an approval, review or question form only on its latest message, and does not show the `/` parameter form or the ambiguity buttons. When a part fits several commands, the which-command question (`plan_choice`) is asked before the review, so a review line shows one command and the payload item carries no `alternatives`; the reply `step N: use NAME` (or `use NAME`) still switches a step to any planning or execution command of the workflow, as the edit `change N: means=planning:NAME`, which re-drafts that step's inputs, and asks again for a name that resolves to nothing.
+
+**Counting clarification rounds.** To count the questions put to the user in each logical turn, with **Rich answers** on or off, run this against the workflow's `observability.sqlite3` (open it read-only):
+
+```sql
+SELECT t.trace_id AS turn_key, COUNT(a.span_id) AS ask_user_spans
+FROM spans t
+LEFT JOIN spans a ON a.trace_id = t.trace_id AND a.name = 'fw.question'
+WHERE t.name = 'fw.turn'
+GROUP BY t.trace_id
+ORDER BY t.start_ns;
+```
+
+It counts `fw.question` spans (every wait for a person: a question, the review, an approval) per `fw.turn`, which share a `trace_id` (the turn key) across suspensions; a turn that never asked shows 0, and a question still waiting is counted.
+
+There is deliberately no box for a startup command or a per-session context: the session is driven by what you type, so pre-seeding it from a chat form makes no sense. A workflow's own `startup_action.json` is run when a session starts, so a workflow with a root object has it here without any flag. A startup command or a context stays a launch-time decision (`run_fastapi_mcp --startup_command`), or the `/initialize` request fields if you are calling the API yourself.
 
 A spawned server always binds `127.0.0.1`, has CORS pinned to loopback origins, and is stopped when the chatbot exits (SIGTERM included). It runs with unsigned dev JWTs — fine for a loopback-only dev server whose tokens the chatbot mints itself; pass `--expect-encrypted-jwt` to require signed tokens instead (then paste one in the chat's Advanced panel). Already have a server running? Launch with `--server-port <port>` and connect via the Advanced panel.
 
-Insights distillation (`fastworkflow run --generate_insights`) stays CLI-only by design, as do bind address and env-file choices for externally managed servers. The full capability comparison is in [`docs/run_chatbot_cli_parity.md`](docs/run_chatbot_cli_parity.md).
+Insights distillation (`fastworkflow run_cli --generate_insights`) stays CLI-only by design, as do bind address and env-file choices for externally managed servers. The full capability comparison is in [`docs/run_chatbot_cli_parity.md`](docs/run_chatbot_cli_parity.md).
 
 ### Retention and erasure
 
@@ -389,7 +484,7 @@ Trace data grows, so the record bounds itself with two settings and no setup: `F
 
 Archive recorded conversations from **Tools → Archived conversations**. That copies each conversation's turns into a read-only file and removes them from the live database. Delete an archived conversation from the same page when you no longer need the file. A conversation that belongs to an experiment is archived with that experiment.
 
-There is no switch to turn recording off. fastWorkflow always keeps this local record, including when you embed the core as a library rather than using `run`, `run_fastapi_mcp` or `run_chatbot`: one SQLite database per workflow at `<FASTWORKFLOW_STATE_ROOT>/workflows/<workflow-id>/observability.sqlite3` (the state root defaults to `~/.local/state/fastworkflow`), created readable by its owner only (the file `0600`, its directory `0700`). It is pruned automatically when the recorder starts and hourly after that: `FW_OBS_RETENTION_DAYS` sets the age horizon and `FW_OBS_DB_MAX_BYTES` the size cap (see [Environment variables reference](#environment-variables-reference)). Point `FASTWORKFLOW_STATE_ROOT` elsewhere to keep it on a different disk.
+There is no switch to turn recording off. fastWorkflow always keeps this local record, including when you embed the core as a library rather than using `run_cli`, `run_fastapi_mcp` or `run_chatbot`: one SQLite database per workflow at `<FASTWORKFLOW_STATE_ROOT>/workflows/<workflow-id>/observability.sqlite3` (the state root defaults to `~/.local/state/fastworkflow`), created readable by its owner only (the file `0600`, its directory `0700`). It is pruned automatically when the recorder starts and hourly after that: `FW_OBS_RETENTION_DAYS` sets the age horizon and `FW_OBS_DB_MAX_BYTES` the size cap (see [Environment variables reference](#environment-variables-reference)). Point `FASTWORKFLOW_STATE_ROOT` elsewhere to keep it on a different disk.
 
 Phase 0 capture/tracing overhead (bead `fix-49m.2`, not a CI gate) was measured with a stubbed LM on hello-world `add_two_numbers` turns, observability on, no network: command-gap p50 **+0.7%** and turn-wall p50 **+1.6%** vs fork `9904df5` (change 4 `5b1e85e` in between). Reports and method: https://gist.github.com/dharrawal/2e123360ace2e948a138c52ce9f00601
 
@@ -411,7 +506,18 @@ python -m fastworkflow.run_fastapi_mcp \
   --port 8000
 ```
 
+The LLM response cache is a server-wide setting chosen at start: `FW_LM_CACHE=0` builds every model without it. The `use_dspy_cache` request field on `/invoke_agent`, `/invoke_agent_stream` and `/invoke_assistant` (and the MCP tools of the same names) takes effect only on a server started with `--allow_request_cache_toggle` (the chatbot launcher passes it, so the chat page's "LLM cache" checkbox works for a local chat; the memory bound stays in force and readiness stays ready, with `checks.dspy_response_cache` naming a cache a request turned off). On any other server the field is ignored and a value that disagrees with the server's setting is named in the `X-FW-DSPy-Cache` response header, so one client cannot change another channel's behaviour or make `/probes/readyz` report a drifted memory policy.
+
 Key endpoints: `/initialize` (create session + JWT), `/invoke_agent`, `/invoke_agent_stream` (SSE/NDJSON), `/invoke_assistant` (deterministic, non-agentic), `/perform_action` (direct programmatic calls), `/new_conversation`, `/conversations`, `/probes/healthz`, `/probes/readyz`.
+
+**Long turns over MCP.** `invoke_assistant` and `invoke_agent` are the turn tools. `timeout_seconds` (default 60) is how long a call waits, not a limit on the turn. `invoke_assistant` past it returns `{turn_key, exec_state: "running"}` (HTTP 202) and the turn keeps running; `invoke_agent` stays open until the turn ends and adds a non-terminal `timeout` frame (`still_running: true`), every frame carrying `turn_key`. The mount calls the app in process with no read time-out of its own, so a turn of minutes is not cut by the mount; the limit that remains is your MCP client's own. If it fires, the turn keeps running and is read back with the `get_turn` tool (by `turn_key`) or, when no key reached you, `get_latest_turn` (the running turn, else the last stored one). Both are scoped to the caller's own conversation (another conversation's key is a 404). Do not send the same query again to find out: while it runs it joins the turn, and once it has finished it runs the request a second time. A finished turn is read from the observability store, so it can be fetched for as long as the record is kept.
+
+**MCP tool results.** Every MCP tool result keeps its text block and adds `structuredContent`; the four turn tools (`invoke_assistant`, `invoke_agent`, `get_turn`, `get_latest_turn`) return one turn object `{turn_key, exec_state, status, failure_reason, success, answer, command_outputs, ...}` and declare it as their `outputSchema` (for `invoke_agent` it is the terminal frame of the stream, which stays the text block). `isError` is true for an HTTP error (401, 404, 409, 422, 503 with `retry_after_seconds`, ...), an unknown argument (named, with the accepted ones listed) and a turn that ended in failure (`status: failed`, an execution `error`, a lost record). A turn that is `running` (returned early) or `awaiting_user` (a question, review or approval is waiting: answer by calling the same tool again with your reply as `user_query`, or `cancel_pending`) is not an error, and neither is a completed turn with `success: false`. No MCP prompts are registered (fastapi-mcp 0.4.0 has none). Details in `fastworkflow/run_fastapi_mcp/README.md`.
+
+**Sessions, the cap and ending a session.** The server keeps one live session per channel in process memory. `max_live_sessions` (default 50, logged at startup) is a target, not a ceiling: when it is exceeded the oldest idle session whose state can be checkpointed is saved and released, and is restored on the channel's next call. A session is *pinned* (never evicted) when its state cannot be checkpointed, most commonly because a workflow context class has no `get_state` hook (see the serialization hooks design doc), or because a suspended question is not durably stored. The soft target alone bounds nothing for pinned sessions, so there is also a hard ceiling (next paragraph). `POST /end_session` (the MCP tool `end_session`) ends the caller's own channel (the channel is the token's; there is no channel parameter). Body `{"discard_pending": false}` (optional); response `{channel_id, ended, pinned, pending_discarded}`. A session that can be checkpointed is saved first, exactly as an eviction does, and the next call on the channel restores it; a pinned session loses its in-memory workflow state and the next call starts from launch configuration. Kept either way: every finished turn (`get_turn`, and `get_latest_turn`, which reads the store, still work after the session ended, for the normal turn retention), the conversation history and all observability records. Refused with 409 while a turn is running or another request holds the channel, and while a question is pending (an agent question, a review, an approval, a parameter request) unless `discard_pending` is true, in which case the question is dropped; a client never loses a suspended turn by accident. Ending a channel with no live session is not an error (`ended: false`). `GET /probes/readyz` always reports `sessions: {live, max_live, over_target}`; `?sessions=true` adds `pinned` (it runs each session's `get_state` hook, so it is off by default). At startup the server logs one WARNING naming the context classes that have no `get_state` hook (read statically from the context model). 
+
+**The hard ceiling.** `MAX_LIVE_SESSIONS_HARD` (default 4 times `MAX_LIVE_SESSIONS`, so 200; setting it below `MAX_LIVE_SESSIONS` is a startup error) is the most live sessions this process will hold, counting sessions being created. A request that needs a new session (`/initialize`, or any call on a channel with no live session) when the count is at the ceiling first makes room: it saves and releases an idle session that can be checkpointed, then expires an idle pinned session (below), and if neither is possible it is refused with `503`, a `Retry-After: 30` header and a message naming the ceiling; the MCP tool result carries the same text. The refusal happens before any model or database work. Requests for channels that already have a live session are never refused. **Expiry.** A pinned session idle longer than `PINNED_SESSION_IDLE_TTL_SECONDS` (default 1800; 0 never expires) is expired, but only while the live count is above `MAX_LIVE_SESSIONS`, both when a new session needs room and in the 5-minute maintenance pass; a deployment that stays at or below the soft target loses nothing however long a session sits idle. A session with a question waiting for its user is protected from that TTL and expires after `PROTECTED_SESSION_IDLE_TTL_SECONDS` (default 86400; 0 never expires), again only above the soft target; its pending question is discarded the way `end_session` with `discard_pending` does. A session with a running turn or a request holding it is never expired, and neither is a channel bound to a registered experiment attempt (the attempt claim lives on the session; such a channel counts toward the ceiling and is reported as `experiment_exempt`). **Never silent.** When a pinned session is expired, or `end_session` drops one whose state was not saved, the server records a small notice; the channel's next session carries `session_notice: {code: "context_dropped", reason, message}` once, in the first turn result of every turn endpoint (the `output` frame of `invoke_agent_stream`) and in the `/initialize` response (reasons `expired`, `expired_pending_question`, `ended`). The conversation history is kept; the workflow context starts from launch configuration. Notices are reclaimed after 30 days, and a notice that cannot be written or read never fails a request. `GET /probes/readyz` `sessions` also reports `hard_ceiling`, `at_ceiling`, `refused_total`, `expired_total` and both TTLs (`?sessions=true` adds `pending_protected`, `experiment_exempt` and `trace_events_dropped`); being at the ceiling does not make the pod unready. Startup logs one line naming all four limits and where each came from. To keep the old behaviour (no expiry, effectively no ceiling) set `PINNED_SESSION_IDLE_TTL_SECONDS=0` and a very large `MAX_LIVE_SESSIONS_HARD`; that is not supported as a memory bound. Worst case memory is the ceiling times a session's workflow state plus its conversation window (about 9 MB at the 20-turn window), so size the ceiling to the pod. Each session's trace queue holds at most 10,000 events (oldest dropped and counted), and the in-memory conversation window, whose trim waits for the newest turn record to be durable, is trimmed anyway past twice the window.
+
 
 ### Pattern 2 — embed the core in an existing app
 
@@ -420,7 +526,7 @@ The execution core is synchronous and transport-free. Create one `WorkflowExecut
 ```python
 import fastworkflow
 from dotenv import dotenv_values
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 # Load env + secrets once at startup
 env_vars = {
@@ -501,9 +607,9 @@ Yes. `ResponseGenerator.__call__` is plain Python — call `requests`, `httpx`, 
 
 ## Key concepts (going deeper)
 
-**Adaptive intent understanding** — Misunderstandings happen in every conversation. fastWorkflow does 1-shot adaptation from intent-detection mistakes, learning your conversational vocabulary as you interact; corrections can be persisted to improve the model across sessions.
+**Learning from corrections.** Earlier versions adapted after one clarification by remembering a corrected request and answering a similar later request from that memory. That similarity cache was measured to add nothing on unseen requests and to give many wrong answers, so it was removed. Its replacement is learning from use: recorded, confirmed requests and a gated refit of the local intent model (`fastworkflow learn`; see "The local intent model" and `INTENT_LEARNING_*` below). Until you run it, or turn on `INTENT_LEARNING_REFIT=background`, a clarification fixes that turn only. An old `___convo_info/cache.sqlite3` is never read again and may be deleted (the suggested commands of an ambiguity question are kept there and rewritten as needed).
 
-**Signatures** — Pydantic `BaseModel` + `Field` (à la [DSPy](https://dspy.ai)) is the contract between natural language and your code. Strong descriptions and `examples` directly improve extraction accuracy, and the same schema feeds DSPy integration.
+**Signatures** — Pydantic `BaseModel` + `Field` (à la [DSPy](https://dspy.ai)) is the contract between natural language and your code. Strong descriptions directly improve extraction accuracy (a field's `examples` are not shown to the extraction model: they feed the sample requests it learns from and the hint in a question; a `pattern` is shown to it as the format), and the same schema feeds DSPy integration.
 
 **Context navigation at runtime** — Classes hold state; method availability can change with state. fastWorkflow enables/disables commands and navigates object hierarchies at run-time, which is what makes complex, finite-state workflows possible.
 
@@ -519,10 +625,12 @@ dspy_sig = dspySignature(Signature.Input, Signature.Output)
 prediction = dspy.Predict(dspy_sig)(input)
 ```
 
+**Startup action file** — a `startup_action.json` in the workflow folder is run as the first turn of every session by `fastworkflow run_cli`, `fastworkflow run_fastapi_mcp` and the chat page, with no flag. `--startup_action` or `--startup_command` given explicitly replaces it, and on the server a session's own `startup_command` or `startup_action` in the `/initialize` request beats both.
+
 **Startup commands & headless mode** — initialize context or run non-interactively (batch/CI) by combining a startup command/action with `--keep_alive False`:
 
 ```sh
-fastworkflow run my_workflow/ .env passwords.env \
+fastworkflow run_cli my_workflow/ .env passwords.env \
   --startup_command "process daily report" --keep_alive False
 ```
 
@@ -550,7 +658,7 @@ graph LR
     subgraph A[Build-Time]
         A1(Your Python App) --> A2{Coding Agent + integrate-chat-agent skill};
         A2 --> A3(Generated _commands);
-        A3 --> A4(context_inheritance_model.json);
+        A3 --> A4(inherits on each class Context);
         A4 --> A5(Review & refine);
     end
 
@@ -578,8 +686,12 @@ order_agent/                         # <-- The workflow_folderpath
 ├── application/                     # <-- Your app code (untouched)
 │   └── orders.py
 ├── _commands/                       # <-- Command wrappers (generated + edited)
-│   ├── cancel_order.py
-│   └── context_inheritance_model.json
+│   ├── cancel_order.py              #     a global command
+│   ├── Order/                       #     a context: the commands on one order
+│   │   ├── _Order.py                #     its class Context: inherits, parents, get_parent, ...
+│   │   └── update_address.py
+│   ├── _shared/                     #     helper modules the commands import
+│   └── _workflow.py                 #     optional workflow settings (the request splitter's)
 ├── ___command_info/                 # <-- Trained models (generated by `train`)
 └── ___convo_info/                   # <-- NLU caches / conversation logs (run-time)
 
@@ -634,7 +746,13 @@ The core depends on **plain** `litellm` (client only — no proxy server stack),
 | `litellm` | `>=1.83.7,<2.0.0` | Client only; FastAPI server deps are in the `server` extra |
 | `sentence-transformers` | not a dependency | imposes no constraint downstream |
 
-The intent-detection base models are configurable via `INTENT_DETECTION_TINY_MODEL` / `INTENT_DETECTION_LARGE_MODEL`.
+The base models of the fine-tuned layouts (`workflow`, `per_context`) are configurable via `INTENT_DETECTION_TINY_MODEL` / `INTENT_DETECTION_LARGE_MODEL`; the default layout's encoder via `INTENT_EMBEDDING_MODEL`.
+
+**The local intent model.** By default `fastworkflow train` embeds each command's utterances with a frozen sentence encoder (`intfloat/e5-base-v2`: one download of about 418 MB, shared by every workflow on the machine, never trained, nothing of it stored per workflow) and fits one linear head over every command of the workflow. Besides the generated utterances, each command's description (the first sentence of its `Signature` docstring) and its name are rows of the head, and the seed utterances you wrote count three times. Nothing is fine-tuned, so this step takes seconds (about 10 s for the bundled examples, most of it embedding the rows), the result is under 100 KB per workflow, and it is the same every run. A context is answered by reading the head's output through that context's own commands: one command when the head's probability for it is at or above `INTENT_COMMIT_THRESHOLD` (default 0.65), and otherwise the head is not confident and hands the request on. **The local model never passes a request up on its own.** When the command it thinks is meant lives outside the context (a parent context or the global scope), it hands the request on with that command among the candidates: the remote decision model decides when `JEV_API_KEY` is set, and otherwise the ambiguity question offers the command, and choosing it runs it where it lives, as a climb to the parent would. The training report lists, per workflow, the head's cross-fit accuracy on its own training rows and the most confused pairs of commands (rows of one that the head gives to the other; the top ten and how many exceed 10%), with what to do about a pair: add seed utterances that tell the two apart, or merge the commands. `INTENT_MODEL_LAYOUT` chooses another layout: `workflow` fine-tunes one large classifier for the whole workflow, and `per_context` fine-tunes a small and a large classifier for every context (the default before 2026-11-17). The framework's own built-in workflows (the plan-review plan and the command metadata extraction) are always in the `embedding` layout, whatever this setting says, on the encoder `BAAI/bge-small-en-v1.5` (the default encoder did not pass their reply tests). The settings are read by `train` only. `run_cli` and the servers read whichever layout the published version has, so switching is a retrain (a full one, in any direction); a head trained before 2026-11-17 is read with the rule it was trained with until you retrain. `INTENT_WRONG_COMMIT_TARGET` and `INTENT_FALSE_ESCALATION_TARGET` no longer exist; a value left in an env file is ignored with one warning. Measured through the product trainer and router on the bundled `library` and `retail_workflow` examples (`scripts/experiments/embedding_head.py product`, 2026-11-17, threshold 0.65, the local model alone): on the development benchmarks (735 routing and 120 escalation requests, pooled) the one label it answers is right on 59.6% of requests and wrong on 1.8%, and for 117 of 120 escalation requests the ancestor's command is among the candidates it hands on, none answered with one label; on the fourth benchmark, scored once and not tuned on (264 routing and 46 escalation requests), 45.8% right outright and 3.0% wrong, against 60.2% and 10.2% for the head shipped before it, and the ancestor's command among the candidates for 45 of 46. The price is that it answers outright less often (the rest goes to the next link) and a request takes a median 25 to 32 ms on CPU with 10 threads (52 to 64 ms with one) against 10 ms before. It has not been measured on a large workflow. On disk, a version holds one `workflow/` folder (the head and `scopes.json` with the encoder's id, pooling and prefix, each context's commands, the commit threshold and the cross-fit facts) and, per context, two small files that point to it. The encoder's weights are not part of the trained artifact: a machine that trains or runs the workflow loads them from its Hugging Face cache, and downloads them on first use.
+
+**Learning from use.** A workflow records each request it resolves (`INTENT_LEARNING_RECORD`, on by default): the request, the command, how it was settled and whether a person or agent confirmed it (a pick at a question, a review that showed the command and was accepted, a plan switched in review). Only confirmed rows teach, never a command-name match, a bare value or a vague reply. `fastworkflow learn <workflow_dir> <env_file>` refits the head with them, without a model call and without embedding the base rows again, and publishes the result as a new version only when it passes a cross-fit gate (the base rows keep their accuracy, and the learned rows are no worse right outright and no more often wrong with confidence than without them); a running server picks up the new version within seconds, without a restart. With enough confirmed requests it may also lower the commit threshold (never raise it; `INTENT_COMMIT_THRESHOLD` set in the env always wins). `INTENT_LEARNING_REFIT=background` does the refit for you every `INTENT_LEARNING_REFIT_EVERY` rows; `fastworkflow learned list|remove|stats` reviews and deletes rows. A head trained before this feature has no stored rows and is refittable after its next `fastworkflow train`.
+
+**One detection chain.** Which command a request means is decided in one way, with no setting: the trained local model decides when it is confident, with no model call; when it is not (several candidates, or "not here"), or where a context has no trained model, the remote decision model is asked if `JEV_API_KEY` is set (one model call for such a request) and decides when it is confident (its best command at or above `INTENT_REMOTE_ACCEPT_THRESHOLD`, default 0.9; "none" or a command of another scope at or above `INTENT_REMOTE_DECLINE_THRESHOLD`, default 0.9, declines the scope; below the accept bar the candidates are asked, and a confident local answer that names a planning command is always checked this way, whatever the path); otherwise the user is asked to choose (or the agent is given the candidates). A context with no trained model therefore does not stop the workflow when `JEV_API_KEY` is set, and startup prints one line that says what the chain is and names such contexts. Without `JEV_API_KEY` an untrained workflow is refused as before. `INTENT_DETECTION_ENGINE` (`auto`, `classifier`, `matcher`, `hybrid`) was removed: the chain is what `hybrid` was, and a value left in an env file is ignored with one warning. Measured before the default layout changed, with the per-context classifiers as the local model, on the first held-out benchmarks of two bundled examples (207 routing and 32 escalation cases): a single correct command for 42% of the routing cases with the classifiers alone, 93% with the remote model alone and 93% with the chain, which made a model call for 59% of the cases; requests that belong to an enclosing context were passed up in 9%, 100% and 91% of the escalation cases. Measured with the embedding head as the local model and the remote model's answers stored (1,102 requests, `docs/remote_link_worth.md`): on the bundled examples the chain at 0.5/0.5 was right on 94.2%, wrong on 3.2% and asked on 2.6%, against 85.2%, 1.9% and 12.9% at the shipped 0.9/0.9; on a large private workflow 77.6%, 13.4% and 9.0% against 55.1%, 6.5% and 38.3%, which is why the bars are 0.9. If the remote model's call fails (credits, a rejected key, a timeout) the local answer or the question stands in as before, one warning is logged and then at most one every 5 minutes, and the request's span carries `remote_failed`.
 
 ---
 
@@ -645,15 +763,22 @@ The intent-detection base models are configurable via `INTENT_DETECTION_TINY_MOD
 fastworkflow examples list
 fastworkflow examples fetch hello_world
 
+# Move a workflow's removed context_inheritance_model.json into inherits declarations
+fastworkflow migrate-contexts <workflow_dir>
+
 # Train intent-detection models (once per command set)
 fastworkflow train <workflow_dir> <env_file> <passwords_file>
 
+# Learn from use: refit the local head with the requests people confirmed (no model call), and calibrate its threshold
+fastworkflow learn <workflow_dir> <env_file>
+fastworkflow learned list|remove|stats <workflow_dir>   # review and delete what was recorded
+
 # Run — agentic mode is the default
-fastworkflow run <workflow_dir> <env_file> <passwords_file>
-fastworkflow run <workflow_dir> <env_file> <passwords_file> --assistant   # deterministic, non-agentic
+fastworkflow run_cli <workflow_dir> <env_file> <passwords_file>
+fastworkflow run_cli <workflow_dir> <env_file> <passwords_file> --assistant   # deterministic, non-agentic
 
 # Headless (batch/CI)
-fastworkflow run <workflow_dir> <env_file> <passwords_file> \
+fastworkflow run_cli <workflow_dir> <env_file> <passwords_file> \
   --startup_command "your command" --keep_alive False
 
 # Browser chatbot + observability viewer (`run` is also spelled `run_cli`);
@@ -669,30 +794,111 @@ python -m fastworkflow.run_fastapi_mcp --workflow_path ./wf --port 8000
 > [!tip]
 > Prefix a natural-language command with `/` during an interactive run to force deterministic (non-agentic) execution. Add `--help` to any command for its full options.
 
+At the `fastworkflow run_cli` prompt, `//new` starts a new conversation, `//exit` quits, and `//cancel` cancels what is pending the way the chat page's Cancel does: a question the agent asked (`ask_user`) ends as a "Command cancelled" result, an open review or approval is answered `no`, and an open command waiting for a missing value or a choice is answered `abort`. A plain `cancel` typed at a prompt is not intercepted: it reaches the workflow under its own rules. **Ctrl-C while a turn runs** stops waiting and returns to the prompt (Ctrl-C at an idle prompt exits as before); `--timeout_seconds N` does the same for a turn that takes longer than N seconds (default: no limit). The engine cannot abort a turn in flight, so the turn finishes in the background, its commands' side effects still happen, its output is discarded, and your next message runs after it. If the interrupted turn ends with a question, review or approval you never saw, it is cancelled (with the replies `//cancel` sends) before your next message is read, and the prompt says so, so a following `yes` cannot approve something unseen.
+
 ---
 
 ## Environment variables reference
 
-Two files per workflow (templates ship with `fastworkflow examples fetch`).
+Two files per workflow (templates ship with `fastworkflow examples fetch`): `fastworkflow.env` for settings and `fastworkflow.passwords.env` for keys. `fastworkflow train`, `run_cli`, `run_fastapi_mcp`, `build` and `refine` load both (`build` and `refine` take `--env-file-path` and `--passwords-file-path`, and default to the workflow folder's own files when present).
 
-### `fastworkflow.env`
+**Precedence, one rule for every variable:** a variable set in the process environment (a shell `export`, a container or CI variable) wins over the env files, and the env files win over the code default. An empty value exported in the shell counts as set: it hides the file's value. One exception: `LOG_LEVEL` is first read when fastWorkflow is imported, before any env file is loaded, so at that moment only the process environment counts; the files apply once they are loaded. litellm, when imported, would load the first `.env` it finds searching upward from its own installed file (so a virtualenv inside a project finds that project's `.env`) into the process environment, where under this rule it would beat the workflow's env files; fastWorkflow turns that off by setting `LITELLM_MODE=PRODUCTION` (that is the variable's only effect in litellm) unless you set `LITELLM_MODE` yourself. Put settings and keys in the workflow's env files or export them; a `.env` above the virtualenv is not read. If your own code imports litellm before fastWorkflow, the load has already happened, and fastWorkflow logs a warning: import fastWorkflow first.
+
+**Models: one is required.** Every model role falls back, so one model is enough:
+
+- The **base model** is `LLM_AGENT`, else `LLM_PLANNER` (no-agent mode). `LLM_PLANNER` falls back to `LLM_AGENT`.
+- `LLM_SYNDATA_GEN`, `LLM_PARAM_EXTRACTION`, `LLM_CONVERSATION_STORE`, `LLM_OBSERVATION_SEARCH`, `LLM_POLICY_INTENT` and `LLM_COMMAND_METADATA_GEN` fall back to the base model. `LLM_AGENT` never falls back. `LLM_RESPONSE_GEN` and the distillation roles (`LLM_DISTILLATION`, `LLM_TEACHER_*`, `LLM_STUDENT_*`) are used only when set.
+- **The key follows the model**: a role's own `LITELLM_API_KEY_*`, else the key of the role its model came from, else the base role's key when both models name the same provider (the part before the first `/`). A key is never sent to another provider. A `litellm_proxy/` model uses `LITELLM_PROXY_API_KEY`; a `bedrock/` model needs no key (it authenticates from the AWS credential chain).
+- A role that falls back says so once at startup in the log, and the run's model provenance records the model each role resolved to and the role it came from.
+
+The smallest working sets: **agent mode** `LLM_AGENT`; **no-agent mode** `LLM_PLANNER` and `JEV_API_KEY`; **training** any one of `LLM_SYNDATA_GEN`, `LLM_AGENT`, `LLM_PLANNER`. Add the model's key where its provider needs one, and `LITELLM_PROXY_API_BASE` for `litellm_proxy/` models. With no base model, `run_cli` and the servers stop at startup and say so; `train` stops at start when it has no model to generate utterances with. The generator model is not part of the generated-data caches or of the training signature: changing it reuses every cached utterance and parameter example.
+
+### `fastworkflow.env`: models
+
+| Variable | Purpose | When needed | Default |
+|:---|:---|:---|:---|
+| `LLM_AGENT` | The ReAct agent's model, and the base model every other role falls back to. **Unset or empty runs without an agent model** (see "Running without an agent model"; `LLM_PLANNER` and `JEV_API_KEY` are then required) | Agent mode: required | *none* |
+| `LLM_PLANNER` | The task planner and splitter | No-agent mode: required | `LLM_AGENT` |
+| `LLM_PARAM_EXTRACTION` | Parameter extraction | Optional | base model |
+| `LLM_SYNDATA_GEN` | Synthetic utterance and parameter-example generation (`train`) | Optional | base model |
+| `LLM_CONVERSATION_STORE` | Conversation topic and summary | Optional | base model |
+| `LLM_OBSERVATION_SEARCH` | Search of an offloaded observation (`search_memory`) | Optional | base model |
+| `LLM_POLICY_INTENT` | The readings some policy rules use | Optional | base model |
+| `LLM_COMMAND_METADATA_GEN` | `fastworkflow refine` (command metadata) | Optional | base model |
+| `LLM_RESPONSE_GEN` | The chat's composed answer cards and `ask_user` question forms (`POST /compose_answer_card`, `POST /compose_question_form`; the **Rich answers** switch in `run_chatbot`). No fallback: unset, the composed card and form are absent and everything else works. It also appears in the run's model provenance | `run_chatbot` / FastAPI service (optional) | *none* |
+| `LLM_DISTILLATION`, `LLM_TEACHER_AGENT`, `LLM_TEACHER_PLANNER`, `LLM_STUDENT_AGENT`, `LLM_STUDENT_PLANNER` | Distillation runs (`fastworkflow distill`) | `distill` | *none* (no fallback) |
+| `LITELLM_PROXY_API_BASE` | LiteLLM Proxy URL | with `litellm_proxy/` models | *not set* |
+| `LLM_TIMEOUT_SECONDS` | Per-attempt model timeout of every role without its own | Optional | `120` |
+| `LLM_TIMEOUT_SECONDS_<ROLE>`, `LLM_NUM_RETRIES_<ROLE>` | One role's timeout and retries (`<ROLE>` is the name after `LLM_`) | Optional | parameter extraction `20` s and `2`; others `LLM_TIMEOUT_SECONDS` and DSPy's `3` |
+| `LLM_CONVERSATION_STORE_TIMEOUT_SECONDS` | Per-attempt client-side deadline for the topic/summary call (2 attempts max) | Optional | `12` |
+| `LLM_SPLIT_MAX_TOKENS` | Output token budget of the request splitter | Optional | `4700` |
+| `FW_LM_CACHE` | `0` or `false` turns DSPy's response cache off for every model | Optional | `1` |
+
+### `fastworkflow.env`: training and intent detection
+
+| Variable | Purpose | When needed | Default |
+|:---|:---|:---|:---|
+| `SYNTHETIC_UTTERANCE_GEN_NUMOF_PERSONAS` | Personas that write each command's generated utterances | `train` (optional) | `4` |
+| `SYNTHETIC_UTTERANCE_GEN_UTTERANCES_PER_PERSONA` | Utterances each persona writes | `train` (optional) | `5` |
+| `SYNTHETIC_UTTERANCE_GEN_PERSONAS_PER_BATCH` | Personas per model call | `train` (optional) | `1` |
+| `SYNTHETIC_UTTERANCE_GEN_PERSONA_FILE` | A persona file outside the workflow folder | `train` (optional) | *none* |
+| `TRAINING_SEED` | The trainer's seed | `train` (optional) | `42` |
+| `INTENT_MODEL_LAYOUT` | `embedding` (a frozen sentence encoder and one linear head for the whole workflow), `workflow` (one fine-tuned large classifier for the whole workflow) or `per_context` (a fine-tuned small and large classifier per context); see "The local intent model" above for the measured trade. Read at train time only; the runtime reads the layout of the published version | `train` (optional) | `embedding` |
+| `INTENT_EMBEDDING_MODEL` | Hugging Face id of the `embedding` layout's sentence encoder (one shared download of about 418 MB for the default, never trained, nothing stored per workflow) | `train` (optional) | `intfloat/e5-base-v2` |
+| `INTENT_EMBEDDING_POOLING` | `cls` or `mean`: how the encoder's output becomes one vector (the e5 family also gets the prefix `query: ` before every text) | `train` (optional) | `cls` for `BAAI/bge-*`, `mean` otherwise |
+| `INTENT_COMMIT_THRESHOLD` | `embedding` layout: the probability at or above which the local model answers with one command; below it the request goes to the remote decision model, else the user is asked. A fixed number, not calibrated | `train` (optional) | `0.65` |
+| `INTENT_DETECTION_TINY_MODEL` | HF id for the small intent model (`per_context` layout) | `train` (optional) | `google/bert_uncased_L-4_H-128_A-2` |
+| `INTENT_DETECTION_LARGE_MODEL` | HF id for the large intent model (`workflow` and `per_context` layouts) | `train` (optional) | `distilbert-base-uncased` |
+| `INTENT_REMOTE_ACCEPT_THRESHOLD` | The probability at or above which the remote decision model's best command is the answer; below it the candidates are asked | `run_cli`, servers (optional) | `0.9` |
+| `INTENT_REMOTE_DECLINE_THRESHOLD` | The probability at or above which the remote model's "none", or a command of another scope on the path, declines a scope | `run_cli`, servers (optional) | `0.9` |
+| `INTENT_LEARNING_RECORD` | Record every resolved request (what it was, the command, how it was settled, whether a person or agent confirmed it, what the local model knew) in `<workflow>/___convo_info/intent_learning.sqlite3`. `off` writes nothing | `run_cli`, servers (optional) | `on` |
+| `INTENT_LEARNING_MIN_CONFIRMATIONS` | Confirmations of one command for one request text before `fastworkflow learn` teaches the head with it | `learn` (optional) | `1` |
+| `INTENT_LEARNING_REFIT` | `background`, or `off`: after `INTENT_LEARNING_REFIT_EVERY` new confirmed rows, one daemon thread per workflow refits the head (the same refit and gate as `fastworkflow learn`) | `run_cli`, servers (optional) | `background` |
+| `INTENT_LEARNING_REFIT_EVERY` | New confirmed rows that start a background refit | `run_cli`, servers (optional) | `25` |
+| `FW_REQUIRE_HEADS` | `1`: a scope with no trained local model is a failure even with `JEV_API_KEY` | Optional | *off* |
+
+### `fastworkflow.env`: turns and planning commands
+
+| Variable | Purpose | When needed | Default |
+|:---|:---|:---|:---|
+| `FW_TURN_MAX_STEPS` | The most model steps the nested planning-command calls of one turn take together | Optional | `400` |
+| `FW_CODE_MAX_PAGES` | The most pages code reads of one full-list step of a planning command | Optional | `20` |
+| `FW_SUBTASK_WORKERS` | Per-part model calls of a split request that wait on the model together | Optional | `4` |
+| `FW_SPLIT_GATE_THRESHOLD` | With `JEV_API_KEY`, the "one job" probability at or above which a request is not split; `off` turns the gate off | Optional | `0.85` |
+| `FW_DRAFT_ARGUMENTS` | `off` stops drafting a planning command's arguments for the review | Optional | `on` |
+| `FW_EXTRACTION_ARGUMENT_CHECKS` | `off` turns off the strict checks of extracted values | Optional | `on` |
+| `FW_JEV_FIELD_GIVEN` | `off` turns off the remote "was this value given" check | Optional | `on` |
+| `FW_JEV_MISSING_VALUE_REPLY` | `off` turns off the remote read of a reply to a parameter question | Optional | `on` |
+| `FW_JEV_REPLY_WAIT` | `off`: the remote read of a reply no longer offers "wait" | Optional | `on` |
+| `FW_APPROVAL_BINDING` | The approval-binding check: `off`, `shadow` or `enforce` (another value warns once and enforces) | Optional | `enforce` |
+| `FW_MODEL_CONTEXT_TOKENS` | The agent model's context window, from which every byte budget below is a fixed fraction | Optional | the `LLM_AGENT` model's metadata, else `131072` |
+| `FW_TRAJECTORY_MAX_BYTES` | The whole executor ReAct prompt; observations are offloaded oldest-first when it is over | Optional | from the window |
+| `FW_ANSWER_REHYDRATION_MAX_BYTES` | Answer-time extraction budget | Optional | from the window |
+| `FW_OFFLOAD_MIN_SAVING_BYTES` | Minimum bytes an offload must free | Optional | from the window |
+| `FW_OFFLOAD_EVIDENCE_REDACTION` | Scrub credentials from offloaded observations (`on`/`off`) | Optional | `on` |
+
+### `fastworkflow.env`: state, servers and observability
 
 | Variable | Purpose | When needed | Default |
 |:---|:---|:---|:---|
 | `FASTWORKFLOW_STATE_ROOT` | Absolute root for all persistent state (conversations, suspended sessions, checkpoints, function caches, and the always-on observability record — for `run`/`run_fastapi_mcp`/`run_chatbot` and library embedders alike, an owner-only (`0600` file, `0700` directory) SQLite database at `workflows/<workflow-id>/observability.sqlite3`, pruned automatically by `FW_OBS_RETENTION_DAYS` and `FW_OBS_DB_MAX_BYTES`) | Optional | `~/.local/state/fastworkflow` |
 | `FASTWORKFLOW_WORKFLOW_ID` | Overrides the per-workflow state namespace (defaults to the workflow folder name) | Optional | *workflow folder name* |
-| `LOG_LEVEL` | Log level (`DEBUG`…`CRITICAL`) | Optional | `INFO` |
-| `LLM_SYNDATA_GEN` | Model for synthetic utterance generation | `train` | `mistral/mistral-small-latest` |
-| `LLM_PARAM_EXTRACTION` | Model for parameter extraction | `train`, `run` | `mistral/mistral-small-latest` |
-| `LLM_PLANNER` | Model for the agent's task planner | `run` (agent) | `mistral/mistral-small-latest` |
-| `LLM_AGENT` | Model for the DSPy agent | `run` (agent) | `mistral/mistral-small-latest` |
-| `LLM_CONVERSATION_STORE` | Model for conversation topic/summary | FastAPI service | `mistral/mistral-small-latest` |
-| `LLM_CONVERSATION_STORE_TIMEOUT_SECONDS` | Per-attempt client-side deadline for the topic/summary call (2 attempts max) | Optional | `12` |
-| `LITELLM_PROXY_API_BASE` | LiteLLM Proxy URL | with `litellm_proxy/` models | *not set* |
-| `INTENT_DETECTION_TINY_MODEL` | HF id for the small intent model | `train` (optional) | `google/bert_uncased_L-4_H-128_A-2` |
-| `INTENT_DETECTION_LARGE_MODEL` | HF id for the large intent model | `train` (optional) | `distilbert-base-uncased` |
+| `LOG_LEVEL` | Log level: `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL`, in any case; another value logs a warning and keeps the current level | Optional | `INFO` |
+| `SESSION_STATE_STORE` | Where suspended sessions are kept: `disk` or `redis` | Optional | `disk` |
+| `SESSION_STATE_REDIS_URL`, `REDIS_URL` | The Redis URL when `SESSION_STATE_STORE=redis` (the first that is set) | with `redis` | *none* |
+| `MAX_LIVE_SESSIONS` | Live sessions kept in the `run_fastapi_mcp` process cache (the soft target) | Optional | `50` |
+| `MAX_LIVE_SESSIONS_HARD` | Hard ceiling on live sessions; a new session past it is refused with 503 once idle ones were released | Optional | `4 x MAX_LIVE_SESSIONS` |
+| `PINNED_SESSION_IDLE_TTL_SECONDS`, `PROTECTED_SESSION_IDLE_TTL_SECONDS` | Idle seconds before a session that cannot be checkpointed (and one with a question waiting) may expire while live sessions exceed `MAX_LIVE_SESSIONS`; `0` never expires | Optional | `1800`, `86400` |
+| `FASTWORKFLOW_DEPLOYMENT_ID` | Names the deployment a session checkpoint belongs to | Optional | `default` |
+| `FASTWORKFLOW_CHECKPOINT_PROTOCOL_FLOOR` | The oldest checkpoint protocol version a server restores | Optional | the current version |
+| `FASTWORKFLOW_CHATBOT_ACCESS_LOG` | `1` logs one line per `run_chatbot` request | Optional | *off* |
+| `FASTWORKFLOW_CONSISTENCY_EMBEDDING_MODEL` | Local embedding model of the observability consistency report | Optional | the built-in model |
 | `FW_OBS_RETENTION_DAYS` | Age beyond which the automatic prune (run at recorder startup and hourly) drops spans/artifacts (turn records are exempt) | Optional | `30` |
 | `FW_OBS_DB_MAX_BYTES` | Size cap, `-wal` file included; the automatic prune (startup and hourly) evicts oldest spans first, then the oldest finished non-experiment turn records, while over it. A non-integer value is ignored with a warning | Optional | `1073741824` (1 GiB) |
+| `FW_OBS_INLINE_ARTIFACT_BYTES` | Larger artifact values are offloaded | Optional | `262144` |
+| `FW_OBS_QUEUE_MAX` | Span and artifact writer queue bound | Optional | `10000` |
+| `FW_OBS_SYNC_WRITE_TIMEOUT_S` | Busy timeout of in-request database writes | Optional | `5` |
+| `FW_OBS_SYNC_BREAKER_COOLDOWN_S` | Cool-down, in seconds, of the breaker that sends turn-record writes to the queue after in-request writes failed | Optional | `60` |
 | `FW_OBS_CAPTURE_TRACEBACKS` | Persist exception tracebacks as artifacts. Off by default because tracebacks can carry sensitive values | Optional | `0` |
 | `FW_OBS_SUPPRESS_PRUNE` | Withhold the automatic prune. **This is the cross-process contract for a measured run**: the in-process `suppress_pruning()` helper only covers the process that calls it, so when a harness drives a separate server the variable must be in the *server's* environment **before it starts** — the recorder prunes on construction (and hourly after), so setting it afterwards is too late. Confirm the value took hold with `GET /probes/readyz?observability=true`, which reports `pruning_suppressed`; the server also logs the regime at startup | Optional | `0` |
 
@@ -700,12 +906,18 @@ Two files per workflow (templates ship with `fastworkflow examples fetch`).
 
 | Variable | For | When needed |
 |:---|:---|:---|
-| `LITELLM_API_KEY_SYNDATA_GEN` | `LLM_SYNDATA_GEN` | `train` |
-| `LITELLM_API_KEY_PARAM_EXTRACTION` | `LLM_PARAM_EXTRACTION` | `train`, `run` |
-| `LITELLM_API_KEY_PLANNER` | `LLM_PLANNER` | `run` (agent) |
-| `LITELLM_API_KEY_AGENT` | `LLM_AGENT` | `run` (agent) |
-| `LITELLM_API_KEY_CONVERSATION_STORE` | `LLM_CONVERSATION_STORE` | FastAPI service |
-| `LITELLM_PROXY_API_KEY` | shared LiteLLM Proxy key | with `litellm_proxy/` models |
+| `LITELLM_API_KEY_AGENT` | `LLM_AGENT`, and every role that falls back to it on the same provider | Agent mode, unless the provider needs no key (Bedrock) |
+| `LITELLM_API_KEY_PLANNER` | `LLM_PLANNER`, and the roles that fall back to it | No-agent mode, unless the provider needs no key; otherwise optional (`LITELLM_API_KEY_AGENT` when the provider matches) |
+| `LITELLM_API_KEY_SYNDATA_GEN` | `LLM_SYNDATA_GEN` | Optional (follows the model it falls back to) |
+| `LITELLM_API_KEY_PARAM_EXTRACTION` | `LLM_PARAM_EXTRACTION` | Optional (follows the model) |
+| `LITELLM_API_KEY_CONVERSATION_STORE` | `LLM_CONVERSATION_STORE` | Optional (follows the model) |
+| `LITELLM_API_KEY_OBSERVATION_SEARCH` | `LLM_OBSERVATION_SEARCH` | Optional (follows the model) |
+| `LITELLM_API_KEY_POLICY_INTENT` | `LLM_POLICY_INTENT` | Optional (follows the model) |
+| `LITELLM_API_KEY_COMMANDMETADATA_GEN` | `LLM_COMMAND_METADATA_GEN` (no underscore between COMMAND and METADATA) | Optional (follows the model) |
+| `LITELLM_API_KEY_RESPONSE_GEN` | `LLM_RESPONSE_GEN` | with `LLM_RESPONSE_GEN`, unless the provider needs no key |
+| `LITELLM_API_KEY_DISTILLATION`, `LITELLM_API_KEY_TEACHER_AGENT`, `LITELLM_API_KEY_TEACHER_PLANNER`, `LITELLM_API_KEY_STUDENT_AGENT`, `LITELLM_API_KEY_STUDENT_PLANNER` | the distillation roles | `distill` |
+| `LITELLM_PROXY_API_KEY` | every `litellm_proxy/` model | with a proxy that needs one |
+| `JEV_API_KEY` | The remote decision model (Jev): intent detection when the local model is not confident, planning-command matching, the split gate | No-agent mode: required; otherwise optional |
 
 ### Using LiteLLM Proxy
 
@@ -719,13 +931,13 @@ LITELLM_PROXY_API_BASE=http://127.0.0.1:4000
 LITELLM_PROXY_API_KEY=your-proxy-api-key
 ```
 
-When a model uses the `litellm_proxy/` prefix, the per-role keys are ignored and the shared proxy key is used. You can mix proxied and direct models.
+When a model uses the `litellm_proxy/` prefix, the per-role keys are ignored and the shared proxy key is used, also for a role that falls back to a proxied model. You can mix proxied and direct models.
 
 ---
 
 ## Troubleshooting / FAQ
 
-> **`PARAMETER EXTRACTION ERROR`** — the LLM couldn't extract a required parameter. Rephrase more specifically, or strengthen the `Field(description=…, examples=[…])` in your Signature.
+> **`PARAMETER EXTRACTION ERROR`** — the LLM couldn't extract a required parameter. Rephrase more specifically, or strengthen the `Field(description=…)` (and `examples=[…]`) in your Signature.
 
 > **`CRASH RUNNING FASTWORKFLOW`** — the persistent-state folder is corrupted. Delete `FASTWORKFLOW_STATE_ROOT/workflows/<workflow-id>/` (default `~/.local/state/fastworkflow/...`) and re-run.
 

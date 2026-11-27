@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>What a phase hands on · Design idioms · fastWorkflow</title>
+<link rel="stylesheet" href="idioms.css">
+</head>
+<body data-page="p-facts">
+<aside class="rail"></aside>
+
+<main id="top">
+  <section class="group planning">
+<!-- IDIOM BODY START -->
+    <article class="idiom" id="p-facts">
+      <div class="prose">
+        <p class="num">03</p>
+        <h3>What a phase hands on</h3>
+        <p>A <em>planning command</em> is a command whose work is a plan of steps instead of a body (<a href="p-plan.html">A plan in place of a body</a>). Each public method of its <code>class PlanGenerator</code> is a <em>phase</em>: it returns a list of steps, such as <code>run("find_book", query=...)</code>, and the phases run in the order written (<a href="p-run.html">A step the code runs</a>). Often a later phase, or <code>__result__</code> (the method that writes the answer, <a href="p-result.html">The answer, in code</a>), needs what an earlier phase found, such as the uids a search returned. What a phase hands on is called its <em>facts</em>. Reach for this shape whenever later code must read a command's result as typed fields.</p>
+        <p>You declare the facts with the phase method's return annotation, the <code>-&gt; X</code> after its parameters. After the phase's steps have run, the framework builds the facts from those runs, with no model call, and passes them to any later method that has a parameter with the same name as the phase. There are three forms. In each, <code>X.Output</code> is the Pydantic model command <code>X</code> returns, reached through its <code>Signature</code>, imported from its file in the same <code>_commands</code> folder.</p>
+        <table class="ref">
+          <thead><tr><th>Annotation</th><th>When</th><th>The facts are</th></tr></thead>
+          <tbody>
+            <tr><td><code>-&gt; FindBook.Output</code></td><td>the phase runs one command</td><td>that command's <code>Output</code></td></tr>
+            <tr><td><code>-&gt; FindBook.Output | FindMember.Output</code></td><td>the phase runs one command OR another</td><td>the <code>Output</code> of whichever ran</td></tr>
+            <tr><td><code>-&gt; Shelf</code>, a facts model of your own</td><td>the phase runs several commands</td><td>one field per command, each that command's <code>Output</code></td></tr>
+          </tbody>
+        </table>
+        <p>A phase with no return annotation hands nothing on: a later parameter named after it receives <code>None</code>. That suits a phase whose steps only act, such as a move.</p>
+        <h4>One command's Output</h4>
+        <p>The parameter <code>find</code> below gets the facts of the phase <code>find</code>, and reads <code>find.book_uids</code> like any Pydantic model. When a phase was skipped because it returned no steps (<a href="p-skip.html">A phase that does not run</a>), the parameter is <code>None</code>.</p>
+      </div>
+      <figure>
+        <figcaption>fastworkflow/examples/library/_commands/Library/book_by_title.py</figcaption>
+        <pre><code>from .find_book import Signature as FindBook   <span class="c"># the commands whose Output the phases hand on</span>
+from .open_book import Signature as OpenBook
+
+class PlanGenerator:
+    def find(self, input) -&gt; FindBook.Output:     <span class="c"># phase 1: hands on find_book's Output</span>
+        return [run("find_book", query=input.title)]
+
+    def book(self, input, find) -&gt; OpenBook.Output:   <span class="c"># find: phase 1's facts</span>
+        if not find.book_uids:
+            return []                                  <span class="c"># no steps: the phase is skipped</span>
+        return [run("open_book", named=input.title)]
+
+    def __result__(self, input, book):             <span class="c"># book: None when phase 2 was skipped</span>
+        if book is None:
+            return CommandResponse(response=f"No book matches {input.title}.",
+                                   output=Signature.Output(found=False))
+        return CommandResponse(
+            response=f"{book.title} is by {book.author}; the library owns {copies(book.copies)}.",
+            output=Signature.Output(found=True, **book.model_dump()))</code></pre>
+      </figure>
+      <div class="prose">
+        <p>The facts come from runs of this phase that succeeded, on the one record the phase worked on, and that do one of its planned steps. A run on another record never counts, so a facts model cannot hold runs on two records. A few runs stand in for a planned step: a lookup done in another form whose output holds the step's values counts, and a lookup that listed nothing beside one that listed rows does not. An earlier phase's runs count in one case only: the run that entered the record the phase's opening step would open. <code>run-code</code> sees only the phase's own runs, so that case applies only in a real run. When a required field finds no run, the phase fails with "no successful run of 'X' fills ...", which does not say that a run on another record was set aside. When the command ran more than once in the phase, the latest run is used, except that runs differing only in paging use the first page's run. A step written with <code>all_pages=True</code> joins every page into one <code>Output</code> (<a href="p-run.html#p-pages">Every page of a list</a>).</p>
+        <h4 id="p-union">Whichever command ran</h4>
+        <p>When a phase runs one command or another, depending on the request, annotate it with a union of their <code>Output</code> classes. Example: "is there a member named Lee?" runs <code>find_member</code>, "do you have a book called Emma?" runs <code>find_book</code>. The input field that chooses is usually a <code>Literal</code>, so the request can only name one of the choices.</p>
+      </div>
+      <figure>
+        <figcaption>fastworkflow/examples/library/_commands/Library/find_record.py</figcaption>
+        <pre><code>class Signature:
+    class Input(BaseModel):
+        name: str = Field(description="the name to look for",
+                          json_schema_extra={"copied_from_command_text": True})
+        kind: Literal["book", "member"] = Field(       <span class="c"># chooses the command</span>
+            default="book", description="whether to look for a book or a member")
+
+class PlanGenerator:
+    def find(self, input) -&gt; FindBook.Output | FindMember.Output:
+        return [run(FIND[input.kind], query=input.name)]
+
+    <span class="c"># find: a FindBook.Output or a FindMember.Output. Only total is in both.</span>
+    def __result__(self, input, find):
+        names = find.titles if input.kind == "book" else find.names
+        return f"{input.name} matches {count_and_names_read(names, find.total, input.kind)}."
+
+FIND = {"book": "find_book", "member": "find_member"}</code></pre>
+      </figure>
+      <figure>
+        <figcaption>fastworkflow command run-code &lt;library&gt; Library/find_record --input '{"name":"Lee","kind":"member"}'</figcaption>
+        <pre><code>Phase find
+  1. find_member query=Lee
+  code runs: find_member query=Lee
+  facts: Output(member_uids=['m1'], names=['Ann Lee'], total=1)
+answer written by __result__:
+  Lee matches 1 member (Ann Lee).</code></pre>
+      </figure>
+      <div class="prose">
+        <p>The framework looks at the phase's successful runs, newest first, and takes the first one whose command is a member of the union. If the phase ran none of them, the phase fails and the call stops. <code>fastworkflow command preview</code> lists the output as "<code>Library/find_book</code>'s <code>Output</code> | <code>Library/find_member</code>'s <code>Output</code>", with one facts table per member, so the agent planning the call sees both shapes. Read a field only one member has (<code>find.names</code>) only after checking which ran, as the example does by branching on <code>input.kind</code>; otherwise <code>__result__</code> fails with <code>'Output' object has no attribute 'names'</code>. The saved facts record which member filled them (an internal key that no stop entry, answer text or span shows), so a later phase, <code>__result__</code> and a restored session all get the member that ran, whatever the members' field names are.</p>
+        <h4 id="p-model">Several commands: a facts model</h4>
+        <p>When one phase runs two or more commands and later code needs what each returned, write a <em>facts model</em>: an ordinary Pydantic model with one field per command, each typed with that command's <code>Output</code>. Annotate the phase with it. The framework fills each field from that command's successful run in the phase.</p>
+      </div>
+      <figure>
+        <figcaption>fastworkflow/examples/library/_commands/Book/shelf_report.py</figcaption>
+        <pre><code>from .list_loans import Signature as ListLoans
+from .show_book import Signature as ShowBook
+
+class Shelf(BaseModel):                        <span class="c"># the facts model: one field per command</span>
+    book: ShowBook.Output
+    loans: ListLoans.Output
+
+    @property                                  <span class="c"># a value of your own is a property, never a field</span>
+    def free(self) -&gt; int:                     <span class="c"># (added for this page; the shipped file has none)</span>
+        return self.book.copies - self.book.on_loan
+
+class PlanGenerator:
+    def shelf(self) -&gt; Shelf:
+        return [run("show_book"), run("list_loans", all_pages=True)]
+
+    def __result__(self, shelf):               <span class="c"># shelf: the filled Shelf</span>
+        book, loans = shelf.book, shelf.loans
+        held = (f"{book.title} is held at {book.branch}, "
+                f"{count(book.copies, 'copy', 'copies')}, {shelf.free} free")
+        if not loans.borrowers:
+            return f"{held}; none is on loan."
+        return f"{held}; on loan to {count_and_names_read(loans.borrowers, loans.total, 'borrower')}."</code></pre>
+      </figure>
+      <div class="prose">
+        <p>Run on the book Dune, <code>shelf.book.title</code> is the title <code>show_book</code> returned, and the answer reads "Dune is held at Central, 3 copies, 1 free; on loan to 2 borrowers (Ann Lee, Raj Patel)." A field may be only one of three things:</p>
+        <ul>
+          <li><code>X.Output</code>: required. A phase with no successful run of <code>X</code> fails.</li>
+          <li><code>X.Output | None = None</code>: <code>None</code> when the phase ran no <code>X</code>. A default of <code>None</code> alone, or <code>| None</code> alone, makes the field optional too.</li>
+          <li><code>X.Input</code>: the arguments <code>X</code> was called with.</li>
+        </ul>
+        <p>A value you compute yourself, such as the count of free copies, is a property or a method of the model. The model may have validators; one that refuses fails the phase. A field of any other type fails the load of the command (see <a href="removed.html#load-rule">what a mistake stops</a>): "Shelf.title is str; a facts field is typed with a command's Output or Input. Compute other values in a property or method of Shelf". A field cannot be a union of two <code>Output</code>s either (the same message, which does not say which commands); when one of several commands runs, put the union on the phase, as above.</p>
+        <h4 id="s-annotation">What else the annotation can be</h4>
+        <p id="s-union">A union is read in two places on this page: on the phase (<code>A.Output | B.Output</code>, whichever ran) and on a facts-model field (<code>X.Output | None = None</code>, optional). Here <code>Optional[X]</code> and <code>X | None</code> mean the same. Do not write <code>-&gt; X.Output | None</code> on a phase: it fails the command's load ("its return annotation ... includes None; ... leave '| None' out"). A later phase reads the facts of a phase that did not run as <code>None</code> through a parameter whose default is <code>None</code>.</p>
+        <ul>
+          <li>When the facts type depends on the call's input, <code>@phase(output=lambda input: ...)</code> takes the place of the annotation. <code>output=</code> takes a function of <code>input</code> alone; a fixed facts type is the return annotation. Writing both is a load error.</li>
+          <li>On a phase marked <code>@phase(over=...)</code>, the annotation is one item's facts, and the later parameter receives a list of them (<a href="p-fan.html">Once per item</a>).</li>
+          <li>Do not annotate a phase with a command's <code>Input</code> alone (<code>-&gt; FindBook.Input</code>). It is a load error now: a phase hands on a command's <code>Output</code>, a union of <code>Output</code>s, or a facts model, and the command that wrote it does not load. To keep the values a command was called with, use <code>FindBook.Input</code> as a field of a facts model.</li>
+        </ul>
+        <h4>Mistakes a beginner makes</h4>
+        <ul>
+          <li>Annotating a phase with what the method returns, its list of steps (<code>-&gt; list[str]</code>). The command does not load (the rest of the workflow does): <code>phase 'find': its return annotation must be the facts model it fills (a pydantic model), got list[str]; a model that depends on the input goes in @phase(output=lambda input: ...)</code>. The annotation names the facts, never the steps.</li>
+          <li>Annotating a command the phase's steps never run. The command does not load: <code>phase 'find' hands on find_book's Output, but none of its steps runs find_book</code>. For a union the check is made for each plan the inputs give, so every choice must run at least one member. If it runs anyway, the phase finds no run to fill its facts and the call stops: no later phase runs, and the answer is the facts found so far plus a line naming the phase that failed.</li>
+          <li>A union member that is not a command's <code>Output</code>, such as your own model <code>Other</code>: "phase output Other is not a loaded command's Signature.Output". The command does not load.</li>
+          <li>Reading a field the <code>Output</code> does not have, such as <code>find.book_count</code>. The next phase fails with <code>'Output' object has no attribute 'book_count'</code> and the call stops. Read the field names in the other command's <code>class Output</code>.</li>
+        </ul>
+        <p class="see">See also <a href="p-skip.html">A phase that does not run</a>, <a href="p-fan.html">Once per item</a>, <a href="r-shapes.html">the shapes table</a>.</p>
+      </div>
+    </article>
+<!-- IDIOM BODY END -->
+  </section>
+
+  <nav class="pager" aria-label="Previous and next">
+    <a class="prev" href="p-run.html"><span>Previous</span>A step the code runs</a>
+    <a class="next" href="p-skip.html"><span>Next</span>A phase that does not run</a>
+  </nav>
+</main>
+<script src="nav.js"></script>
+<script src="idioms.js"></script>
+</body>
+</html>

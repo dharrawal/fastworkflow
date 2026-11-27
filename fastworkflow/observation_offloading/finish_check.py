@@ -3,9 +3,8 @@
 When the agent chooses ``finish``, the run's initial plan is read step by step
 against the outputs the run archived (``O<step>`` rows of ``offload_evidence``).
 Steps found unmet are named in one short note that replaces the finish
-observation, and the agent goes back to the loop. Up to two finishes of an agent run
-are checked (``react.FINISH_REVIEWS_PER_RUN``), only with iterations left; a finish after
-the second is not checked, and the run may end.
+observation, and the agent goes back to the loop. Up to ``react.FINISH_REVIEWS_PER_RUN`` finishes of an agent run
+are checked (one today), only with iterations left; a later finish is not checked, and the run may end.
 
 No model is called. Each numbered plan step is read for the workflow command
 it names (the first token that is a declared command). Conditional steps
@@ -247,23 +246,69 @@ def step_chain(rest: str) -> str:
     return _CHAIN_RE.match(rest or "").group(0)
 
 
+#: The name of a ``<command> with the uid of the <name> match`` step, quoted (``quote_step_value``).
+_QUOTED_MATCH_NAME_RE = re.compile(r"""(?<=\bof the )(?:"[^"\n]*"|'[^'\n]*')(?= match\b)""", re.IGNORECASE)
+
+
 def _outside_quoted_values(text: str) -> str:
-    """*text* with each quoted step value blanked, so a word inside one is not prose."""
-    return _QUOTED_VALUE_RE.sub("=", text or "")
+    """*text* with each quoted step value (and the quoted name of a ``with the uid of the "X" match``
+    step) blanked, so a word inside one is not prose."""
+    return _QUOTED_MATCH_NAME_RE.sub("", _QUOTED_VALUE_RE.sub("=", text or ""))
+
+
+#: A ``<command> with the uid of the <name> match`` step; the name may be quoted (``quote_step_value``).
+MATCH_NAME_RE = re.compile(
+    r"""\bwith the (?:uid|id) of the (?:"([^"\n]*)"|'([^'\n]*)'|(.+?)) match\b""", re.IGNORECASE)
+
+
+def match_name(text: str) -> Optional[str]:
+    """The name in a ``with the uid of the <name> match`` step text (the quotes the builder wrote removed), or None."""
+    found = MATCH_NAME_RE.search(text or "")
+    if found is None:
+        return None
+    return next(g for g in found.groups() if g is not None).strip()
+
+
+def _outside_quoted_values(text: str) -> str:
+    """*text* with each quoted step value (and the quoted name of a ``with the uid of the "X" match``
+    step) blanked, so a word inside one is not prose."""
+    return _QUOTED_MATCH_NAME_RE.sub("", _QUOTED_VALUE_RE.sub("=", text or ""))
+
+
+def match_name(text: str) -> Optional[str]:
+    """The name in a ``with the uid of the <name> match`` step text (quotes the builder wrote removed), or None."""
+    found = _MATCH_NAME_RE.search(text or "")
+    if found is None:
+        return None
+    name = found.group(1).strip()
+    if len(name) >= 2 and name[0] == name[-1] and name[0] in "\"'":
+        name = name[1:-1]
+    return name
+
+
+_MATCH_NAME_RE = re.compile(r"\bwith the (?:uid|id) of the (.+?) match\b", re.IGNORECASE)
 
 
 def quote_step_value(value: Any) -> str:
     """*value* as a builder writes it into a step.
 
-    Quoted when it contains ``(``, ``;``, ``=``, ``, ``, a bracket (``[ ] { } < >``),
-    a quote, or ``...``, which end a step's chain (``step_chain``) or are read by the
-    key=value parser. A value that only holds spaces is not quoted. A value that holds
-    both ``"`` and ``'`` cannot be quoted and is written as it is. Any other value is
-    written unchanged.
+    Quoted whenever the unquoted text could be misread: it holds whitespace (a value of only whitespace is no value and
+    is written as it is), a quote, ``(``, ``;``,
+    ``=``, ``, ``, a bracket (``[ ] { } < >``) or ``...`` (these end a step's chain, ``step_chain``, or
+    are read by the key=value parser), or a word the step classifier reads as a condition
+    (``_CONDITION_RE``, ``_ANYWHERE_CONDITION_RE``: ``when``, ``only``, ``if``, ``else``...). A quoted
+    value is read back whole (``_value_text``, ``_outside_quoted_values``). A value that holds
+    ``"`` is quoted with ``'`` and the other way round; one that holds both cannot be quoted and is
+    written as it is. Any other value is written unchanged.
     """
     text = str(value)
-    if "(" not in text and ";" not in text and "=" not in text and ", " not in text \
-            and not any(c in text for c in "[]{}<>\"'") and "..." not in text and "\u2026" not in text:
+    if not text.strip():
+        return text     # no value at all: nothing to misread, and a quoted blank would read as a value
+    plain = (not any(c.isspace() for c in text) and "(" not in text and ";" not in text and "=" not in text
+             and ", " not in text and not any(c in text for c in "[]{}<>\"'") and "..." not in text
+             and "\u2026" not in text and not _CONDITION_RE.search(text)
+             and not _ANYWHERE_CONDITION_RE.search(text))
+    if plain:
         return text
     quote = '"' if '"' not in text else "'"
     if quote in text:

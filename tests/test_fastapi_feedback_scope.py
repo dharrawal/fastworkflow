@@ -38,14 +38,13 @@ import pytest
 from fastapi.testclient import TestClient
 
 import fastworkflow
-from fastworkflow import tracing
+from fastworkflow.observability import tracing
 
 # The hermetic server fixtures. test_fastapi_service's fixtures skip when the
 # repo's private env files are absent; these write their own from the shipped
 # template, so this file runs anywhere.
 from tests.test_fastapi_streaming_lifecycle import (  # noqa: F401
     app_module,
-    env_files,
     hello_world_workflow_path,
 )
 
@@ -137,7 +136,7 @@ def _pass_span(
         span_id=span_id,
         trace_id=turn_key,
         parent_span_id=parent_span_id,
-        name=tracing.SPAN_COMMAND_EXECUTE,
+        name=tracing.SPAN_COMMAND,
         kind=tracing.KIND_INTERNAL,
         channel_id=channel_id,
         command_name="add_two_numbers",

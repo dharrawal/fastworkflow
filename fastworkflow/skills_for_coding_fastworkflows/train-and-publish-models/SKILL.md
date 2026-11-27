@@ -19,19 +19,43 @@ description: >-
 fastworkflow train <workflow_folderpath> [env_file_path] [passwords_file_path] [--regenerate-utterances]
 ```
 
-The two env-file arguments are positional and optional; they default to files in the current
-directory, or to the bundled ones for a packaged example. `--regenerate-utterances` is the only
-training-policy override, and it is expensive — see Rule 2.
+The two env-file arguments are positional and optional; they default to `fastworkflow.env` and
+`fastworkflow.passwords.env` inside the workflow folder, and the command exits with an error when
+either is missing. `--regenerate-utterances` is the only training-policy override, and it is
+expensive (Rule 2).
 
 Training recurses into `<workflow>/_workflows/*` first, so a child workflow is trained before its
-parent, each with its own persona source and caches.
+parent, each with its own persona source and caches. When the framework's own workflows (command
+metadata extraction, plan metadata extraction) are untrained or stale, they are trained first.
+
+## The intent model layout
+
+`INTENT_MODEL_LAYOUT` in the workflow env file chooses what a run writes. It is read by
+`fastworkflow train` only; the runtime reads whatever layout the published version holds.
+
+| Layout | What is trained | Time |
+|---|---|---|
+| `embedding` (default) | ONE logistic-regression head over every command of the workflow, on a frozen sentence encoder that is never trained | seconds |
+| `workflow` | ONE fine-tuned large classifier for the workflow | minutes to hours |
+| `per_context` | a fine-tuned tiny and large classifier for every context | minutes to hours |
+
+Every layout trains on the same rows: your seed utterances plus LLM-generated utterances, so the
+caches below matter in all three. The `embedding` settings are `INTENT_EMBEDDING_MODEL` (default
+`intfloat/e5-base-v2`, downloaded once into the Hugging Face cache, not stored per workflow),
+`INTENT_EMBEDDING_POOLING` (`cls` or `mean`; the default follows the encoder) and
+`INTENT_COMMIT_THRESHOLD` (default 0.65: the head answers with one command only at or above it).
+The framework's own workflows are always `embedding` with a pinned encoder, whatever your env says.
+
+An invalid layout or setting value logs one warning and means the default.
+`INTENT_WRONG_COMMIT_TARGET` and `INTENT_FALSE_ESCALATION_TARGET` were removed: a value left in the
+env file is ignored with one warning. Delete the line.
 
 ## What one run does, in order
 
-Knowing the order is what lets you read a failure: everything before the first paid call is a
-gate, and everything after publication is cleanup.
+Everything before the first paid call is a gate, and everything after publication is cleanup.
 
 ```
+0. Command files load?            load_problems                <- exits 1 before any work
 1. Build routing artifacts        command_directory.json, routing_definition.json
 2. Duplicate-capability scan      lexical, seeds only          <- free, reports
 3. Benchmark preflight            leak + defect checks         <- free, CAN FAIL THE RUN
@@ -40,7 +64,7 @@ gate, and everything after publication is cleanup.
 6. Compute the training plan      selective or full
    -> if the plan is empty: republish, apply retention, stop ("already up to date")
 7. Generate utterances + train    utterance_cache              <- costs money on a miss
-8. Carry forward untrained contexts from the previous version
+8. Carry forward untrained contexts from the previous version (per_context only)
 9. Router-confusion scan          needs every context present
 10. Write signature + manifest
 11. Safety gate on training data  CAN REFUSE TO PUBLISH
@@ -49,30 +73,25 @@ gate, and everything after publication is cleanup.
 ```
 
 Steps 2 and 3 sit before every paid call deliberately: a leaked benchmark used to abort a run
-that had already spent money on every command with parameters.
+that had already spent money on every command with parameters. Step 2 also warns about any command
+with fewer than eight seed utterances; training continues.
 
-**Planning commands are classifier labels.** Each classifier whose scope holds a planning command
-has it as a label, trained from its seed utterances. So the first train of a workflow with planning
-commands after an upgrade is a full retrain that **generates** utterances for each planning command
-(step 7, an LLM cost that earlier releases did not incur). A workflow trained by an earlier release
-refuses to load and says to retrain with `fastworkflow train`. A workflow with no planning commands
-is unaffected by this change.
+Planning commands are labels of the model like execution commands, with generated utterances of
+their own. A version trained before that rule (or before the current "not here" construction)
+refuses to load at run time and says to retrain.
 
-## Rule 1 — the seed is fixed, so a cache miss is the only source of drift
+## Rule 1: the seed is fixed, so a cache miss is the only source of drift
 
 `get_training_seed()` returns **42**, always. It is not configurable, and a `TRAINING_SEED`
-environment variable is **not read** — seed selection is part of the trainer, not workflow
-configuration.
+environment variable is **not read**.
 
-That matters because seeding alone does not make training reproducible. The utterance generator
-is a live LLM: two runs at the same seed were measured producing different utterances *and*
-different row counts for every command. Reproducibility comes from the **caches**, not the seed.
+Seeding alone does not make training reproducible: the utterance generator is a live LLM, and two
+runs at the same seed were measured producing different utterances and different row counts for
+every command. Reproducibility comes from the **caches**. With caches warm, two runs train on
+identical data and produce identical models. The moment something misses, that guarantee is gone
+for the commands that missed.
 
-So the practical rule is: with caches warm, two runs train on identical data and produce
-byte-identical models. The moment something misses, that guarantee is gone for the commands that
-missed.
-
-## Rule 2 — know what invalidates a cache before you blame the cache
+## Rule 2: know what invalidates a cache before you blame the cache
 
 Two caches, both under `___command_info/`, both keyed on a fingerprint of every input that could
 change what the LLM produces:
@@ -82,148 +101,173 @@ change what the LLM produces:
 | utterance cache | the synthetic utterances one command was trained on | `utterance_cache/` |
 | parameter-example cache | the DSPy few-shot examples for one command's parameters | `param_example_cache/` |
 
-A miss is **reported at INFO, naming the input that moved** — up to three of them, with before
-and after values. Read that line instead of hand-diffing JSON. The inputs include the command
-name, its seed utterances, the persona counts, the generation model and API base, the persona
-source, and a digest of the generation prompt's own source code. Full list in
-[reference.md](reference.md).
+A miss is **reported at INFO, naming the input that moved** (up to three, with before and after
+values). Read that line instead of hand-diffing JSON. The inputs include the command name, its seed
+utterances, the persona counts, the generation model and API base, the persona source, and a digest
+of the generation prompt's own source code. Full list in [reference.md](reference.md).
 
-The failure mode all of this exists to prevent is a developer editing a command's seed utterances
-and silently training on stale generated data. The cost direction is deliberate: a lost cache
-entry produces a slow, non-reproducible run — never a wrong one.
+A lost cache entry produces a slow, non-reproducible run, never a wrong one: editing a command's
+seeds always regenerates exactly that command.
 
 **`--regenerate-utterances` ignores both caches.** It calls the LLM again for everything, costs
-money, and breaks reproducibility against previous runs. Use it after you suspect the cache is
-wrong, not as a habit — a seed-utterance edit already invalidates exactly the commands it
-touched, which is both cheaper and more precise. It also forces a **full** retrain (Rule 3).
+money, breaks reproducibility against previous runs, and forces a **full** retrain (Rule 3). Use it
+when you suspect a cache is wrong, not as a habit.
 
-## Rule 3 — selective is the default; a global change is what forces full
+## Rule 3: what retrains
 
-`fastworkflow train` retrains only what it must. A command is dirty if its **source bytes** or
-its **seed utterances** changed; dirty commands are closed upward over the `base` and `parent`
-axes to the contexts that must retrain; the rest are carried forward from the previous version.
+A command is dirty when its **source file bytes** or its **seed utterances** changed.
 
-The design bias is stated in the code and worth internalising: *every path that cannot answer
-"this context is provably unchanged" retrains.* A false skip means a silently stale model, so
-uncertainty always resolves toward doing the work.
+- **`embedding` and `workflow` layouts:** one model serves every context, so any dirty command
+  refits the whole model, and nothing dirty is a no-op. In `embedding` this costs seconds plus LLM
+  calls only for the commands whose utterance cache missed.
+- **`per_context` layout:** dirty commands are closed over to the contexts that must retrain; the
+  rest are carried forward from the previous version. Any path that cannot prove a context
+  unchanged retrains it.
 
 A **full** retrain is forced when any of these is true:
 
 - there is no published version to carry forward from, or no usable previous signature;
 - `--regenerate-utterances` was passed;
-- any **global header** input changed — the artifact format version, the seed, the tiny or large
-  intent model, the synthetic-data model, **the persona source**, or a source digest of the
-  generator, the trainer, or the class-balance module;
-- commands shared between retrained and carried-forward contexts have no cache entries, which
-  would mix cached and freshly generated utterances in one model.
+- any **global input** of the training signature changed: the layout, the `embedding` settings
+  (encoder, pooling, commit threshold), the artifact format version, the seed, the tiny or large
+  model setting, the synthetic-data model, **the persona source**, or a source digest of the
+  framework's generator or trainer modules (full list in [reference.md](reference.md));
+- (`per_context`) commands shared between retrained and carried-forward contexts have no cache
+  entries, which would mix cached and freshly generated utterances in one model.
 
 Two consequences people trip over:
 
-- **Adding or editing `personas.json` retrains everything and regenerates everything.** It is a
-  global input on both keys. See the `supply-training-personas` skill.
-- **Upgrading the framework can force a full retrain**, because the generator and trainer module
-  source digests are global inputs. That is intended: their behaviour decides the models.
+- **Adding or editing `personas.json` retrains everything and regenerates every utterance.** It
+  is a global input of both keys, though switching back to a recently used source reuses its
+  utterances from the cache (`MAX_VARIANTS_PER_COMMAND` = 3 per command) while the model still retrains. See the `supply-training-personas` skill.
+- **Upgrading the framework can force a full retrain**, because the generator and trainer source
+  digests are global inputs.
 
-There are no `--changed-only` / `--only-contexts` CLI flags. Those parameters exist on
-`compute_training_plan` and are deliberately not exposed.
+There are no `--changed-only` / `--only-contexts` CLI flags.
 
-## Rule 4 — only a successful run becomes current
+## Rule 4: only a successful run becomes current
 
 Model artifacts live in `___command_info/versions/<version_id>/`. A pointer file `current.json`
 says which version is live; a `current` symlink and one compatibility entry per context point at
-it so every existing reader keeps working unchanged.
+it. `current.json` is written **last**, so it is the commit point:
 
-`publish_version` writes `current.json` **last**, after preparing every reader path. That makes
-it the commit point:
+- A run that **fails** (training, carry-forward, the training-data safety gate) never publishes.
+  The previous version stays current and complete, with the partial version beside it.
+- Pruning runs only **after** a successful publish.
+- Retention keeps the **current version and one previous**, plus, after a refit (see "Learning
+  from use"), the full train its lineage descends from. The previous version is your only recovery
+  point: do not run training twice to "get back" to a known-good set; the second run discards it.
 
-- A run that **fails** — at training, at carry-forward, or at the training-data safety gate —
-  never publishes. The previous version stays current and complete, with the partial version
-  beside it rather than on top of it.
-- Pruning runs only **after** a successful publish, so a failed run leaves the previous
-  `___command_info` intact and runnable.
-- Retention keeps the **current version and one previous**. That previous version is your
-  recovery point, and it is the only one.
-
-Because retention is that shallow, do not run training twice to "get back" to a known-good set.
-The second run discards it.
-
-## Rule 5 — never hand-delete `___command_info`
+## Rule 5: never hand-delete `___command_info`
 
 It is not a build directory. In one place it holds:
 
-- the trained models, at several gigabytes for a large workflow and hours of LLM calls to rebuild;
+- the trained models (for `per_context` and `workflow`, gigabytes and hours to rebuild);
 - the **only** rollback point;
-- both caches, which are the only thing making two runs train on the same data;
+- both caches, which are the only thing making two runs train on the same data, and whose loss
+  means paying for every utterance again;
 - the selective-training baseline, whose loss forces a full retrain.
 
-A previous incident destroyed a complete trained set because nothing said so; the `README.md`
-files inside `versions/` and `utterance_cache/` exist because of it.
-
-If you genuinely need to force work to happen, prefer the narrow instrument:
+If you need to force work to happen, use the narrow instrument:
 
 | Want | Do | Not |
 |---|---|---|
 | regenerate one command's utterances | edit its seed utterances | delete the cache |
 | regenerate everything | `--regenerate-utterances` | `rm -rf ___command_info` |
-| retrain one context | touch a command in it | delete its model folder |
+| retrain | change a command (in `per_context`, a command of that context) | delete a model folder |
 | go back to the previous models | republish the previous version (Rule 6) | retrain and hope |
 
-The trainer's own pruning is conservative by comparison: it removes an artifact only when the
-command or context it belongs to no longer exists, and it never touches `versions/`, `current`,
-or either cache.
+The trainer's own pruning removes an artifact only when its command or context no longer exists,
+and never touches `versions/`, `current` or either cache.
 
-## Rule 6 — rollback is a Python call, not a flag
+## Rule 6: rollback is a Python call, not a flag
 
-There is no rollback CLI. The procedure:
+There is no rollback CLI:
 
 ```python
 from fastworkflow.train import artifact_versioning
 
 for version in artifact_versioning.list_versions(workflow_folderpath):   # newest first
-    print(version)
+    print(version.version_id, version.created_at, version.is_current)
 
-artifact_versioning.publish_version(workflow_folderpath, "<older version id>")
+with artifact_versioning.publication_lock(workflow_folderpath):
+    artifact_versioning.publish_version(workflow_folderpath, "<older version id>")
 ```
 
-Republishing rewires the compatibility entries and rewrites `current.json`. It also restores that
-version's `training_signature.json`, so the selective-training baseline rolls back with the
-models — the next run compares against the artifacts you actually restored, not the ones you
-discarded.
+Republishing rewires the compatibility entries and rewrites `current.json`. That version's
+`training_signature.json` comes back with it, so the next run diffs against the models you
+restored. `publish_version` refuses to advance `current` to a version whose manifest contradicts
+itself or the version its carried-forward models came from.
 
-Promotion is gated: `publish_version` re-derives the recorded retraining closure from the target
-manifest alone and refuses to advance `current` if the manifest contradicts itself or the version
-its carried-forward models came from.
+A running process picks up a newly published `embedding` head (a retrain, a refit or a rollback)
+on its next request, within about 3 seconds, without a restart; a turn already running keeps its
+head. For `workflow` and `per_context`, restart the server after any publish.
+
+## Learning from use (`embedding` layout)
+
+At run time every settled request is recorded in `<workflow>/___convo_info/intent_learning.sqlite3`
+(`INTENT_LEARNING_RECORD`, default on; `off` writes nothing). Only requests a person or an agent
+confirmed teach: a pick at a which-command question (by the user or the agent), a review that was
+accepted or switched; never a match by command name.
+
+```bash
+fastworkflow learn <workflow_folderpath> [env_file_path] [--dry-run]   # refit + calibrate, no model call
+fastworkflow learned list|stats <workflow_folderpath>                   # review what was recorded
+fastworkflow learned remove <workflow_folderpath> <id> ...              # drop wrong rows
+```
+
+`learn` refits the current head with the training rows plus the confirmed rows (at least 5
+distinct texts) and publishes a new version only when **both gates** pass: the base rows' cross-fit
+accuracy falls at most 1.5 points, and the learned rows, held out, are right outright no less often
+and wrong confidently no more often than without them (one more wrong row is allowed when at least
+three more are right). It then **calibrates** the commit threshold, which can only be **lowered**
+(to 0.60, 0.55 or 0.50, with at least 200 confirmed rows and at most 2% wrong in the new band); an
+`INTENT_COMMIT_THRESHOLD` set in the env file always wins. It prints why it did or did not publish.
+
+The same refit runs in a background thread after every 25 new confirmed rows
+(`INTENT_LEARNING_REFIT_EVERY`); set `INTENT_LEARNING_REFIT=off` to stop it. A head trained
+without `rows.npz` cannot be refitted until its next train. A full `fastworkflow train` does not
+include the learned rows: run `fastworkflow learn` after it to add them back.
 
 ## Reading the output
 
 | Line | Means |
 |---|---|
-| `Training plan: full retrain of N context(s).` + reasons | something global moved; the reasons name it |
-| a changed-command list, then contexts to retrain with per-context reasons | the selective path |
+| `Intent model layout: <layout> ...` | the layout this run writes, and for `embedding` the encoder and commit threshold |
+| `Training plan: full retrain of N context(s).` + reasons | something global moved, or (one-model layout) any command changed; the reasons say which |
+| `Training plan (selective):` with changed commands and per-context reasons | the `per_context` selective path |
 | `Carried forward N context(s) from version <id>: ...` | those contexts were **not** retrained this run |
 | `Utterance cache (reuse) at <path>: X reused, Y generated, Z written` | `Y` is what this run paid for |
-| `Training artifacts are already up to date.` | the plan was empty; artifacts were republished and retention applied, nothing retrained |
-| `MODEL CONFUSION (N)` | diagnostic only, after publication — see `detect-duplicate-capabilities` |
+| `Intent model: layout embedding, encoder ..., The head took ...` | the head's size and fit time |
+| `Training artifacts are already up to date.` | nothing changed; reader paths were repaired and retention applied |
+| `MODEL CONFUSION (N)` | diagnostic only, printed after training and before publication (it never blocks it); see `detect-duplicate-capabilities` |
 | `Training complete.` | published; `current.json` now names this version |
+| `LOCAL INTENT MODEL` section of the final report (`embedding`) | cross-fit accuracy on the training rows and the most confused command pairs, both directions; add seeds that tell a pair apart, or merge the two commands |
 
-`Training artifacts are already up to date.` is a success, not a no-op skip. It still repairs
-reader paths and applies retention, which is what makes it safe to re-run training after a
-partial failure.
+`Training artifacts are already up to date.` is a success, which is what makes re-running training
+after a partial failure safe.
+
+## After training
+
+`fastworkflow run_cli` and the servers print one line saying what the intent detection chain is: the
+local model when it is confident, then the remote decision model when `JEV_API_KEY` is set, then
+the user or the agent. With `LLM_AGENT` unset (no-agent mode), `JEV_API_KEY` is mandatory: without
+it `fastworkflow run_cli` exits 1 and the server refuses to start. `fastworkflow train` does not check
+this.
 
 ## Pre-flight checklist
 
 ```
-- [ ] Seed-utterance and command-source edits are complete — both invalidate caches
-- [ ] Persona changes are batched with other full-retrain-forcing changes, not sprinkled
+- [ ] Seed-utterance and command-source edits are complete; each makes its command dirty, and a seed edit also regenerates it
+- [ ] Persona and layout/encoder changes are batched; each forces a full retrain
 - [ ] intent_benchmark.json is disjoint from seeds (the preflight will fail the run otherwise)
-- [ ] Time budgeted for a full retrain if any global input moved
 - [ ] The previous version is the one you want as a recovery point
 - [ ] --regenerate-utterances is being passed for a stated reason, not by habit
 ```
 
 ## Additional resources
 
-- Exact cache fingerprint inputs, the global-header input list, the on-disk layout under
+- Exact cache fingerprint inputs, the global input list, the on-disk layout under
   `___command_info`, and a failure-mode catalogue: [reference.md](reference.md).
 
 ## Related

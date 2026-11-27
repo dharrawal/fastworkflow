@@ -7,7 +7,7 @@ import os
 
 import pytest
 
-from fastworkflow import state_paths
+from fastworkflow.session import state_paths
 from fastworkflow.observability import store as obs
 from fastworkflow.benchmark.catalog import write_version
 from fastworkflow.experiment.runner import (

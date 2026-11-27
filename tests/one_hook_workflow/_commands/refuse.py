@@ -1,7 +1,7 @@
 """Refuses a call with raise fastworkflow.Refused(message): the call's answer is the message, success=False."""
 
 import fastworkflow
-from fastworkflow.workflow import Workflow
+from fastworkflow.core.workflow import Workflow
 from pydantic import BaseModel, Field
 
 REFUSAL = "the vault is closed on Sundays"

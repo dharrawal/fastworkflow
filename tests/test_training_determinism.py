@@ -28,11 +28,11 @@ import pytest
 import litellm
 
 import fastworkflow
-from fastworkflow.command_context_model import CommandContextModel
-from fastworkflow.command_directory import CommandDirectory
-from fastworkflow.command_routing import RoutingDefinition, RoutingRegistry
-from fastworkflow.model_pipeline_training import _get_cached_command_utterances
-from fastworkflow.nlu_labels import WILDCARD_LABEL
+from fastworkflow.core.command_context_model import CommandContextModel
+from fastworkflow.core.command_directory import CommandDirectory
+from fastworkflow.core.command_routing import RoutingDefinition, RoutingRegistry
+from fastworkflow.train.model_pipeline_training import _get_cached_command_utterances
+from fastworkflow.intent.nlu_labels import WILDCARD_LABEL
 from fastworkflow.train.determinism import (
     ContextTrainingStatus,
     DEFAULT_TRAINING_SEED,
@@ -587,8 +587,10 @@ def test_inherited_command_generation_is_cached_by_fully_qualified_name(tmp_path
     commands = workflow_path / "_commands"
     parent = commands / "Parent"
     parent.mkdir(parents=True)
-    (commands / "context_inheritance_model.json").write_text(
-        json.dumps({"Child": {"base": ["Parent"]}}),
+    # every context is a folder; Child's holds only its context class, its one command is inherited
+    (commands / "Child").mkdir()
+    (commands / "Child" / "_Child.py").write_text(
+        "class Context:\n    inherits = [\"Parent\"]\n",
         encoding="utf-8",
     )
     (parent / "shared_command.py").write_text(
@@ -608,6 +610,11 @@ def test_inherited_command_generation_is_cached_by_fully_qualified_name(tmp_path
                         workflow.context.get("generation_calls", 0) + 1
                     )
                     return [command_name, *Signature.plain_utterances]
+
+            class ResponseGenerator:
+                # a command needs one of the two generator classes to load (bd fix-ftdl.2)
+                def __call__(self, workflow, command, command_parameters):
+                    return None
             """
         ),
         encoding="utf-8",

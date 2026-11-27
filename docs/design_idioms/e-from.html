@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A handle's producer · Design idioms · fastWorkflow</title>
+<link rel="stylesheet" href="idioms.css">
+</head>
+<body data-page="e-from">
+<aside class="rail"></aside>
+
+<main id="top">
+  <section class="group execution">
+<!-- IDIOM BODY START -->
+    <article class="idiom" id="e-from">
+      <div class="prose">
+        <p class="num">06</p>
+        <h3>A handle's producer</h3>
+        <p>Some inputs are handles: an id, a uid or a code that the user cannot make up and the model cannot guess. A command that takes one can only run after some other command has handed the handle out. <code>from_command_output</code> is how you write down which command that is. Reach for it on every <code>Input</code> field that holds a handle.</p>
+        <p>In the shipped <code>library</code> example, <code>open_book</code> needs a <code>book_uid</code> such as <code>b3</code>. Nobody knows that uid by heart; <code>find_book</code> searches the catalogue and returns the uids it found. So <code>open_book</code>'s field says it comes from <code>find_book</code>.</p>
+        <p>A command is a Python file under <code>_commands/</code> with a <code>Signature</code> class. Its <code>Input</code> is a Pydantic model of what the command takes, and its <code>Output</code> a model of what it returns (see <a href="e-input.html">an input</a> and <a href="e-return.html">what it returns</a>). The producer declaration is one key in the field's <code>json_schema_extra</code>. Its value is <code>"&lt;command&gt;.&lt;field&gt;"</code>: the producer command's name, a dot, and the name of a field of that command's <code>Output</code>.</p>
+      </div>
+      <figure>
+        <figcaption>fastworkflow/examples/library/_commands/Library/open_book.py (a comment added)</figcaption>
+        <pre><code>class Signature:
+    """Open one book by its uid, so that the book's own commands act on it."""
+
+    class Input(BaseModel):
+        book_uid: str = Field(
+            description="the uid of the book to open",
+            examples=["b1", "b3", "b2"],
+            <span class="c"># find_book's Output field book_uids holds the uids this takes</span>
+            json_schema_extra={"from_command_output": "find_book.book_uids"},
+            pattern=r"^b[0-9]+$",
+        )</code></pre>
+      </figure>
+      <div class="prose">
+        <p>The producer's side needs nothing special, but its <code>Output</code> field must exist under that name, and its description should say what the handle opens. The types must fit: the consumer's <code>str</code> may come from a producer's <code>str</code> or from one item of a <code>list[str]</code>, as here.</p>
+      </div>
+      <figure>
+        <figcaption>fastworkflow/examples/library/_commands/Library/find_book.py (its Output only)</figcaption>
+        <pre><code>    class Output(BaseModel):
+        book_uids: list[str] = Field(description="the uid of each book found, in row order, such as "
+                                                 "b1, b2; open_book takes one",
+                                     examples=[["b1", "b2"], ["b3"]],
+                                     json_schema_extra={"ui": {"table": "books"}})
+        titles: list[str] = Field(description="the title of each book found, in row order",
+                                  examples=[["Dune", "Dune Messiah"], ["Emma"]],
+                                  json_schema_extra={"ui": {"table": "books"}})
+        total: int = Field(description="how many books match, on every page")</code></pre>
+      </figure>
+      <div class="prose">
+        <p>When the workflow loads, the framework checks each declaration and turns it into an edge from the producer to the consumer. At run time that edge does six things for you:</p>
+        <ul>
+          <li>The agent's planner reads a list of the commands. Beside <code>book_uid</code> that list shows <code>available_from: ['Library/find_book.book_uids']</code>, and the planner is told to follow these edges, so it calls <code>find_book</code> first and then <code>open_book</code>.</li>
+          <li>When one request holds both steps ("find Dune and open it"), the second part takes <code>book_uid</code> from the first part's <code>book_uids</code> (the one uid itself when exactly one book was found). It is never asked for. When several books were found the value is the whole list as JSON text, which <code>open_book</code>'s pattern refuses (a field with no pattern takes that text as its value): the user is not asked which row. When the earlier part's answer is not JSON, its whole answer text becomes the value.</li>
+          <li>When <code>open_book</code> is called with no uid, the question to the user of an execution command adds the line "abort and use the find_book command(s) to get book_uid information." That line appears only when the value is missing, and a planning command's missing-value question does not name the producer, so still write a good <code>description</code>.</li>
+          <li>When the agent's listing is narrowed to the commands a request needs, the producers of those commands are added to it, so the agent can run <code>find_book</code> before <code>open_book</code>.</li>
+          <li>In a planning command, a <code>run("open_book")</code> step that leaves <code>book_uid</code> out takes it from the only row the command run just before it listed (see <a href="p-run.html">a step the code runs</a>).</li>
+          <li><code>run("open_book", named=...)</code> opens a row by the field that declares a producer: with exactly one such field it is that one, otherwise the one required field named like an id (<code>..._uid</code>, <code>..._id</code>) (see <a href="p-run.html#p-named">the row a listing named</a>). A second declared field therefore changes which field <code>named=</code> uses.</li>
+        </ul>
+        <p>Always name the field: a bare command name such as <code>"find_book"</code> is an error (see below). A list of these strings names several producers, for a handle that more than one command hands out. A producer in another context is written <code>"Context/command.field"</code>, such as <code>"Library/find_book.book_uids"</code>. Without the <code>Context/</code> part the name must be found exactly once in the consumer's own context, the contexts it inherits from, or the global commands (a context is the kind of record a command acts on; see <a href="c-folder.html">a folder for one kind of object</a>).</p>
+        <p>Name a producer the user can actually reach from where the consumer runs. A command in a sibling context is not reachable, and an edge to it sends the planner down a dead end. The load does not check this for a qualified name such as <code>"Library/find_book.book_uids"</code>: it only checks that the command and field exist and fit. An unqualified name found only in contexts off the consumer's lookup path fails the load with a message that says so and asks you to write the qualified name only when a user can be in that context before running the command; if you do, confirm by hand that it is reachable. (An unqualified name found more than once on the path fails with "qualify it", which is safe.)</p>
+        <p>Three beginner mistakes, and what you see:</p>
+        <ul>
+          <li>A declaration that does not resolve: a misspelled field such as <code>"find_book.uids"</code>, a command that does not exist, a field of a type that does not fit, or a field of the producer's <code>Input</code> (<code>find_book.query</code>: "find_book's query is an Input field; from_command_output names the Output field a value comes from"). The command that wrote it does not load. <code>fastworkflow run_cli</code>, <code>fastworkflow train</code> and the server print it as a problem before they start, with the file, the field and the reason: <code>Library/open_book: .../open_book.py: Input.book_uid (from 'find_book.uids'): Library/find_book has no Output field 'uids'</code>. The rest of the workflow loads, and <code>fastworkflow command preview &lt;workflow_folder&gt; --check</code> reports the same error and exits 1.</li>
+          <li>Writing only the command, <code>"find_book"</code>, with no field. That fails the load in the same way, and the message lists the fields of <code>find_book</code>'s <code>Output</code> that fit: <code>a bare command name is not accepted; write "&lt;command&gt;.&lt;field&gt;", an Output field of find_book that fits str: find_book.book_uids, find_book.titles</code>. If the producer returns one block of text with no field that holds the handle, leave the declaration out and describe the handle in the field's <code>description</code>.</li>
+          <li>Writing <code>available_from</code> yourself, or putting <code>from_command_output</code> on an <code>Output</code> field. Both are mistakes: the framework writes <code>available_from</code> from your declaration, and only an <code>Input</code> field takes a producer. So does a planning command that names one of the commands its own steps call as a producer (its steps run it anyway; describe the value with <code>description</code>), and a <code>from_command_output</code> on a field of a planning command's facts model. Like an unresolved declaration, each fails the load of the command that wrote it and is listed with the file and the field (see <a href="removed.html#load-rule">what a mistake stops</a>).</li>
+        </ul>
+        <p class="see">See also <a href="e-object.html#e-move">move onto a record</a>, which is what <code>open_book</code> does with the uid.</p>
+      </div>
+    </article>
+<!-- IDIOM BODY END -->
+  </section>
+
+  <nav class="pager" aria-label="Previous and next">
+    <a class="prev" href="e-words.html"><span>Previous</span>Field options</a>
+    <a class="next" href="e-hook.html"><span>Next</span>Correct or refuse</a>
+  </nav>
+</main>
+<script src="nav.js"></script>
+<script src="idioms.js"></script>
+</body>
+</html>

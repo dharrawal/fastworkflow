@@ -35,7 +35,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from fastworkflow import state_paths, tracing
+from fastworkflow.session import state_paths
+from fastworkflow.observability import tracing
 from fastworkflow.observability import store as obs
 from fastworkflow.cli import add_run_chatbot_parser
 from fastworkflow.run_chatbot import server as run_chatbot_server
@@ -175,24 +176,24 @@ def seeded_db(workflow_path) -> str:
             status="ok", attributes={"user_message": "add milk"},
         ),
         tracing.Span(
-            span_id="s-cmd", trace_id=TURN1, name="fw.command.execute",
+            span_id="s-cmd", trace_id=TURN1, name="fw.command",
             kind="tool", channel_id="chan1", command_name="add_todo",
             context="TodoList", parent_span_id="s-root",
             start_ns=now_ns + 1_000_000_000, end_ns=now_ns + 2_000_000_000,
             status="ok", attributes={"parameters": {"description": "milk"}},
         ),
         tracing.Span(
-            span_id="s-ask", trace_id=TURN1, name="fw.ask_user",
+            span_id="s-ask", trace_id=TURN1, name="fw.question",
             kind="human_wait", channel_id="chan1", parent_span_id="s-root",
             start_ns=now_ns + 2_000_000_000, end_ns=now_ns + 4_000_000_000,
-            status="ok", attributes={"agent_query": "which list?"},
+            status="ok", attributes={"kind": "agent", "asked": "which list?"},
         ),
         # Open span on the in-progress turn (rendered honestly as open).
         tracing.Span(
-            span_id="s-open", trace_id=TURN3, name="fw.ask_user",
+            span_id="s-open", trace_id=TURN3, name="fw.question",
             kind="human_wait", channel_id="chan2",
             start_ns=now_ns, end_ns=None, status="awaiting_user",
-            attributes={"agent_query": "still waiting"},
+            attributes={"kind": "agent", "asked": "still waiting"},
         ),
     ]
 
@@ -578,13 +579,13 @@ class TestApi:
     def test_spans_for_turn(self, server):
         spans = _get_json(server, f"/api/spans/{TURN1}")["spans"]
         assert [s["name"] for s in spans] == [
-            "fw.turn", "fw.command.execute", "fw.ask_user"
+            "fw.turn", "fw.command", "fw.question"
         ]
         by_name = {s["name"]: s for s in spans}
-        assert by_name["fw.ask_user"]["kind"] == "human_wait"
-        assert by_name["fw.command.execute"]["command_name"] == "add_todo"
+        assert by_name["fw.question"]["kind"] == "human_wait"
+        assert by_name["fw.command"]["command_name"] == "add_todo"
         # Attributes come back parsed, not as a JSON string.
-        assert by_name["fw.command.execute"]["attributes"]["parameters"] == {
+        assert by_name["fw.command"]["attributes"]["parameters"] == {
             "description": "milk"
         }
 
@@ -964,6 +965,28 @@ class TestPackaging:
         assert present == [], result.stdout + result.stderr
         assert elapsed is not None
         assert elapsed < 0.5, f"chatbot import took {elapsed:.3f}s"
+
+    def test_server_import_does_not_load_the_composer(self):
+        """The composer (answer card, question form) needs dspy; the chatbot server and
+        package must stay import-light and never pull it in."""
+        script = textwrap.dedent(
+            """
+            import sys
+            import fastworkflow.run_chatbot
+            import fastworkflow.run_chatbot.server
+            bad = [n for n in ("fastworkflow.run_chatbot.composer", "dspy") if n in sys.modules]
+            print("PRESENT=" + ",".join(bad))
+            """
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        assert "PRESENT=\n" in result.stdout + "\n", result.stdout + result.stderr
 
 
 # ----------------------------------------------------------------------
@@ -1491,3 +1514,17 @@ class TestProcessLogs:
             session["train_log_path"] == log_path
         )
         assert session["server_log_path"]
+
+
+def test_server_source_carries_no_internal_tracker_tags():
+    """fix-jo9h: comments and log strings state the invariant in words."""
+    import fastworkflow.run_chatbot.server as server_module
+
+    pattern = re.compile(r"\[(?:R|DR)\d+\]|\bfix-[a-z0-9]+(?:\.[a-z0-9]+)*")
+    with open(server_module.__file__, encoding="utf-8") as handle:
+        hits = [
+            f"{number}: {line.strip()}"
+            for number, line in enumerate(handle, 1)
+            if pattern.search(line)
+        ]
+    assert hits == []

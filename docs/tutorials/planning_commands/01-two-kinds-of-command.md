@@ -22,7 +22,8 @@ class Signature:
     """Count the overdue loans, in one branch or across the library."""
 
     class Input(BaseModel):
-        branch: str = Field(default="", description="one branch's name; empty for every branch")
+        branch: str = Field(default="", description="one branch's name; empty for every branch",
+                            examples=["Central", "Riverside", "riverside"])
 
     class Output(BaseModel):
         total: int = Field(description="how many loans are overdue")
@@ -98,6 +99,7 @@ class Signature:
     class Input(BaseModel):
         branch: str = Field(default="", description="the branch asked about, if named (such as Central "
                                                     "or Riverside); empty for all",
+                            examples=["Central", "Riverside", "riverside"],
                             json_schema_extra={"copied_from_command_text": {"ignore": ["the", "branch"]}})
 
         @field_validator("branch")
@@ -318,7 +320,7 @@ than the description promises.
 This trace is what `fastworkflow command run-code` prints for the call: it runs every step code
 can run, against the sample commands, with no model, and stops where the agent would take over.
 
-Planning commands run only in agent mode. In assistant mode (`fastworkflow run --assistant`,
+Planning commands run only in agent mode. In assistant mode (`fastworkflow run_cli --assistant`,
 or a message typed with a leading `/`), naming one gets `Library/overdue_summary is a
 planning command; it runs in agent mode.` Execution commands run in both modes.
 

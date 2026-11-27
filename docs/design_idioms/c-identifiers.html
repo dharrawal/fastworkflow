@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Identifier formats · Design idioms · fastWorkflow</title>
+<link rel="stylesheet" href="idioms.css">
+</head>
+<body data-page="c-identifiers">
+<aside class="rail"></aside>
+
+<main id="top">
+  <section class="group context">
+<!-- IDIOM BODY START -->
+    <article class="idiom" id="c-identifiers">
+      <div class="prose">
+        <p class="num">05</p>
+        <h3>Identifier formats</h3>
+        <p>Most applications name their records by ids with a fixed shape: an account <code>acct_4421</code>, an order <code>#W0000000</code>. Reach for this page when users type such ids in their messages and you want the framework to recognise them. There are two declarations, and they do different jobs.</p>
+        <ul class="walk">
+          <li><strong>One field's format: <code>pattern=</code> on the field.</strong> Use it on every input whose value must have a given shape. The framework refuses a value that does not match the whole pattern, on every path (the "/" path, the plan review's draft and a typed planning call alike), so "xx acct_1 yy" never passes <code>acct_[0-9]+</code>; the question back to the user names the field, the value, the pattern and, when the field has an example, its first example. The model is also told the pattern. A compiled pattern (<code>pattern=re.compile(..., re.I)</code>) keeps its flags. A pattern only validates: it neither adds nor lifts the strict check that a value must be written in the user's message, which only <code>copied_from_command_text</code> asks for (see <a href="e-words.html#e-words-text">the request's own words</a>). The field is taught under <a href="e-input.html">an input</a>.</li>
+          <li><strong>The workflow's id formats: <code>identifier_patterns</code>.</strong> A list on <code>class Context</code> in the optional file <code>_commands/_workflow.py</code> at the workflow root (the workflow's own settings), one compiled pattern per id format. The framework searches the user's message with it, so it finds ids anywhere in free text.</li>
+        </ul>
+        <p>What the framework does with <code>identifier_patterns</code>:</p>
+        <ul class="walk">
+          <li><strong>Splitting a message.</strong> When one message holds several requests, the framework cuts it into parts (see <a href="r-turn.html#p-split">splitting a request</a>). Each id it finds is treated as a record the message names, like a quoted name, so the parts are cut and joined around the right records. When a part says "it" or "that account" and <code>JEV_API_KEY</code> is set, the ids are among the records it may stand for.</li>
+          <li><strong>A cut id becomes the whole id.</strong> When the model fills a <code>str</code> input that is marked <code>copied_from_command_text</code> or <code>record_named_in_command_text</code> with "4421" and the message writes <code>acct_4421</code>, the value becomes <code>acct_4421</code>, and only then is the field's pattern checked. If "4421" sits inside two different ids, the value is refused. A value that is not inside an id must be written as whole words: "dun" is not written in "dune". This holds for a marked field of an execution command and of a planning command alike (a command whose body is a plan, see <a href="p-plan.html">a plan in place of a body</a>); a field with no mark is never widened, because its value is not compared with the message at all.</li>
+          <li><strong>Policy rules.</strong> A policy table (<code>_policy/table.py</code>, rules checked when commands run) needs to know which arguments are ids. When the table's own <code>id_patterns</code> is empty, it takes these patterns, flags included. Declare them here once rather than in the table. The policy matches a whole argument value against them, while the split, the referent and the widening search inside the text; an unanchored <code>\b...</code> pattern works both ways.</li>
+        </ul>
+        <p>Without the file nothing breaks: the framework knows one id shape of its own, a UUID or a run of 24 or more hexadecimal digits, which the split counts as a record the message names (it is not used for widening), and it still finds quoted and capitalised names. The file is read once per process, so restart after an edit.</p>
+        <p><strong>Which to write.</strong> Both, when an id is both a field's value and something users type among other words: <code>pattern</code> checks one value, <code>identifier_patterns</code> finds ids in a message. Neither replaces the other.</p>
+        <p>Mistakes a beginner makes:</p>
+        <ul>
+          <li>A raw string, or a single pattern, instead of a list of <code>re.compile(...)</code>. The workflow fails to load with "identifier_patterns holds '...'; write re.compile('...')" or "identifier_patterns must be a list of compiled patterns (re.compile)". A pattern that does not compile fails the load too.</li>
+          <li>Copying a field's anchored pattern (<code>^...$</code>) into <code>identifier_patterns</code>. It is searched inside the message, so an anchored pattern finds nothing unless the message is the id alone. The load reports it ("identifier_patterns are searched inside the message; remove the ^ and $ anchors"). Use <code>\b</code> instead; a pattern compiled with <code>re.MULTILINE</code> is left alone. The reverse also holds: a field's <code>pattern</code> should be anchored.</li>
+          <li>Expecting "4421" to become <code>acct_4421</code> on a field that is not marked. The widening is decided by the mark, never by the pattern: with no mark nothing is widened, and "4421" stands (or the pattern refuses it). On a marked field that also has a pattern, the value is widened first and then checked against the pattern, on every path.</li>
+        </ul>
+        <p class="see">See also <a href="r-turn.html#p-split">splitting a request</a> for the rest of <code>_commands/_workflow.py</code>.</p>
+      </div>
+      <figure>
+        <figcaption>_commands/_workflow.py (an illustration: no shipped example has one)</figcaption>
+        <pre><code>import re
+
+
+class Context:
+    <span class="c"># Account numbers, as the commands take them: acct_4421</span>
+    <span class="c"># \b, not ^...$: the pattern is searched inside the user's message</span>
+    identifier_patterns = [re.compile(r"\bacct_[0-9]+")]</code></pre>
+      </figure>
+      <figure>
+        <figcaption>fastworkflow/examples/retail_workflow/_commands/get_order_details.py (the producer key is left out here)</figcaption>
+        <pre><code>class Signature:
+    """Get order details"""
+    class Input(BaseModel):
+        order_id: str = Field(
+            description=(
+                "The order ID to get details for"
+            ),
+            <span class="c"># the whole value must match; the question shows it with the example.</span>
+            <span class="c"># This pattern accepts any single word: a tighter one, such as</span>
+            <span class="c"># ^#W[0-9]{7}$, is what makes a pattern worth writing</span>
+            pattern=r"^(#?[\w\d]+)$",
+            examples=["#W0000000"],
+        )</code></pre>
+      </figure>
+    </article>
+<!-- IDIOM BODY END -->
+  </section>
+
+  <nav class="pager" aria-label="Previous and next">
+    <a class="prev" href="c-state.html"><span>Previous</span>Remember the object</a>
+    <a class="next" href="r-turn.html"><span>Next</span>How a turn runs</a>
+  </nav>
+</main>
+<script src="nav.js"></script>
+<script src="idioms.js"></script>
+</body>
+</html>

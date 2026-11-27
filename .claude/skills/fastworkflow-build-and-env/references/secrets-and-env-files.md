@@ -77,11 +77,11 @@ is wrong). For fetched examples, the env files live at `./examples/*.env` (one l
 from the workflow), so you must pass both paths explicitly; the CLI error message tells
 you the exact command if you forget.
 
-Required-var floor (train and run hard-fail without it): `SPEEDDICT_FOLDERNAME`
-(conventionally `___workflow_contexts`) — it doubles as the "did the env file load at all"
-probe. `run` additionally hard-fails if `LITELLM_API_KEY_SYNDATA_GEN` is absent
-(run/__main__.py:129-132), even though run never generates synthetic data — keep the key
-set. The parameter-extraction sentinels (`MISSING_INFORMATION_ERRMSG`,
+Required-var floor: one model. `run` and the servers stop at start with neither `LLM_AGENT`
+nor `LLM_PLANNER` (and with no `LLM_AGENT` and no `JEV_API_KEY`); `train` stops at start when
+`LLM_SYNDATA_GEN` resolves to no model (it falls back to `LLM_AGENT`, else `LLM_PLANNER`). Keys
+follow the model (`dspy_utils.resolve_role`). A variable exported in the shell wins over the
+env files. The parameter-extraction sentinels (`MISSING_INFORMATION_ERRMSG`,
 `INVALID_INFORMATION_ERRMSG`, `NOT_FOUND`, `INVALID`, `PARAMETER_EXTRACTION_ERROR_MSG`)
 have no code defaults and must be present in the env file (the templates carry them).
 

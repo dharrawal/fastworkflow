@@ -54,8 +54,8 @@ from fastworkflow import (
     TurnStatus,
     mint_turn_key,
 )
-from fastworkflow.command_routing import ModuleType, RoutingRegistry
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.core.command_routing import ModuleType, RoutingRegistry
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 from tests.todo_list_workflow.application.todo_manager import TodoListManager
 
@@ -108,6 +108,12 @@ COMMAND_OUTPUT_FIELDS = (
     # global scope. Optional with a default, appended for the same reason as the field above.
     "ran_in_context_name",
     "ran_in_context_clause",
+    # Appended by fix-2nsr, optional with a None default (None: written before the field existed):
+    # the command is the framework's own, from its metadata, set when the output is recorded.
+    "framework",
+    # Appended by fix-2nsr, optional with a None default (None: not split, belongs to no part, or written before the
+    # field existed): the 1-based request part (the answer's `### N.` number) the output was produced for.
+    "sub_task",
 )
 
 # `success` is a computed field: absent from `model_fields`, present in every

@@ -1,5 +1,4 @@
 import os
-import json
 import ast
 from typing import List, Dict, Any, Optional, Tuple
 
@@ -7,11 +6,11 @@ def collect_command_files_and_context_model(
     output_dir: str
 ) -> Tuple[List[str], Optional[Dict[str, Any]], Optional[str]]:
     """
-    Collect all command files and load the context model from the output directory.
+    Collect all command files and the context model (each context folder with the ``inherits`` its class Context
+    declares) from the output directory.
     
     Args:
-        output_dir: Path to the directory containing command files and context model
-                   (should be the _commands directory)
+        output_dir: Path to the workflow's _commands directory
     
     Returns:
         - List of command file paths (excluding __init__.py)
@@ -27,19 +26,16 @@ def collect_command_files_and_context_model(
             for file in files
             if file.endswith('.py') and file != '__init__.py'
         )
-    # Load context model
-    context_model_path = os.path.join(output_dir, 'context_inheritance_model.json')
+    # The context model: every context folder with the bases its class Context declares (inherits)
+    from fastworkflow.core.command_context_model import (
+        CommandContextModel, CommandContextModelValidationError, context_folders)
+    workflow = os.path.dirname(os.path.abspath(output_dir))
     context_model = None
-    if not os.path.exists(context_model_path):
-        error = f"Context model file not found at {context_model_path}"
-    else:
-        try:
-            with open(context_model_path, 'r', encoding='utf-8') as f:
-                context_model = json.load(f)
-        except json.JSONDecodeError as e:
-            error = f"Invalid JSON in context model: {str(e)}"
-        except Exception as e:
-            error = f"Error reading context model: {str(e)}"
+    try:
+        declared = CommandContextModel.declared_bases(workflow)
+        context_model = {name: {"base": declared.get(name, [])} for name in context_folders(workflow)}
+    except CommandContextModelValidationError as e:
+        error = f"Error reading the context declarations: {e}"
     return command_files, context_model, error
 
 def extract_command_metadata(command_files: List[str]) -> List[Dict[str, Any]]:
@@ -207,14 +203,17 @@ def generate_readme_content(
     readme.append("## Available Commands\n")
 
     # Add global commands first if they exist
+    from fastworkflow.core.command_directory import declares_signature
+
     global_commands = []
     for meta in command_metadata:
         # Check if it's a file directly in _commands and not a special file
         parts = meta['file_path'].split(os.path.sep)
         if "_commands" in parts:
             cmd_idx = parts.index("_commands")
+            # a command with no Signature (a startup command) runs only as an action: it is not listed
             if cmd_idx + 1 < len(parts) and parts[cmd_idx + 1].endswith(".py") and (not os.path.basename(meta['file_path']).startswith("_") and \
-                               os.path.basename(meta['file_path']) != "startup.py" and \
+                               declares_signature(meta['file_path']) and \
                                os.path.basename(meta['file_path']) != "__init__.py"):
                 global_commands.append(meta)
 
@@ -300,9 +299,9 @@ def generate_readme_content(
 
     # --- Context Model Section ---
     readme.append("## Context Model\n")
-    readme.append("The `context_inheritance_model.json` file maps application classes to command contexts, organizing commands by their class.\n")
+    readme.append("Each application class is a context: a folder `_commands/<Context>/` holding its commands. A context that inherits the commands of others declares them on the `class Context` of `_commands/<Context>/_<Context>.py`.\n")
     readme.append("Structure example:\n")
-    readme.append("```json\n{\n  \"ClassA\": {\"base\": [\"BaseClass1\", ...]},\n  \"ClassB\": {\"base\": []}\n}\n```\n")
+    readme.append("```python\nclass Context:\n    inherits = [\"BaseClass1\"]\n```\n")
     readme.append("### Contexts and Commands\n")
 
     # Process each context again for the context model section

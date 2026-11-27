@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A phase that does not run · Design idioms · fastWorkflow</title>
+<link rel="stylesheet" href="idioms.css">
+</head>
+<body data-page="p-skip">
+<aside class="rail"></aside>
+
+<main id="top">
+  <section class="group planning">
+<!-- IDIOM BODY START -->
+    <article class="idiom" id="p-skip">
+      <div class="prose">
+        <p class="num">04</p>
+        <h3>A phase that does not run</h3>
+        <p>Some work in a planning command only makes sense sometimes. Read a member's loans only when the request asks for them. Open the member only when the search found one. This page shows the three ways to say "not always", and which one to pick.</p>
+        <p>A quick vocabulary. A <em>planning command</em> is a command whose body is a plan (see <a href="p-plan.html">a plan in place of a body</a>). Each public method of its <code>PlanGenerator</code> is a <em>phase</em>: it returns a list of <em>steps</em>, the commands to run (see <a href="p-run.html">a step the code runs</a>). What a phase found is its <em>facts</em>, which later phases receive as a parameter named after it (see <a href="p-facts.html">what a phase hands on</a>).</p>
+        <p>Pick by what decides it:</p>
+        <ul>
+          <li><strong>An input decides.</strong> List the phases in <code>__phases__(self, input)</code>. The framework decides a call's phases from it before the first phase of that call runs, and runs only the phases it returns, in that order; it calls the method more than once (to build the template, for the run, and on resume), so make it depend on <code>input</code> alone. Without it, every phase runs.</li>
+          <li><strong>What an earlier phase found decides.</strong> Write an ordinary <code>if</code> in the phase and <code>return []</code>. The framework calls the phase method once, when the phase is reached, with the real facts. An empty list means the phase is skipped.</li>
+          <li><strong>Only the meaning of the request can decide.</strong> Wrap the step in <code>when(condition, step)</code>. Code never judges the condition. See the second example.</li>
+        </ul>
+        <p>A phase that returned <code>[]</code> is passed as <code>None</code> to every later phase and to <code>__result__</code> (see <a href="p-result.html">the answer, in code</a>). A phase that <code>__phases__</code> left out is passed as <code>None</code> to <code>__result__</code> only; a later phase that reads it keeps the parameter's default, and a parameter with no default is a load error, so write <code>member=None</code> for any phase <code>__phases__</code> can leave out. In both cases test the parameter before reading the facts, and write <code>if not member:</code> rather than <code>if member is None:</code>. A facts model is always true, so <code>not member</code> means exactly "that phase did not run", and the template sees the test. A phase with no return annotation fills no facts, so its parameter is <code>None</code> even when it ran: test only an annotated phase this way. An <code>is None</code> test is invisible to the template: the planner and the preview show that step with no "only when" note. The shipped <code>member_report.py</code> below still uses <code>is None</code>, so its preview shows <code>loans</code> and <code>notes</code> with no note about <code>member</code>.</p>
+      </div>
+      <figure>
+        <figcaption>fastworkflow/examples/library/_commands/Library/member_report.py (PlanGenerator)</figcaption>
+        <pre><code>class PlanGenerator:
+    <span class="c"># Inputs decide the shape: loans and notes are bool inputs that default to False.</span>
+    def __phases__(self, input):
+        loans = [self.loans] if input.loans else []
+        notes = [self.notes] if input.notes else []
+        return [self.find, self.member, *loans, *notes]
+
+    def find(self, input) -&gt; FindMember.Output:
+        return [run("find_member", query=input.member)]
+
+    <span class="c"># Facts decide: no member matched, so nothing to open.</span>
+    def member(self, input, find) -&gt; OpenMember.Output:
+        if not find.member_uids:
+            return []
+        return [run("open_member", named=input.member)]
+
+    def loans(self, member) -&gt; ListMemberLoans.Output:
+        if member is None:          <span class="c"># the member phase was skipped</span>
+            return []
+        return [run("list_member_loans", all_pages=True)]
+
+    def notes(self, member) -&gt; ShowNotes.Output:
+        if member is None:
+            return []
+        return [run("show_notes")]
+
+    def __result__(self, input, member, loans, notes):
+        if member is None:
+            return f"No member is named {input.member}."
+        ...</code></pre>
+      </figure>
+      <div class="prose">
+        <p>What you see when it runs. On a copy of the library example, <code>fastworkflow command run-code library Library/member_report --input '{"member": "Nobody"}'</code> runs the command with no model and prints <code>Phase member: skipped (its method returned [])</code>, then the answer <code>No member is named Nobody.</code> With <code>"loans": true</code> for a member who exists, the <code>loans</code> phase runs; without it, the phase is not in the run at all. The preview (<code>fastworkflow command preview</code>) lists the phases with when each runs: <code>member</code> "only when <code>find.member_uids</code>", <code>loans</code> "only when loans = true".</p>
+        <p>Why the agent still understands the <code>if</code>: before the run, the planner is shown a template of the plan, built by calling each phase with stand-in facts. Every test on a stand-in fact reads as true, and the step is written with a note, so the template reads <code>open_member with the uid of the &lt;member&gt; match (only when find.member_uids)</code>.</p>
+      </div>
+      <figure>
+        <figcaption>a phase of a planning command (illustration)</figcaption>
+        <pre><code>from fastworkflow.planning import run, when
+
+def member(self, input, find) -&gt; OpenMember.Output:
+    if not find.member_uids:
+        return []
+    return [
+        run("open_member", named=input.member),
+        when("the request asks what the member has borrowed",
+             run("list_member_loans", all_pages=True)),
+    ]</code></pre>
+      </figure>
+      <div class="prose">
+        <p><code>when()</code> writes the step as the line <code>only when the request asks what the member has borrowed, list_member_loans (full list)</code>. Code runs the steps before it and stops there, because it cannot tell whether the condition holds. What happens next depends on the session:</p>
+        <ul>
+          <li><strong>With an agent model</strong> (<code>LLM_AGENT</code> set), the agent reads the condition against the request and runs the step or skips it.</li>
+          <li><strong>With no agent model</strong> (<code>LLM_AGENT</code> unset), when the inner step is one code can run and someone is there to answer, the command pauses with a yes-or-no question (question kind <code>phase_step</code>): "That step runs only when ... Does that hold? Reply yes to run ... now, or no to skip it". Yes runs the inner step by code, no skips it, and the command carries on either way. <code>cancel</code> stops the command at that step. When nobody can answer, or code cannot run the inner step, the command stops there and the turn reports what ran and the step it did not. The question is asked only on the plan path of an attended turn: a planning command run with a "/" message in no-agent mode stops instead of asking, and so does one called by another planning command or run under a framework command.</li>
+        </ul>
+        <p>Two beginner mistakes:</p>
+        <ul>
+          <li>Gating on a <code>bool</code> input with <code>return []</code> inside a phase that hands on a command's <code>Output</code>. The template is built for both values of the <code>bool</code>, and for <code>False</code> the phase runs nothing, so the command does not load (the rest of the workflow does) and <code>fastworkflow command preview --check</code> fails: "phase 'loans' hands on list_member_loans's Output, but none of its steps runs list_member_loans". Put input decisions in <code>__phases__</code>.</li>
+          <li>Using <code>when()</code> for something code already knows, such as an input or a fact. The agent spends a step on it, and with no agent model the user is asked a question the code could have answered. Write an <code>if</code> instead.</li>
+        </ul>
+        <p class="see">See also <a href="p-share.html">shared phases</a>, which also uses <code>__phases__</code>.</p>
+      </div>
+    </article>
+<!-- IDIOM BODY END -->
+  </section>
+
+  <nav class="pager" aria-label="Previous and next">
+    <a class="prev" href="p-facts.html"><span>Previous</span>What a phase hands on</a>
+    <a class="next" href="p-result.html"><span>Next</span>The answer, in code</a>
+  </nav>
+</main>
+<script src="nav.js"></script>
+<script src="idioms.js"></script>
+</body>
+</html>

@@ -1,7 +1,7 @@
 """Observation offloading: compact, archive and search_memory.
 
 This is how fastWorkflow runs a tool agent; there is no flag to turn it off.
-``build_tool_agent`` always returns the plain ReAct, execute
+``fastworkflow.agent.tool_agent.build_tool_agent`` always returns the plain ReAct, execute
 observations always carry their canonical ``O{step_index}`` alias, compaction
 always swaps an observation that is no longer worth its residency for its own
 label, and the text behind every label stays reachable through ``search_memory``
@@ -9,11 +9,6 @@ and through answer-time rehydration. See ``docs/observation_search.md``.
 """
 from __future__ import annotations
 
-from fastworkflow.observation_offloading.agent import (
-    DEFAULT_MAX_ITERS,
-    build_tool_agent,
-    open_handle_archive,
-)
 from fastworkflow.observation_offloading.archive import (
     PersistenceError,
     RuntimeHandleArchive,
@@ -56,7 +51,6 @@ from fastworkflow.observation_offloading.state import (
 )
 
 __all__ = [
-    "DEFAULT_MAX_ITERS",
     "FactsError",
     "MissingFactError",
     "MIN_OFFLOAD_SAVING_BYTES",
@@ -72,7 +66,6 @@ __all__ = [
     "context_clause",
     "durable_archive",
     "archive_step",
-    "build_tool_agent",
     "classify_against_steps",
     "command_run_record",
     "compact_trajectory",
@@ -81,7 +74,6 @@ __all__ = [
     "min_offload_saving_bytes_from_env",
     "offload_label",
     "offload_saving_bytes",
-    "open_handle_archive",
     "printed_alias",
     "printed_context",
     "strip_alias_line",

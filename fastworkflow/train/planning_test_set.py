@@ -101,7 +101,7 @@ def scope_of(name: str) -> str:
 
 def inventory(workflow_folderpath: str) -> Inventory:
     """Read the workflow's planning commands and callees from the loader (no writes, no model)."""
-    from fastworkflow.planning_commands import resolve_field_sources, visible_planning_commands
+    from fastworkflow.planning.planning_commands import resolve_field_sources, visible_planning_commands
 
     resolution = resolve_field_sources(workflow_folderpath)
     planning = sorted(visible_planning_commands(workflow_folderpath))

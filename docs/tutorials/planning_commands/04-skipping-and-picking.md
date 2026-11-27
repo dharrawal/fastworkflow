@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field
 from fastworkflow import CommandResponse
 from fastworkflow.planning import run
 
-from ._wording import copies
+from .._shared.wording import copies
 from .find_book import Signature as FindBook
 from .open_book import Signature as OpenBook
 
@@ -44,13 +44,17 @@ class Signature:
 
     class Input(BaseModel):
         title: str = Field(description="the book's title",
+                           examples=["Dune", "Dune Messiah", "Persuasion"],
                            json_schema_extra={"copied_from_command_text": True})
 
     class Output(BaseModel):
         found: bool = Field(description="whether a book was opened for the title")
-        book_uid: Optional[str] = Field(default=None, description="the uid of the book opened")
-        title: Optional[str] = Field(default=None, description="its title, as the library has it")
-        author: Optional[str] = Field(default=None, description="its author")
+        book_uid: Optional[str] = Field(default=None, description="the uid of the book opened, such as b1",
+                                        examples=["b1", "b3"])
+        title: Optional[str] = Field(default=None, description="its title, as the library has it",
+                                     examples=["Dune", "Emma"])
+        author: Optional[str] = Field(default=None, description="its author",
+                                      examples=["Frank Herbert", "Jane Austen"])
         copies: int = Field(default=0, description="how many copies the library owns")
 
 
@@ -76,13 +80,14 @@ class PlanGenerator:
 the `Output` that a planning command calling this one reads. The `Output` is page 11's
 subject; read the answer part for now.
 
-`copies` comes from a helper file beside it:
+`copies` comes from a helper module in the workflow's helper package, `_commands/_shared/`:
 
-<!-- file: fastworkflow/examples/library/_commands/Library/_wording.py -->
+<!-- file: fastworkflow/examples/library/_commands/_shared/wording.py -->
 ```python
 """Wording the library's planning commands share.
 
-A file whose name starts with "_" is never a command: planning commands import it.
+Imported by the Library commands as `from .._shared.wording import copies`: _commands/_shared/ is the
+workflow's helper package, which is never read as commands.
 """
 from fastworkflow.planning import count
 
@@ -94,8 +99,9 @@ def copies(number):
 
 ## Line by line
 
-- **`from ._wording import copies`**: a file whose name starts with `_` is never a command,
-  so `_wording.py` is an ordinary module that commands of its folder import. `copies` is a
+- **`from .._shared.wording import copies`**: `_commands/_shared/` is the workflow's one home for
+  helper modules; the framework never reads it as commands, so `wording.py` is an ordinary module
+  that command files import (`..` from a context folder, `.` from `_commands/` itself). `copies` is a
   plain function over `count` (page 7) that says "1 copy" or "3 copies". `author_books`
   (page 8) calls it too.
 - **Each phase hands on the `Output` of the command it runs**, as on page 3: `find` hands on
@@ -191,11 +197,11 @@ No title is exactly "Dune Messia", but the listing has only one row, so code ope
 
 ```text
 Phase find
-  1. find_book query=Dune Messia
-  code runs: find_book query=Dune Messia
+  1. find_book query="Dune Messia"
+  code runs: find_book query="Dune Messia"
   facts: Output(book_uids=['b2'], titles=['Dune Messiah'], total=1)
 Phase book
-  1. open_book with the uid of the Dune Messia match
+  1. open_book with the uid of the "Dune Messia" match
   code runs: open_book book_uid=b2
   now in: Book: Dune Messiah (b2)
   facts: Output(book_uid='b2', title='Dune Messiah', author='Frank Herbert', copies=1)
@@ -255,4 +261,4 @@ answer written by __result__:
 `return []` skips a phase, decided when it is reached; whatever reads a skipped phase gets
 `None`; the template marks the skipped lines "(only when ...)". `run(command, named=...)`
 opens the row of a listing the call read, in any phase: code opens the row titled as asked,
-or the only row, and otherwise the agent picks. A `_` file holds what several commands share.
+or the only row, and otherwise the agent picks. A helper module in `_commands/_shared/` holds what several commands share.

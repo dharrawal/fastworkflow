@@ -34,8 +34,9 @@ When it holds, the step is not taken and the agent reads the rule's text instead
 - **Rewrite, do not refuse.** The rewrite becomes the step's observation. A refusal costs an
   iteration and is usually re-proposed; a rewrite says what to do instead.
 - **Facts are declared.** `ContractFacts`, supplied with the table, says:
-  - which commands write;
-  - the identifier shapes (defaulting to the workflow's `_commands/_split.py`
+  - which commands write (the loader fills this from the workflow's `@fastworkflow.writes` marks; a table
+    that lists them itself fails to load);
+  - the identifier shapes (defaulting to the workflow's `_commands/_workflow.py`
     `identifier_patterns`);
   - the closed argument domains;
   - the operation vocabulary;
@@ -170,11 +171,11 @@ complete worked example: corpus, provenance, taxonomy, table and tests.
 
 | file | role |
 |---|---|
-| `fastworkflow/policy_decision.py` | phases, rows, table, decision point, facts, phase inputs, `PolicyState` |
-| `fastworkflow/policy_runtime.py` | `AgentPolicy`: recording, the four decision points, valve, finish budget, persistence |
-| `fastworkflow/policy_intent.py` | intent/consent reader and question judge (model readings, fail-open) |
-| `fastworkflow/policy_loader.py` | settings → decision point and facts; `attach_policy` |
-| `fastworkflow/policy_replay.py` | offline replay of recorded runs |
-| `fastworkflow/utils/react.py` | loop hooks: `policy`, `policy_final_run`, `_policy_finish`, `_final_extract` |
-| `fastworkflow/command_executor.py` | `_policy_rewrite` at the canonical seam |
-| `fastworkflow/distillation_compare.py` | `compare_self`, `compare_pool`, `pool_pairs`, `provenance_records` |
+| `fastworkflow/policy/policy_decision.py` | phases, rows, table, decision point, facts, phase inputs, `PolicyState` |
+| `fastworkflow/policy/policy_runtime.py` | `AgentPolicy`: recording, the four decision points, valve, finish budget, persistence |
+| `fastworkflow/policy/policy_intent.py` | intent/consent reader and question judge (model readings, fail-open) |
+| `fastworkflow/policy/policy_loader.py` | settings → decision point and facts; `attach_policy` |
+| `fastworkflow/evaluation/policy_replay.py` | offline replay of recorded runs |
+| `fastworkflow/agent/react.py` | loop hooks: `policy`, `policy_final_run`, `_policy_finish`, `_final_extract` |
+| `fastworkflow/engine/command_executor.py` | `_policy_rewrite` at the canonical seam |
+| `fastworkflow/evaluation/distillation_compare.py` | `compare_self`, `compare_pool`, `pool_pairs`, `provenance_records` |

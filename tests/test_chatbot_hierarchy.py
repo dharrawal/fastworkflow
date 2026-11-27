@@ -55,7 +55,7 @@ def hierarchy_server(experiment_server):
     add_turn(store, 'experiment-turn', eid=eid, channel='registered')
     with store._connect() as conn:
         conn.execute("INSERT INTO spans(span_id,trace_id,name,kind,start_ns,end_ns,status,attributes) VALUES(?,?,?,?,?,?,?,?)",
-                     ('planning', 'experiment-turn', 'fw.planner.plan', 'internal', 1, 1000, 'ok', '{}'))
+                     ('planning', 'experiment-turn', 'fw.plan', 'internal', 1, 1000, 'ok', '{}'))
     setup.create_experiment(server.workflow_path, spec['benchmark_id'], 'v1')
     yield server, spec, eid, default, store
 
@@ -397,7 +397,7 @@ def record_nav_server(experiment_server):
             conn.execute(
                 'INSERT INTO spans(span_id,trace_id,name,kind,start_ns,end_ns,status,attributes)'
                 ' VALUES(?,?,?,?,?,?,?,?)',
-                (f'{key}-plan', key, 'fw.planner.plan', 'internal', 1, 1000, 'ok', '{}'))
+                (f'{key}-plan', key, 'fw.plan', 'internal', 1, 1000, 'ok', '{}'))
     yield server
 
 
@@ -426,19 +426,20 @@ def test_record_navigator_dom(record_nav_server):
 
 @pytest.fixture
 def crumb_climb_server(experiment_server):
-    """One turn deep enough to stand on a step: Planning, then Execution of two steps."""
+    """One turn deep enough to stand on a step: its Split stage, then Run > Part 1 of two steps."""
     server, default = experiment_server
     key = 'crumb-turn'
     row = _turn_row(key, None, None, None)
     row.update(channel_id='chat', conversation_id=9, ordinal=1,
                user_message='climb the crumbs', started_at='2026-09-08T01:00:00+00:00')
     spans = [
-        ('crumb-plan', None, 'fw.planner.plan', 1, 1000, '{}'),
-        ('crumb-exec', None, 'fw.agent.execute', 2000, 9000, '{}'),
-        ('crumb-step-1', 'crumb-exec', 'fw.agent.step', 2100, 5000,
-         '{"tool_name": "first_tool", "observation": "first seen"}'),
-        ('crumb-step-2', 'crumb-exec', 'fw.agent.step', 5100, 8900,
-         '{"tool_name": "second_tool"}'),
+        ('crumb-plan', None, 'fw.split', 1, 1000, '{}'),
+        ('crumb-run', None, 'fw.run', 1900, 9500, '{}'),
+        ('crumb-exec', 'crumb-run', 'fw.run.part', 2000, 9000, '{"part": 1}'),
+        ('crumb-step-1', 'crumb-exec', 'fw.step', 2100, 5000,
+         '{"tool_name": "first_tool", "observation": "first seen", "run_by": "agent"}'),
+        ('crumb-step-2', 'crumb-exec', 'fw.step', 5100, 8900,
+         '{"tool_name": "second_tool", "run_by": "agent"}'),
     ]
     with default._connect() as conn:
         assert default.upsert_turn_row(conn, row, [], default._store_redactor())

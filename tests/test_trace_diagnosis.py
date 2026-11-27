@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from fastworkflow import tracing
+from fastworkflow.observability import tracing
 from fastworkflow.observability import diagnosis as diag
 from fastworkflow.observability import store as obs
 from fastworkflow.observability.comparison import (
@@ -78,7 +78,7 @@ def _execute_span(
         span_id=span_id,
         trace_id=turn_key,
         parent_span_id=parent_span_id,
-        name=tracing.SPAN_COMMAND_EXECUTE,
+        name=tracing.SPAN_COMMAND,
         kind=tracing.KIND_INTERNAL,
         channel_id="channel-1",
         command_name=command_name,
@@ -118,7 +118,7 @@ def _intent_span(
         span_id=span_id,
         trace_id=turn_key,
         parent_span_id=parent_span_id,
-        name=tracing.SPAN_NLU_INTENT,
+        name=tracing.SPAN_INTENT,
         kind=tracing.KIND_INTERNAL,
         channel_id="channel-1",
         start_ns=start_ns,
@@ -153,7 +153,7 @@ def _param_span(
         span_id=span_id,
         trace_id=turn_key,
         parent_span_id=parent_span_id,
-        name=tracing.SPAN_NLU_PARAM_EXTRACTION,
+        name=tracing.SPAN_PARAMETERS,
         kind=tracing.KIND_INTERNAL,
         channel_id="channel-1",
         start_ns=start_ns,
@@ -168,13 +168,13 @@ def _ask_user_span(span_id: str, turn_key: str, *, start_ns: int) -> tracing.Spa
         span_id=span_id,
         trace_id=turn_key,
         parent_span_id=None,
-        name=tracing.SPAN_ASK_USER,
+        name=tracing.SPAN_QUESTION,
         kind=tracing.KIND_HUMAN_WAIT,
         channel_id="channel-1",
         start_ns=start_ns,
         end_ns=start_ns + 100_000,
         status=tracing.STATUS_OK,
-        attributes={"agent_query": "which one?", "attempt": 1, "user_response": "a"},
+        attributes={"asked": "which one?", "attempt": 1, "user_response": "a"},
     )
 
 

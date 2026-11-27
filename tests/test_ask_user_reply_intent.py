@@ -9,16 +9,16 @@ import dspy
 import pytest
 from dspy.utils import DummyLM
 
-from fastworkflow import workflow_agent
-from fastworkflow.utils.react import fastWorkflowReAct
-from fastworkflow.workflow_agent import (
+from fastworkflow.agent import workflow_agent
+from fastworkflow.agent.react import fastWorkflowReAct
+from fastworkflow.agent.workflow_agent import (
     REPLY_INTENTS,
     ClassifyReply,
     _apply_reply_intent,
     _post_ask_user_response,
     classify_user_reply,
 )
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 from tests.test_jev_field_given import jev_env  # noqa: F401  (fixture: real Jev, skipped without a key)
 
 

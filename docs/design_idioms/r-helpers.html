@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Helper modules · Design idioms · fastWorkflow</title>
+<link rel="stylesheet" href="idioms.css">
+</head>
+<body data-page="r-helpers">
+<aside class="rail"></aside>
+
+<main id="top">
+  <section class="reference-block reference">
+<!-- IDIOM BODY START -->
+    <h3 id="r-helpers">Helper modules</h3>
+    <p>A helper module is a Python file in the workflow's one helper package, <code>_commands/_shared/</code> (an <code>__init__.py</code> plus modules). Reach for one when several commands need the same code: shared wording, a lookup table, a facts model, or the phases two planning commands share (see <a href="p-share.html">shared phases</a>). The framework never treats it as a command, so it gets no seeds, no training and no entry in any command list. Your commands import it like any Python module: <code>from ._shared.wording import copies</code> from a command at the top of <code>_commands/</code>, <code>from .._shared.wording import copies</code> from a context folder. A helper that fails to import fails every command that imports it (each one reported, naming the command file, then the helper file and line the error came from); the other commands load.</p>
+    <table class="ref">
+      <thead>
+        <tr><th>File</th><th>What the framework does with it</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>_commands/_shared/wording.py</code>, any module of <code>_commands/_shared/</code></td><td>Nothing. It is a module your commands import.</td></tr>
+        <tr><td><code>_commands/Library/_Library.py</code>, named after its folder</td><td>The one exception: the context's own <code>class Context</code> (see <a href="c-folder.html">a folder for one kind of object</a>). The match is case-exact: a <code>_library.py</code> that defines <code>class Context</code> stops the workflow, naming the file it should be ("the context class file of Library is _Library.py: rename _library.py to _Library.py").</td></tr>
+        <tr><td>Any other <code>_name.py</code> in <code>_commands/</code> or a context folder, any other folder whose name starts with <code>_</code></td><td>Stops the workflow, one line naming the file and <code>_commands/_shared/</code> ("_commands/Library/_wording.py: is not read: ... move it to _commands/_shared/wording.py and import it as from .._shared.wording import ..."). A name close to <code>_workflow.py</code> or to the folder's <code>_&lt;Context&gt;.py</code> gets a did-you-mean, so a misspelt settings or context class file is caught. <code>__init__.py</code> and <code>__pycache__</code> are allowed everywhere. A folder without the <code>_</code> that holds only helpers stops the workflow too ("the context folder 'shared' holds no command file and inherits none").</td></tr>
+        <tr><td><code>_commands/_workflow.py</code>, at the top of <code>_commands/</code> only</td><td>The workflow's own settings, the class attributes of its <code>class Context</code>: the request splitter's optional settings (see <a href="r-turn.html#p-split">splitting a request</a>).</td></tr>
+        <tr><td><code>_commands/context_inheritance_model.json</code></td><td>A removed spelling: it stops the workflow. A context's bases are <code>inherits</code> on its <code>class Context</code> (see <a href="removed.html">old spellings</a>).</td></tr>
+      </tbody>
+    </table>
+    <p>Some names in the workflow folder itself, beside <code>_commands/</code>, are read by the framework too; do not use them for your own files:</p>
+    <table class="ref">
+      <thead>
+        <tr><th>File</th><th>What the framework does with it</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>startup_action.json</code></td><td>Names the startup command (see <a href="e-root.html">the root object</a>).</td></tr>
+        <tr><td><code>workflow_inheritance_model.json</code></td><td>The base workflows whose commands this workflow takes.</td></tr>
+        <tr><td><code>_policy/table.py</code></td><td>The policy table: rules checked when commands run.</td></tr>
+        <tr><td><code>personas.json</code></td><td>Who your users are, for the training requests <code>fastworkflow train</code> generates.</td></tr>
+        <tr><td><code>fastworkflow.env</code>, <code>fastworkflow.passwords.env</code></td><td>The default settings and keys files of <code>fastworkflow run_cli</code> (a flag names others; with none here, the folder above is tried).</td></tr>
+        <tr><td><code>accepted_duplicates.json</code></td><td>Pairs of commands whose seeds look alike on purpose, read by <code>fastworkflow train</code> (see <a href="e-purpose.html">how a request finds your command</a>).</td></tr>
+        <tr><td><code>intent_benchmark.json</code></td><td>Requests that score routing; <code>fastworkflow train</code> stops when a seed is one of them.</td></tr>
+        <tr><td><code>workflow_description.txt</code></td><td>Written by <code>fastworkflow build</code> (a generated description of the workflow; nothing reads it), which overwrites the file.</td></tr>
+        <tr><td><code>context_hierarchy_model.json</code></td><td>Not read: a leftover of an old spelling, warned about once and safe to delete (see <a href="removed.html">old spellings</a>).</td></tr>
+        <tr><td><code>___command_info/</code>, <code>___convo_info/</code></td><td>Written by the framework: the trained intent model and its caches, and the conversation stores (the learning store <code>intent_learning.sqlite3</code> among them). Do not edit them.</td></tr>
+      </tbody>
+    </table>
+    <figure>
+      <figcaption>fastworkflow/examples/library/_commands/_shared/wording.py</figcaption>
+      <pre><code>from fastworkflow.planning import count
+
+def copies(number):
+    """How many copies the library owns, in words: "1 copy", "3 copies"."""
+    return count(number, "copy", "copies")</code></pre>
+    </figure>
+    <figure>
+      <figcaption>fastworkflow/examples/library/_commands/Library/author_books.py (one line)</figcaption>
+      <pre><code>from .._shared.wording import copies   <span class="c"># a relative import: up from the Library folder, into _shared</span></code></pre>
+    </figure>
+<!-- IDIOM BODY END -->
+  </section>
+
+  <nav class="pager" aria-label="Previous and next">
+    <a class="prev" href="r-shapes.html"><span>Previous</span>Plain Python, read by the framework</a>
+    <a class="next" href="r-steps.html"><span>Next</span>Planning step helpers</a>
+  </nav>
+</main>
+<script src="nav.js"></script>
+<script src="idioms.js"></script>
+</body>
+</html>

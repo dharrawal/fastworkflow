@@ -3,7 +3,7 @@
 The turn page uses the chat's own link and side panel rather than a second
 renderer, and a step page shows the artifacts of exactly the dispatches that
 step made. Attribution is by ``command_call_id`` only: the id a
-``fw.agent.tool_call`` / ``fw.command.execute`` span carries, or the
+``fw.step`` / ``fw.command`` span carries, or the
 ``execution_records`` ref naming one of the step's spans. The seeded turn has a
 step attributed each way, a step whose command returned nothing, and an
 artifact-bearing output with no call id at all, which must appear on the turn
@@ -22,7 +22,8 @@ from pathlib import Path
 
 import pytest
 
-from fastworkflow import state_paths, tracing
+from fastworkflow.session import state_paths
+from fastworkflow.observability import tracing
 from fastworkflow.observability import store as obs
 from fastworkflow.run_chatbot import server as run_chatbot_server
 from tests import test_run_chatbot_server as chatbot_fixtures
@@ -130,41 +131,33 @@ def agent_turn_db(workflow_path) -> str:
     spans = [
         span("s-root", "fw.turn", None, 0, 100,
              attributes={"user_message": "add milk and export"}),
-        span("s-exec", "fw.agent.execute", "s-root", 1, 99,
-             attributes={"agent_input": "add milk, then export"}),
+        span("s-run", "fw.run", "s-root", 1, 99),
+        span("s-exec", "fw.run.part", "s-run", 1, 99,
+             attributes={"part": 1, "agent_input": "add milk, then export"}),
         # Step 1: attributed through the spans' own command_call_id.
-        span("s-step1", "fw.agent.step", "s-exec", 2, 20,
-             attributes={"tool_name": "execute_workflow_query"}),
-        span("s-tool1", "fw.agent.tool_call", "s-step1", 3, 19, kind="tool",
-             command_name="add_todo",
-             attributes={"raw_command": "add_todo milk",
-                         "command_call_id": CALL_TODO}),
-        span("s-exec1", "fw.command.execute", "s-tool1", 4, 18, kind="tool",
+        span("s-step1", "fw.step", "s-exec", 2, 20, command_name="add_todo",
+             attributes={"tool_name": "execute_workflow_query", "run_by": "agent",
+                         "raw_command": "add_todo milk", "command_call_id": CALL_TODO}),
+        span("s-exec1", "fw.command", "s-step1", 4, 18, kind="tool",
              command_name="add_todo",
              attributes={"raw_command": "add_todo milk",
                          "command_call_id": CALL_TODO}),
         # Step 2: a dispatch that returned no artifact.
-        span("s-step2", "fw.agent.step", "s-exec", 21, 40,
-             attributes={"tool_name": "execute_workflow_query"}),
-        span("s-tool2", "fw.agent.tool_call", "s-step2", 22, 39, kind="tool",
-             command_name="list_todos",
-             attributes={"command_call_id": CALL_LIST}),
-        span("s-exec2", "fw.command.execute", "s-tool2", 23, 38, kind="tool",
+        span("s-step2", "fw.step", "s-exec", 21, 40, command_name="list_todos",
+             attributes={"tool_name": "execute_workflow_query", "run_by": "agent",
+                         "command_call_id": CALL_LIST}),
+        span("s-exec2", "fw.command", "s-step2", 23, 38, kind="tool",
              command_name="list_todos",
              attributes={"command_call_id": CALL_LIST}),
         # Step 3: the spans carry no id; the record's execution_records ref
-        # names this step's execute span.
-        span("s-step3", "fw.agent.step", "s-exec", 41, 60,
-             attributes={"tool_name": "execute_workflow_query"}),
-        span("s-tool3", "fw.agent.tool_call", "s-step3", 42, 59, kind="tool",
-             command_name="export_todos", attributes={}),
-        span("s-exec3", "fw.command.execute", "s-tool3", 43, 58, kind="tool",
+        # names this step's command span.
+        span("s-step3", "fw.step", "s-exec", 41, 60, command_name="export_todos",
+             attributes={"tool_name": "execute_workflow_query", "run_by": "agent"}),
+        span("s-exec3", "fw.command", "s-step3", 43, 58, kind="tool",
              command_name="export_todos", attributes={}),
         # Step 4: nothing joins it to any output, so it claims none.
-        span("s-step4", "fw.agent.step", "s-exec", 61, 80,
-             attributes={"tool_name": "execute_workflow_query"}),
-        span("s-tool4", "fw.agent.tool_call", "s-step4", 62, 79, kind="tool",
-             command_name="summarize", attributes={}),
+        span("s-step4", "fw.step", "s-exec", 61, 80, command_name="summarize",
+             attributes={"tool_name": "execute_workflow_query", "run_by": "agent"}),
     ]
 
     with store._connect() as conn:

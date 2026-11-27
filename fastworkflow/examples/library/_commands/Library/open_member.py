@@ -11,13 +11,15 @@ class Signature:
     class Input(BaseModel):
         member_uid: str = Field(
             description="the uid of the member to open",
+            examples=["m1", "m2", "m3"],
             json_schema_extra={"from_command_output": "find_member.member_uids"},
             pattern=r"^m[0-9]+$",
         )
 
     class Output(BaseModel):
-        member_uid: str = Field(description="the uid of the member now open")
-        name: str = Field(description="the member's name")
+        member_uid: str = Field(description="the uid of the member now open, such as m1",
+                                examples=["m1", "m2"])
+        name: str = Field(description="the member's name", examples=["Raj Patel", "Ann Lee"])
         on_loan: int = Field(description="how many books the member has on loan")
 
     plain_utterances = [

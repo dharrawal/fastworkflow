@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow.command_directory import CommandDirectory, get_cached_command_directory
+from fastworkflow.core.command_directory import CommandDirectory, get_cached_command_directory
 
 HELLO_WORLD = Path(fastworkflow.__file__).parent / "examples" / "hello_world"
 

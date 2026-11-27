@@ -33,7 +33,7 @@ import sys
 from collections import Counter
 from typing import Any, Iterable, Optional, Sequence
 
-from fastworkflow.nlu_labels import PARAMETER_VALUE_LABEL, WILDCARD_LABEL, is_non_routable, label_of
+from fastworkflow.intent.nlu_labels import PARAMETER_VALUE_LABEL, WILDCARD_LABEL, is_non_routable, label_of
 from fastworkflow.train.score_not_here import Z_95, mcnemar_exact, wilson_interval
 
 SCHEMA_VERSION = 1
@@ -722,11 +722,11 @@ def load_models(workflow_folderpath: str) -> dict[str, Any]:
     # (Phase 9 step 5: parents come from the live chain). It is read here only to measure the
     # recorded positions of a workflow's artifacts, which is a measurement of recorded inputs.
     hierarchy_path = os.path.join(workflow_folderpath, "context_hierarchy_model.json")
-    inheritance_path = os.path.join(workflow_folderpath, "_commands", "context_inheritance_model.json")
     snapshot_path = os.path.join(workflow_folderpath, "___command_info", SNAPSHOT_FILENAME)
     hierarchy = _load_json(hierarchy_path) if os.path.isfile(hierarchy_path) else {}
-    raw_inheritance = _load_json(inheritance_path) if os.path.isfile(inheritance_path) else {}
-    inheritance = {name: list((definition or {}).get("base") or []) for name, definition in raw_inheritance.items()}
+    from fastworkflow.core.command_context_model import CommandContextModel
+
+    inheritance = CommandContextModel.declared_bases(workflow_folderpath)   # each context's declared inherits
     if not os.path.isfile(snapshot_path):
         raise SystemExit(f"{snapshot_path} does not exist; the trainer writes it, train the copy first")
     snapshot = _load_json(snapshot_path)
@@ -766,7 +766,7 @@ class MissingHeadsError(ValueError):
 
 def discover_heads(version_folder: str) -> dict[str, str]:
     """Head name -> folder for every trained head in one version folder. ``global`` is ``*``."""
-    from fastworkflow.model_pipeline_training import GLOBAL_CONTEXT_FOLDER
+    from fastworkflow.intent.router import GLOBAL_CONTEXT_FOLDER
 
     heads: dict[str, str] = {}
     for folder in sorted(os.scandir(version_folder), key=lambda entry: entry.name):
@@ -818,7 +818,7 @@ def probe_rows(router: Any, utterances: Sequence[str]) -> list[dict]:
     Uses the same batch call and the same tier threshold as ``predict_with_details``. The labels
     are the top-3 (or top-2 with two classes), as ``predict_single_sentence`` ranks them.
     """
-    from fastworkflow.model_pipeline_training import get_label_encoder
+    from fastworkflow.intent.router import get_label_encoder
 
     encoder = get_label_encoder(router.label_encoder_path)
     n_classes = len(encoder.classes_)
@@ -847,7 +847,7 @@ def probe_workflow(workflow_folderpath: str, utterances: Sequence[str], verify_s
     Fails loudly (SystemExit) when no head is found, or when a head the layout's walks need is
     missing. With *layout* None the needed heads are the union of both layouts.
     """
-    from fastworkflow.model_pipeline_training import CommandRouter
+    from fastworkflow.intent.router import CommandRouter
     from fastworkflow.train import artifact_versioning
     from fastworkflow.train.score_not_here import training_rows_per_head
 

@@ -9,10 +9,6 @@ class Context:
     state_version = 1
 
     @classmethod
-    def get_parent(cls, record: User) -> None:
-        return None
-
-    @classmethod
     def get_state(cls, record: User) -> dict[str, Any]:
         """Snapshot the user so a session holding it can be evicted.
 

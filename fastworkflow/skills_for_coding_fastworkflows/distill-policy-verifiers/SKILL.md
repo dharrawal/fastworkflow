@@ -25,26 +25,29 @@ over the conversation, so every decision names the rule and table version that p
 Where a rule needs to know what the user asked for, a model reads the user's words into the
 workflow's own operation names. The rule still decides.
 
-The engine is generic (`fastworkflow.policy_decision`, `policy_runtime`, `policy_intent`).
-The rules are workflow content. A complete worked example is in
+The engine is generic; a table imports only `fastworkflow.policy.policy_decision`. The rules are
+workflow content. A complete worked example is in
 `fastworkflow/examples/retail_workflow/_policy/`; read it first.
 
 ## The loop
 
 ### 1. Record trials
 
-- Run the workflow's benchmark as an experiment with observability on, several trials per
-  task, and the provider response cache off (`FW_LM_CACHE=0`; otherwise repeated trials are
-  identical).
-- Every attempt needs a graded outcome (`outcome` pass/fail, or a `reward`): distillation
-  pairs failing trials with passing ones.
+- Run the workflow's benchmark as an experiment, several trials per task:
+  `fastworkflow.experiment.ExperimentHarness(workflow, ...).run(tasks, attempts=N, grader=...)`.
+  The harness turns the model response cache off (`FW_LM_CACHE=0`); otherwise repeated
+  trials are identical.
+- Every attempt needs a graded outcome (`outcome` pass/fail, or a `reward`) from the
+  grader: self and pool distillation pair failing trials with passing ones.
 - Start every run under a new experiment id. A resumed id mixes trials from different code.
 
 **Set hold-out tasks aside now.** Before the first distillation, draw a random share of the
 tasks (say a fifth, with a recorded seed) and write the list to `<workflow>/_policy/holdout.txt`.
-Hold-out tasks are recorded and graded like the rest, but:
+Nothing reads that file; it is your record. Hold-out tasks are recorded and graded like the
+rest, but:
 
-- they never appear in a distillation pair;
+- they never appear in a distillation pair: `fastworkflow distill` without `--task` takes
+  every task, so always pass the tasks to distil with `--task`;
 - they are never used to shape a rule: not its predicate, not its rewrite text, not the
   wording of `FACTS.intent_operations`;
 - they are where a rule is checked: the replay audit (step 6) and the control comparison
@@ -65,8 +68,10 @@ Pick the mode by where passing trials exist:
 | `... --self RUN` | each failing trial with the first passing trial of the same task, same run | the model sometimes passes |
 | `... --pool-students R1 R2 --pool-teachers T1` | each failing student trial with a passing student trial, else a passing teacher trial | mixed; the default for a real round |
 
-Add `--provenance FILE` (pair -> insights -> reference source) and, for pools,
-`--max-pairs-per-task N`. Later pairs of a task mostly repeat earlier insights.
+Add `--provenance FILE` (pair -> insights -> reference source) and, for `--self` and pools,
+`--max-pairs-per-task N`: later pairs of a task mostly repeat earlier insights. With
+`--teacher`/`--student`, pairs are taken whatever their outcomes. The judge is
+`LLM_DISTILLATION` (key `LITELLM_API_KEY_DISTILLATION`).
 
 **Distil a random subset, not every failing task.** When many tasks fail, a full pass costs a
 judge call per pair (there is no dry run), and most pairs repeat what earlier ones found.
@@ -90,7 +95,8 @@ build on each other.
 
 Where the output goes:
 
-- Insights are appended to `<workflow>/Insights/<workflow>/`.
+- Insights are appended to `<workflow>/Insights/<workflow folder name>/`
+  (`execution_agent_anti_patterns.md`, `planning_agent_insights.md`).
 - The judge's notes are written as annotations on the failing trials. They are visible in
   the debug UI (`fastworkflow run_chatbot`).
 - Snapshot the insight files into `<workflow>/_policy/corpus/` (one folder per round) before
@@ -134,8 +140,8 @@ Not `table.py` yet: that name is the live table, enforced as soon as it exists (
 
 For each row, add a test built from the recorded failing trial: the row fires at the step
 where the trial went wrong. Add one built from a passing trial: the row stays silent. Tests
-are plain Python over `CommandRecord` lists; see the example's
-`tests/test_retail_policy_example.py`.
+are plain Python over `CommandRecord` lists; see [table-authoring.md](table-authoring.md)
+and, in the fastworkflow repository, `tests/test_retail_policy_example.py`.
 
 ### 6. Audit it on whole recorded runs
 
@@ -148,32 +154,36 @@ bounds, over every recorded step.
 
 - **Required:** zero replayed blocks on passing attempts. Every block on a failing attempt
   must point at a real mistake. Read each one.
-- Report hold-out tasks separately. Blocks on hold-out passes are the false alarms that matter
-  most, because nothing in the table was fitted to those tasks.
+- Report hold-out tasks separately (`--task`, repeatable, limits the replay). Blocks on
+  hold-out passes are the false alarms that matter most, because nothing in the table was
+  fitted to those tasks.
 - **`--live`:** re-reads intent and judges questions with the policy model. Without it, a
   rule that needs intent sees only what the run recorded.
 - **Marks:** `LIFTED` is a block the recording made that the new table would not.
-  `ADDED` is a new block.
+  `ADDED` is a new block. `CHANGED` is a block by a different rule.
 
 ### 7. Turn it on
 
 Rename the audited candidate to `<workflow>/_policy/table.py`. There is no setting: a
 workflow with that file enforces it, and one without it is the unchanged agent. A table
-file that is malformed fails at startup, so rules are never skipped silently.
+file that does not load raises an error when the agent is built (its first agent turn), so
+rules are never skipped silently.
 
 The only optional setting is the model for the readings: `LLM_POLICY_INTENT` (with
 `LITELLM_API_KEY_POLICY_INTENT`), else `LLM_AGENT`.
 
 The guard checks only steps the model chose:
 
-- a command the user typed is not checked, and neither is a command a skill's code runs;
+- a command the user typed is not checked, and neither is a step a planning command's code
+  runs;
 - assistant mode and MCP direct actions are not checked.
 
 ### 8. Evaluate against a control
 
 - Run the same held-out tasks, same models and same trial count in two arms: the workflow
-  without `_policy/table.py` (control) and with it. Use two copies of the workflow folder
-  rather than adding and removing the file between runs. Compare pass rates.
+  without `_policy/table.py` (control) and with it, each its own experiment (the harness's
+  `arm=` names it). Use two copies of the workflow folder rather than adding and removing the
+  file between runs. Compare pass rates.
 - Read every fire in the debug UI: a step a rule rewrote shows a **Policy** section with the
   rule, table version and what the intent reader saw. Count right fires and wrong fires.
 - Report the table version and the arms. A verifier is a disclosed change to the agent, not
@@ -192,12 +202,15 @@ as the new ones.
   `policy replay` output, write a failing test from it, fix the predicate. Do not raise the
   valve.
 - **The agent loops on a block.** The rewrite asks for something the agent cannot do, or the
-  rule cannot be satisfied in this situation. The engine lets a step through after two blocks
-  by the same rule, and pushes a final answer back at most three times per turn (only after
-  progress). Treat hitting either bound as a defect in the rule.
+  rule cannot be satisfied in this situation. The engine lets a step through after the same
+  rule blocked it twice in the conversation, and pushes a final answer back at most three
+  times per turn, each only after a new successful write or user reply. Treat hitting either
+  bound as a defect in the rule.
 - **A command's failure counted as success.** The tool reports errors as text. Set
   `FACTS.failure_pattern`.
 - **Intent rules are silent.** Check that `FACTS.intent_operations` is set and that its
-  descriptions separate look-alike operations. A trace step shows `policy_requests`.
-- **A slow turn.** Each user message costs one intent reading (25 s limit, fails open).
-  Question judging is off unless `FACTS.judge_questions` is set.
+  descriptions separate look-alike operations. A rewritten step's Policy section shows what
+  the intent reader saw. Without `--live`, a replay sees only the intent the run recorded.
+- **A slow turn.** With `FACTS.intent_operations` set, each user message (a reply to the
+  agent's question included) costs one intent reading (25 s limit, no retry, fails open).
+  Question judging (one call per question) is off unless `FACTS.judge_questions` is set.

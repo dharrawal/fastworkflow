@@ -1,6 +1,6 @@
 import os
 import fastworkflow
-from fastworkflow.workflow import Workflow
+from fastworkflow.core.workflow import Workflow
 
 
 def test_context_helpers_todo_list(tmp_path):

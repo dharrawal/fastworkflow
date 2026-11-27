@@ -1,280 +1,103 @@
-import os
-import json
-import tempfile
-import pytest
+"""``fastworkflow build`` derives each context's ``inherits`` and never writes context_inheritance_model.json
+(bd fix-qjne.37.1).
+
+These tests replaced the ones of the retired ``InheritanceBlockRegenerator``, which merged the derived bases into the
+JSON file: each keeps its intent (bases derived from the classes, a hand-written declaration survives, a second run
+changes nothing, the result is said) against the declarations on ``class Context``.
+"""
 from pathlib import Path
 
-from fastworkflow.build.inheritance_block_regenerator import InheritanceBlockRegenerator
+import pytest
+
 from fastworkflow.build.class_analysis_structures import ClassInfo
-
-
-def create_test_context_model(path, model_data):
-    """Helper to create a test context model file."""
-    # Ensure parent directory exists
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, 'w') as f:
-        json.dump(model_data, f, indent=2)
-
-
-@pytest.fixture
-def temp_dir():
-    """Create a temporary directory for testing."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        yield Path(tmpdir)
-
-
-@pytest.fixture
-def commands_dir(temp_dir):
-    """Create a commands directory for testing."""
-    commands_dir = temp_dir / "_commands"
-    commands_dir.mkdir(exist_ok=True)
-    return commands_dir
-
-
-@pytest.fixture
-def context_dirs(commands_dir):
-    """Create context directories for testing."""
-    (commands_dir / "TodoList").mkdir(exist_ok=True)
-    (commands_dir / "TodoItem").mkdir(exist_ok=True)
-    (commands_dir / "User").mkdir(exist_ok=True)
-    return commands_dir
-
-
-@pytest.fixture
-def existing_model():
-    """Create a temporary context model file with existing entries."""
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        commands_dir = Path(tmp_dir) / "_commands"
-        commands_dir.mkdir(exist_ok=True)
-        
-        # Create a model file with the new flat structure
-        model_data = {
-            "OldClass": {"base": []},
-            "AnotherOldClass": {"base": ["OldClass"]}
-        }
-        
-        model_path = commands_dir / "context_inheritance_model.json"
-        with open(model_path, "w") as f:
-            json.dump(model_data, f, indent=2)
-        
-        yield model_path
+from fastworkflow.build.context_model_generator import (
+    declare_inherits, derive_inherits, existing_context_files, generate_context_model)
+from fastworkflow.core.command_context_model import REMOVED_INHERITANCE_FILE
 
 
 @pytest.fixture
 def mock_classes():
-    """Create mock class information for testing."""
-    # Create TodoList class
-    todo_list = ClassInfo(
-        name="TodoList",
-        module_path="app/models/todo_list.py",
-        bases=["BaseModel"]
-    )
-    classes = {"TodoList": todo_list}
-    # Create TodoItem class
-    todo_item = ClassInfo(
-        name="TodoItem",
-        module_path="app/models/todo_item.py",
-        bases=["BaseModel"]
-    )
-    classes["TodoItem"] = todo_item
-
-    # Create User class with inheritance
-    user = ClassInfo(
-        name="User",
-        module_path="app/models/user.py",
-        bases=["BaseModel", "TodoList"]
-    )
-    classes["User"] = user
-
-    # Create BaseModel class
-    base_model = ClassInfo(
-        name="BaseModel",
-        module_path="app/models/base.py",
-        bases=[]
-    )
-    classes["BaseModel"] = base_model
-
-    return classes
-
-
-def test_scan_contexts(context_dirs):
-    """Test scanning contexts from directory structure."""
-    regenerator = InheritanceBlockRegenerator(commands_root=context_dirs)
-    contexts = regenerator.scan_contexts()
-    
-    assert len(contexts) == 3
-    assert "TodoList" in contexts
-    assert "TodoItem" in contexts
-    assert "User" in contexts
-
-
-def test_load_existing_model(existing_model):
-    """Test loading an existing context model."""
-    regenerator = InheritanceBlockRegenerator(
-        commands_root=existing_model.parent,
-        model_path=existing_model
-    )
-    
-    model = regenerator.load_existing_model()
-    
-    # Check that the model was loaded correctly
-    assert "OldClass" in model
-    assert "AnotherOldClass" in model
-    assert model["AnotherOldClass"]["base"] == ["OldClass"]
-
-
-def test_load_missing_model():
-    """Test loading a non-existent context model."""
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        model_path = Path(tmp_dir) / "nonexistent.json"
-        regenerator = InheritanceBlockRegenerator(
-            commands_root=Path(tmp_dir),
-            model_path=model_path
-        )
-        
-        model = regenerator.load_existing_model()
-        
-        # Should return an empty dict
-        assert model == {}
-
-
-def test_load_invalid_model():
-    """Test loading an invalid context model."""
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        model_path = Path(tmp_dir) / "invalid.json"
-        with open(model_path, "w") as f:
-            f.write("invalid json")
-        
-        regenerator = InheritanceBlockRegenerator(
-            commands_root=Path(tmp_dir),
-            model_path=model_path
-        )
-        
-        model = regenerator.load_existing_model()
-        
-        # Should return an empty dict
-        assert model == {}
-
-
-def test_regenerate_inheritance_with_directory_scan(context_dirs):
-    """Test regenerating inheritance block by scanning directories."""
-    regenerator = InheritanceBlockRegenerator(
-        commands_root=context_dirs,
-        model_path=context_dirs / "context_inheritance_model.json"
-    )
-    
-    model = regenerator.regenerate_inheritance()
-    
-    # Check that the model includes entries for each context directory
-    assert "TodoList" in model
-    assert "TodoItem" in model
-    assert "User" in model
-    
-    # Each entry should have a base field
-    assert "base" in model["TodoList"]
-    assert "base" in model["TodoItem"]
-    assert "base" in model["User"]
-
-
-def test_regenerate_inheritance_with_classes():
-    """Test regenerating inheritance block with class information."""
-    # Create some class info objects
-    base_model = ClassInfo("BaseModel", "base.py")
-    todo_item = ClassInfo("TodoItem", "todo_item.py", bases=["BaseModel"])
-    todo_list = ClassInfo("TodoList", "todo_list.py", bases=["BaseModel"])
-    
-    classes = {
-        "BaseModel": base_model,
-        "TodoItem": todo_item,
-        "TodoList": todo_list
+    return {
+        "TodoList": ClassInfo(name="TodoList", module_path="app/models/todo_list.py", bases=["BaseModel"]),
+        "TodoItem": ClassInfo(name="TodoItem", module_path="app/models/todo_item.py", bases=["BaseModel"]),
+        "User": ClassInfo(name="User", module_path="app/models/user.py", bases=["BaseModel", "TodoList", "object"]),
+        "BaseModel": ClassInfo(name="BaseModel", module_path="app/models/base.py", bases=[]),
     }
-    
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        commands_dir = Path(tmp_dir) / "_commands"
-        commands_dir.mkdir(exist_ok=True)
-        
-        regenerator = InheritanceBlockRegenerator(
-            commands_root=commands_dir,
-            model_path=commands_dir / "context_inheritance_model.json"
-        )
-        
-        model = regenerator.regenerate_inheritance(classes)
-        
-        # Check that the model includes entries for each class
-        assert "BaseModel" in model
-        assert "TodoItem" in model
-        assert "TodoList" in model
-        
-        # Check inheritance relationships
-        assert model["BaseModel"]["base"] == []
-        assert model["TodoItem"]["base"] == ["BaseModel"]
-        assert model["TodoList"]["base"] == ["BaseModel"]
 
 
-def test_write_model(context_dirs):
-    """Test writing the model to a file."""
-    model_path = context_dirs / "context_inheritance_model.json"
-    regenerator = InheritanceBlockRegenerator(
-        commands_root=context_dirs,
-        model_path=model_path
-    )
-    
-    # Create a model to write
-    model = {
-        "TodoList": {"base": []},
-        "TodoItem": {"base": ["BaseItem"]},
-        "User": {"base": []}
-    }
-    
-    # Write the model
-    regenerator.write_model(model)
-    
-    # Check that the file was written
-    assert model_path.exists()
-    
-    # Check that the file contains the expected content
-    with open(model_path, "r") as f:
-        written_model = json.load(f)
-    
-    assert written_model == model
+def _workflow(tmp_path, folders=("Book", "Member", "Record")) -> Path:
+    for folder in folders:
+        (tmp_path / "_commands" / folder).mkdir(parents=True, exist_ok=True)
+    return tmp_path
 
 
-def test_preserve_existing_entries(existing_model, context_dirs):
-    """Test that existing entries are preserved during regeneration."""
-    regenerator = InheritanceBlockRegenerator(
-        commands_root=context_dirs,
-        model_path=existing_model
-    )
-    
-    model = regenerator.regenerate_inheritance()
-    
-    # Check that old entries are preserved
-    assert "OldClass" in model
-    assert "AnotherOldClass" in model
-    assert model["AnotherOldClass"]["base"] == ["OldClass"]
-    
-    # Check that new entries were added
-    assert "TodoList" in model
-    assert "TodoItem" in model
-    assert "User" in model
+def test_bases_are_derived_from_the_analysed_classes_only(mock_classes):
+    """A base that is not an analysed class (``object``) is no context."""
+    assert derive_inherits(mock_classes) == {"BaseModel": [], "TodoItem": ["BaseModel"],
+                                             "TodoList": ["BaseModel"], "User": ["BaseModel", "TodoList"]}
 
 
-def test_idempotence(existing_model, context_dirs):
-    """Test that running the regenerator multiple times produces the same result."""
-    regenerator = InheritanceBlockRegenerator(
-        commands_root=context_dirs,
-        model_path=existing_model
-    )
-    
-    # Run the regenerator twice
-    first_result = regenerator.regenerate_inheritance()
-    second_result = regenerator.regenerate_inheritance()
-    
-    # Check that the results are the same
-    assert first_result == second_result
-    
-    # Check that the file contents are the same
-    with open(existing_model, 'r') as f:
-        file_content = json.load(f)
-    
-    assert file_content == second_result 
+def test_a_new_context_file_gets_the_derived_line_and_no_json_is_written(tmp_path, capsys, mock_classes):
+    folder = _workflow(tmp_path, folders=mock_classes)
+    model = generate_context_model(mock_classes, str(folder))
+    assert model["User"] == {"base": ["BaseModel", "TodoList"]} and model["BaseModel"] == {"base": []}
+    assert (folder / "_commands/User/_User.py").read_text() == (
+        'class Context:\n    inherits = ["BaseModel", "TodoList"]\n')
+    assert not (folder / "_commands/BaseModel/_BaseModel.py").exists()   # nothing to declare
+    assert not list(folder.rglob("*.json"))
+    out = capsys.readouterr().out
+    assert ('User: inherits = ["BaseModel", "TodoList"]  (_commands/User/_User.py: written, a new file)' in out)
+    assert "BaseModel: no inherits" in out
+
+
+def test_a_hand_written_declaration_is_never_edited_and_the_difference_is_said(tmp_path, capsys):
+    """Book's Python class has no Record base, but the author declared one: build keeps the file byte for byte and
+    prints the line it derives beside what the file declares."""
+    folder = _workflow(tmp_path)
+    book = folder / "_commands/Book/_Book.py"
+    book.write_bytes(b'"""Book."""\nclass Context:\n    inherits = ["Record"]   # by hand\n')
+    before = book.read_bytes()
+    classes = {"Book": ClassInfo("Book", "book.py", bases=["Item"]), "Item": ClassInfo("Item", "item.py")}
+    report = declare_inherits(folder, derive_inherits(classes))
+    assert book.read_bytes() == before
+    assert report.differs() == {"Book": (["Item"], ["Record"])}
+    assert ('Book: inherits = ["Item"]  (_commands/Book/_Book.py declares inherits = ["Record"]: differs, '
+            'not changed)') in report.lines()
+
+
+def test_a_hand_written_file_with_no_declaration_is_not_edited_either(tmp_path):
+    folder = _workflow(tmp_path)
+    member = folder / "_commands/Member/_Member.py"
+    member.write_text("class Context:\n    @classmethod\n    def get_parent(cls, record):\n        return None\n")
+    before = member.read_bytes()
+    report = declare_inherits(folder, {"Member": ["Record"], "Record": []})
+    assert member.read_bytes() == before
+    assert report.differs() == {"Member": (["Record"], None)}
+    assert report.needs_parents == {"Member": "not annotated"}
+    assert any(line.startswith("Member: has get_parent, write parents = [...]") for line in report.lines())
+
+
+def test_with_no_classes_nothing_is_declared(tmp_path):
+    folder = _workflow(tmp_path)
+    report = declare_inherits(folder, derive_inherits({}))
+    assert report.lines() == [] and not list((folder / "_commands").rglob("_*.py"))
+
+
+def test_a_second_build_changes_nothing(tmp_path, mock_classes):
+    """The file the first build created is hand-written for the second: it is read, not rewritten."""
+    folder = _workflow(tmp_path, folders=mock_classes)
+    generate_context_model(mock_classes, str(folder))
+    files = {path: path.read_bytes() for path in existing_context_files(folder)}
+    report = declare_inherits(folder, derive_inherits(mock_classes))
+    assert report.written == [] and report.differs() == {}
+    assert {path: path.read_bytes() for path in existing_context_files(folder)} == files
+    assert 'User: inherits = ["BaseModel", "TodoList"]  (_commands/User/_User.py: declared)' in report.lines()
+
+
+def test_a_leftover_inheritance_file_is_named_not_read_or_deleted(tmp_path):
+    folder = _workflow(tmp_path)
+    leftover = folder / "_commands" / REMOVED_INHERITANCE_FILE
+    leftover.write_text('{"Book": {"base": ["Record"]}}')
+    report = declare_inherits(folder, {"Book": [], "Record": []})
+    assert leftover.read_text() == '{"Book": {"base": ["Record"]}}'
+    assert report.lines()[-1].startswith(f"_commands/{REMOVED_INHERITANCE_FILE} is removed and not read")

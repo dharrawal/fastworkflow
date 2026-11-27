@@ -43,9 +43,10 @@ import json
 import logging
 import os
 import queue
+import threading
 import time
 import traceback
-from typing import Any
+from typing import Any, Optional
 from contextlib import asynccontextmanager
 import argparse
 
@@ -54,17 +55,22 @@ from jwt.exceptions import PyJWTError as JWTError
 from dotenv import dotenv_values
 
 import fastworkflow
-from fastworkflow import approval_binding, state_paths
+from fastworkflow.review import approval_binding
+from fastworkflow.session import state_paths
 from fastworkflow.experiment.readiness import runtime_readiness_snapshot
 from fastworkflow.utils.logging import logger
+from fastworkflow.engine.workflow_execution_context import UsePlanError
 
 from fastapi import FastAPI, HTTPException, status, Depends, Header, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from .mcp_specific import setup_mcp
+from .mcp_specific import setup_mcp, start_mcp_transport, stop_mcp_transport
 from .utils import (
+    EndSessionRequest,
+    EndSessionResponse,
+    SessionEndRefused,
     CHECKPOINT_REAP_INTERVAL_SECONDS,
     SHUTDOWN_DRAIN_SECONDS,
     ChannelSessionManager,
@@ -81,8 +87,11 @@ from .utils import (
     TokenResponse,
     InitializeResponse,
     SessionData,
+    AgentInvokeRequest,
     InvokeRequest,
     apply_dspy_cache_choice,
+    with_cache_notice,
+    DSPY_CACHE_HEADER,
     PerformActionRequest,
     PostFeedbackRequest,
     observability_feedback,
@@ -93,6 +102,12 @@ from .utils import (
     get_session_from_jwt,
     ensure_user_runtime_exists,
     refuse_registered_token_reissue,
+    approval_surface_for,
+    turn_approval_kwargs,
+    set_chat_approval_surface,
+    set_allow_request_cache_toggle,
+    CHAT_APPROVAL_SURFACES,
+    DEFAULT_CHAT_APPROVAL_SURFACE,
 )
 from .turns import (
     TurnRegistry,
@@ -107,10 +122,12 @@ from .turns import (
     encode_stream_frame,
     run_owned_turn,
     submit_turn,
+    note_stream_frame,
     render_turn_response,
     resolve_logical_turn_key,
     compute_idempotency_key,
 )
+from . import checkpoint
 from . import server_memory
 from . import jwt_manager
 from .parent_watch import start_parent_liveness_watch
@@ -122,18 +139,20 @@ from .jwt_manager import (
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES
 )
 
-from fastworkflow.conversation_history_io import (
+from fastworkflow.session.conversation_history_io import (
     extract_turns_from_history,
     restore_history_from_turns,
 )
-from fastworkflow.conversation_labeling import (
+from fastworkflow.session.conversation_labeling import (
     generate_topic_and_summary,
     resolve_topic_generation_timeout,
     topic_generation_timeout_seconds,
     TOPIC_GENERATION_MAX_RETRIES,
     TOPIC_GENERATION_TIMEOUT_ENV_VAR,
 )
-from fastworkflow.mcp_server import command_schema_listing
+from fastworkflow.run_chatbot import composer
+from . import compose_trace
+from fastworkflow.run_fastapi_mcp.mcp_server import command_schema_listing
 from fastworkflow.observability.store import ObservabilityStore
 from fastworkflow.observability.store import get_observability_sink, writer_incarnation_id
 from fastworkflow.experiment.runner import experiment_store_readiness
@@ -256,6 +275,8 @@ turn_registry = TurnRegistry()
 # Wire eviction to skip channels with a live turn (§3.6): never close a live
 # turn's ctx mid-mutation.
 session_manager.is_channel_busy = turn_registry.has_active
+# end_session forgets the channel's turn pointer (stored turns stay).
+session_manager.release_channel_turns = turn_registry.release_channel
 
 
 # ============================================================================
@@ -357,8 +378,7 @@ def _log_memory_bounds() -> None:
 
     logger.info(
         "memory bounds active: "
-        f"max_live_sessions={session_manager.max_live_sessions} "
-        f"(source={session_manager.max_live_sessions_source}), "
+        f"{session_manager.limits_summary()}, "
         f"max_retained_startup_turns={MAX_RETAINED_STARTUP_TURNS} "
         "(~17 MB at 450 KB payload), "
         f"turn_retention_seconds={TURN_RETENTION_SECONDS:.0f}, "
@@ -393,6 +413,28 @@ def _conversation_turns_for_summary(runtime) -> list[dict[str, Any]]:
 # FastAPI App Setup
 # ============================================================================
 
+def warm_first_turn(workflow_path: str) -> None:
+    """Load what the first turn would otherwise load inside the user's wait: the trained intent heads (two
+    checkpoints and tokenizers per context, plus the torch/transformers imports) and the planning commands.
+    The server runs it on a background thread after readiness, so readiness does not wait for it; a turn that
+    arrives first waits on the same load (``CommandRouter`` serialises construction). The caches are keyed by the
+    resolved folder path, which is the ``Workflow``'s ``folderpath`` the turn path passes. Never raises."""
+    try:
+        from pathlib import Path
+
+        resolved = str(Path(workflow_path).resolve())
+        started = time.time()
+        from fastworkflow.intent.router import warm_intent_heads
+
+        warmed = warm_intent_heads(resolved)
+        from fastworkflow.agent.workflow_agent import warm_planning_commands
+
+        warm_planning_commands(resolved)
+        logger.info(f"first-turn warm-up done in {time.time() - started:.1f}s: intent heads {warmed}")
+    except Exception as error:  # noqa: BLE001 - warm-up must not stop the server
+        logger.warning(f"first-turn warm-up failed: {type(error).__name__}: {error}")
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Startup and shutdown hooks"""
@@ -405,11 +447,54 @@ async def lifespan(_app: FastAPI):
             env_vars.update(dotenv_values(ARGS.passwords_file_path))
         fastworkflow.init(env_vars=env_vars)
 
-        # Command files that do not load are skipped by the server; log each one at startup.
-        from fastworkflow.command_preview import load_problems
+        # A command that does not load is skipped by the server: log each one at startup. A workflow-wide problem (a
+        # shared file such as startup_action.json or _workflow.py, or neither the agent model nor Jev set:
+        # fastworkflow.core.no_agent_mode) stops it, naming the file.
+        from fastworkflow.planning.command_preview import load_problems
 
-        for problem in load_problems(ARGS.workflow_path):
-            logger.error(f"command file does not load, so the server does not serve it: {problem}")
+        from fastworkflow.core import no_agent_mode
+
+        problems = load_problems(ARGS.workflow_path, runtime=True)
+        for problem in problems:
+            if not problem.workflow_wide:
+                logger.error(f"command file does not load, so the server does not serve it: {problem}")
+        if startup_problems := [problem for problem in problems if problem.workflow_wide]:
+            for problem in startup_problems:
+                logger.critical(f"startup problem: {problem}")
+            raise RuntimeError(f"startup problem: {'; '.join(startup_problems)}")
+
+        # The detection chain is named once in the log (intent_detector.startup_report), with the contexts
+        # that have no trained local model and run on the model matcher. A workflow that may not start that
+        # way is reported here and refused where it always was, when its session starts.
+        from fastworkflow.intent import intent_detector
+
+        engine_problems, engine_notices = intent_detector.startup_report(ARGS.workflow_path, build=True)
+        for notice in engine_notices:
+            # The chain line. A warning only when it names a context with no trained local model.
+            (logger.warning if "no trained local model" in notice else logger.info)(notice)
+        for problem in engine_problems:
+            logger.error(f"startup problem: {problem}")
+
+        # Advisory: contexts with no get_state hook pin the sessions that hold them (read from the context
+        # model, nothing instantiated). Not an error and no behaviour change.
+        if (pin_line := checkpoint.startup_pinning_warning(ARGS.workflow_path)) is not None:
+            logger.warning(f"{pin_line}")
+
+        # A startup file that is not valid stops the server here, not at the first session.
+        startup_action = fastworkflow.resolve_startup_action(
+            ARGS.workflow_path, ARGS.startup_command, ARGS.startup_action)
+        if startup_action is None and not ARGS.startup_command:
+            # A command with no Signature runs only as the startup action. Said here, not refused: a session may pass
+            # its own startup action when it is created; one that does not stands on no record.
+            from fastworkflow.planning.command_preview import missing_startup_action_problem
+
+            if (problem := missing_startup_action_problem(ARGS.workflow_path)) is not None:
+                logger.error(f"startup problem: {problem}; a session that passes no startup_action starts on "
+                             "no record")
+
+        # The mode is named once at startup (no agent model: fastworkflow.core.no_agent_mode).
+        if (mode_line := no_agent_mode.startup_line()) is not None:
+            logger.info(mode_line)
 
         # A FastAPI process serves exactly one workflow. Pin it on the manager
         # now, before any lazily-built store reads it, so conversation, session
@@ -418,12 +503,15 @@ async def lifespan(_app: FastAPI):
 
         # Configure JWT verification mode based on CLI parameter
         set_jwt_verification_mode(ARGS.expect_encrypted_jwt)
+        set_chat_approval_surface(ARGS.chat_approval_surface)
+        set_allow_request_cache_toggle(ARGS.allow_request_cache_toggle)
         
         # Resolved here, after init() has loaded the workflow env files, and
         # validated before readiness — a cap that is going to reject traffic
         # should reject startup instead.
         resolved, source = session_manager.configure_max_live_sessions()
         logger.info(f"max_live_sessions={resolved} (source={source})")
+        logger.info(f"session limits: {session_manager.limits_summary()}")
 
         # Same reasoning for the topic/summary deadline: resolved once here so a
         # malformed value rejects startup instead of failing every rotate at
@@ -539,6 +627,18 @@ async def lifespan(_app: FastAPI):
                     f"Checkpoint reap pass failed ({type(exc).__name__}: {exc})"
                 )
 
+            # Idle pinned sessions are released only under pressure (live above the soft target); below it
+            # nothing is ever expired. Its own try, like the passes around it.
+            try:
+                expired = await session_manager.expire_idle_under_pressure()
+                if expired:
+                    logger.info(f"Expired {expired} idle pinned session(s) (live count was above the soft target)")
+                await loop.run_in_executor(None, session_manager.notice_store.reap)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(f"Idle-session expiry pass failed ({type(exc).__name__}: {exc})")
+
             # Separate try: a failure reclaiming one namespace must not stop the
             # other, or one persistent fault silently disables all retention.
             try:
@@ -586,6 +686,7 @@ async def lifespan(_app: FastAPI):
                 runtime.execution_context.close()
 
     reaper: asyncio.Task | None = None
+    mcp_started = False
     try:
         initialize_fastworkflow_on_startup()
         # Log startup info AFTER init() so log level from env file is respected
@@ -601,9 +702,16 @@ async def lifespan(_app: FastAPI):
         # then report the bounds this process is actually running under.
         server_memory.claim_async_owner()
         _log_memory_bounds()
+        # The MCP session manager must be running before the first MCP request is accepted: the library
+        # starts it lazily and concurrent first requests race with that start (HTTP 500).
+        await start_mcp_transport(mcp_mount)
+        mcp_started = True
         # Mark application as ready to accept traffic
         readiness_state.set_ready(True)
         logger.info("Application ready to accept traffic")
+        threading.Thread(
+            target=warm_first_turn, args=(ARGS.workflow_path,), name="first-turn-warm-up", daemon=True
+        ).start()
         reaper = asyncio.create_task(reap_checkpoints_periodically())
         yield
     finally:
@@ -622,6 +730,8 @@ async def lifespan(_app: FastAPI):
         # for the termination grace period to lose. Labeling was already off
         # this path. What remains is closing the sessions.
         await stop_all_chat_sessions(still_busy)
+        if mcp_started:
+            await stop_mcp_transport(mcp_mount)
         logger.info("FastWorkflow FastAPI service shutdown complete")
 
 
@@ -645,7 +755,7 @@ def load_args():
                        help="Pin CORS to loopback origins only (127.0.0.1/localhost/[::1], any "
                             "port) — tighter than the wide-open default, and resilient to port "
                             "forwarders that re-expose a UI on a different local port. Used by "
-                            "`fastworkflow run_chatbot`'s auto-spawned server [R19]. "
+                            "for a server started by a local launcher that serves its own page [R19]. "
                             "Takes precedence over --cors_origin.")
     parser.add_argument("--enable_admin_endpoints", action="store_true", default=False,
                        help="Serve /admin/dump_all_conversations and "
@@ -655,8 +765,27 @@ def load_args():
                             "(`run_chatbot` spawns a server without this flag). While off "
                             "both routes 404 and are absent from the OpenAPI schema; while "
                             "on both additionally require a Bearer token.")
-    # Hidden: set by run_chatbot's launcher so an orphaned child exits when the
-    # chatbot parent disappears without a clean terminate_server.
+    parser.add_argument("--allow_request_cache_toggle", action="store_true", default=False,
+                       help="Let a request's use_dspy_cache switch the process-wide LLM response cache "
+                            "on or off (the memory bound stays in force and readiness stays green). Off by "
+                            "default: the argument is ignored and reported in the X-FW-DSPy-Cache "
+                            "response header, because one client could otherwise change every other "
+                            "channel's behaviour. For a single local user (the chatbot launcher passes it); "
+                            "the cache is otherwise chosen at start with FW_LM_CACHE=0.")
+    parser.add_argument("--chat_approval_surface", choices=CHAT_APPROVAL_SURFACES,
+                       default=DEFAULT_CHAT_APPROVAL_SURFACE,
+                       help="The approval surface of POST /invoke_agent_stream (the MCP invoke_agent "
+                            "tool) and POST /invoke_assistant. 'host' (default, strict): the same rule "
+                            "/invoke_agent applies: needs a signature-checked JWT with a user_id "
+                            "(--expect_encrypted_jwt), otherwise an approval-gated command is refused, "
+                            "and the approval token is delivered in the response and must come back as "
+                            "approval_token on the reply. 'channel' (the behaviour before 4.0.x): an "
+                            "approval-gated command is asked and a plain yes approves it, with no "
+                            "token; for a local development tool only. /invoke_agent and "
+                            "/perform_action are always 'host'; this option never loosens them. "
+                            "A launcher that starts a loopback server for a local client may pin 'channel'.")
+    # Hidden: set by a launcher that spawns this server as a child, so an orphaned child exits
+    # when the launching process disappears without a clean shutdown.
     parser.add_argument(
         "--parent_pid",
         type=int,
@@ -750,8 +879,8 @@ def custom_openapi():
 app.openapi = custom_openapi
 
 # CORS middleware. --cors_loopback_only pins the allowlist to loopback origins
-# on any port (the chatbot's auto-spawn posture — port forwarders re-expose the
-# UI on other local ports, so exact-origin pinning breaks legitimate access
+# on any port (the posture of a locally launched server — port forwarders re-expose a
+# local client on other ports, so exact-origin pinning breaks legitimate access
 # while loopback-only still excludes every routable origin) [R19 as amended].
 # --cors_origin pins to exactly one origin — never a wildcard. Without either,
 # the historical wide-open development posture is kept unchanged.
@@ -853,7 +982,7 @@ async def liveness_probe() -> dict:
     tags=["probes"]
 )
 async def readiness_probe(
-    memory: bool = False, observability: bool = False, runtime: bool = False
+    memory: bool = False, observability: bool = False, runtime: bool = False, sessions: bool = False
 ) -> JSONResponse:
     """
     Readiness probe endpoint for Kubernetes.
@@ -870,6 +999,11 @@ async def readiness_probe(
     Pass ``?memory=true`` for retention metrics (DSPy response-cache entries and
     bytes, in-memory conversation turns and bytes). They are off by default
     because computing them walks live objects, and probes are frequent.
+
+    The response always carries ``sessions``: ``live`` (sessions held in this process), ``max_live`` (the
+    cap) and ``over_target`` (live above the cap, which happens when sessions are pinned: a session whose
+    state cannot be checkpointed is never evicted). Pass ``?sessions=true`` to add ``pinned`` (how many of
+    them are) and ``busy_unassessed``; that runs each session's ``get_state`` hook, so it is off by default.
 
     Pass ``?observability=true`` for the observability configuration in effect
     in THIS process, including whether retention pruning is suppressed. An evidence
@@ -902,6 +1036,8 @@ async def readiness_probe(
     server_memory.log_policy_drift(drift)
     if drift:
         status_info["dspy_memory_policy"] = f"drifted: {drift}"
+    elif server_memory.request_cache_off():
+        status_info["dspy_response_cache"] = "off (a request turned it off; --allow_request_cache_toggle)"
 
     content: dict[str, Any] = {
         "status": "ready",
@@ -909,6 +1045,7 @@ async def readiness_probe(
         "experiment_store_readiness": (
             readiness_state.get_experiment_store_readiness()
         ),
+        "sessions": session_manager.session_counts(assess_pinned=sessions),
     }
     if memory:
         content["memory"] = {
@@ -1083,6 +1220,18 @@ def _reject_if_busy(channel_id: str) -> None:
         )
 
 
+def _hand_live_extras_to_execution(channel_id: str, delivered: dict) -> None:
+    """Called inside the turn's work function, after the host's live approval fields are taken: put them
+    on the running execution. The executing request fills it, so a duplicate request that rejoins the same
+    execution (the first having answered 202) reads the same extras and cannot replace them with its own
+    empty dict. The first response to render the finished turn delivers them, once."""
+    if not delivered:
+        return
+    active = turn_registry._active_execution(channel_id)
+    if active is not None:
+        active.live_extras = dict(delivered)
+
+
 def _turn_json_response(execn, channel_id: str) -> JSONResponse:
     """Render a turn endpoint execution: 200 done / 202 deferred / 409 or 500 on error."""
     if execn.error is not None:
@@ -1174,6 +1323,63 @@ def _span_bodies(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             pass  # serve the raw text rather than dropping the span
         spans.append(span)
     return spans
+
+
+@app.get(
+    "/turns/latest",
+    operation_id="get_latest_turn",
+    response_model=None,
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {
+            "description": (
+                "The turn running now on the caller's channel ({turn_key, exec_state:'running', "
+                "logical_turn_key?}), else the channel's last stored turn (as GET /turns/{turn_key} serves "
+                "it). Same 200-means-state-read semantics as GET /turns/{turn_key}."
+            )
+        },
+        401: {"description": "Invalid or expired JWT token"},
+        404: {"description": "The channel has no running or stored turn"},
+    },
+)
+async def get_latest_turn(
+    session: SessionData = Depends(get_session_from_jwt),
+) -> JSONResponse:
+    """
+    Read the caller's most recent turn: the one running now, else the last stored one.
+
+    For a client that started a turn and lost its handle (an MCP client whose own time-out fired
+    before any frame or body reached it). The channel is the JWT's, never a parameter, so no other
+    channel's turn can be named. Declared before /turns/{turn_key} so "latest" is not read as a key.
+    """
+    channel_id = session.channel_id
+
+    if (active_key := turn_registry.active_turn_key(channel_id)) is not None and (
+        execn := turn_registry.get(active_key)
+    ) is not None:
+        runtime = await session_manager.get_session(channel_id)
+        resolve_logical_turn_key(execn, runtime, turn_registry)
+        _, body = render_turn_response(execn)
+        return JSONResponse(content=body, status_code=status.HTTP_200_OK)
+
+    store = _observability_store()
+    rows = (
+        await _store_read(lambda: store.list_turns(channel_id=channel_id, limit=1))
+        if store is not None
+        else []
+    )
+    if not rows:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No turn found for this conversation",
+        )
+    row = await _store_read(store.get_turn, rows[0]["turn_key"])
+    if row is None or row.get("channel_id") != channel_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No turn found for this conversation",
+        )
+    return JSONResponse(content=_stored_turn_body(row))
 
 
 @app.get(
@@ -1402,6 +1608,140 @@ async def get_command_schemas(
     return await asyncio.get_running_loop().run_in_executor(None, command_schema_listing, folderpath)
 
 
+# Upper bound on one composer call, in seconds. Module level so tests can shrink it.
+COMPOSE_TIMEOUT_SECONDS = composer.SERVER_COMPOSE_BUDGET_SECONDS
+
+
+def _compose_outcome(compose, request) -> tuple[str, Any]:
+    """Run one composer; ``(outcome, value)`` and never raises, so an abandoned thread ends quietly.
+
+    ``not_needed`` is the composer's own choice to show nothing (a form not worth showing, a lead that
+    restates the answer): not a failure, so nothing is logged at WARNING.
+    """
+    try:
+        value = compose(request)
+        return ("not_needed", None) if value is composer.NOT_NEEDED else ("ok", value)
+    except composer.ComposerUnavailable:
+        return "no_model", None
+    except Exception as exc:  # noqa: BLE001 - the composers already swallow these; this is the last line
+        logger.warning(f"composer raised {type(exc).__name__}")
+        return "failed", None
+
+
+def _record_compose_span(kind, channel_id, turn_key, started_ns, outcome, results, duration_ms, diagnostics) -> None:
+    """File one ``fw.compose`` span for a finished compose call. Runs in a worker thread, after the response is built.
+
+    The turn key is the page's claim, so it is honoured only when the observability store holds that turn for the
+    caller's own channel; any other key (unknown, foreign, malformed) records the span unattached and confirms
+    nothing about the key. Never raises.
+    """
+    try:
+        sink = get_observability_sink(ARGS.workflow_path)
+        if sink is None:
+            return
+        trace_id = None
+        if turn_key:
+            row = sink.store.get_turn(turn_key)
+            if row is not None and row.get("channel_id") == channel_id:
+                trace_id = turn_key
+        compose_trace.emit_compose_span(
+            sink, kind=kind, channel_id=channel_id, turn_key=trace_id, started_ns=started_ns, outcome=outcome,
+            results=results, duration_ms=duration_ms, model=composer.model_id(), diag=diagnostics)
+    except Exception as exc:  # noqa: BLE001 - tracing never fails a compose response
+        logger.warning(f"compose span not recorded: {exc!r}")
+
+
+async def _compose_response(kind: str, key: str, compose, request, channel_id: str | None = None) -> dict[str, Any]:
+    """The 200 body of a compose endpoint: ``{key: <verified JSON>}`` or ``{key: None, "reason": ...}``.
+
+    Reads no session state and takes no session lease, so it can run while a turn runs. It does not call
+    ``apply_dspy_cache_choice``: that reports a disagreeing value and never changes the process-wide cache; ``use_dspy_cache=false`` is honoured per
+    call by the composer on its own LM copy.
+
+    The composer runs in a worker thread, bounded by ``asyncio.wait_for``. A timeout cannot stop that
+    thread: the call keeps running to completion in the threadpool and its result is discarded.
+    ``_compose_outcome`` catches everything, so a late failure there is not an unhandled exception.
+    """
+    started = time.monotonic()
+    started_ns = time.time_ns()
+    count = len(request.results)
+    # The answer-card composer fills this in its worker thread (the context is copied, the object is shared).
+    diagnostics = composer.ComposeDiagnostics() if kind == "answer_card" else None
+    token = composer.DIAGNOSTICS.set(diagnostics)
+    try:
+        outcome, value = await asyncio.wait_for(
+            asyncio.to_thread(_compose_outcome, compose, request), timeout=COMPOSE_TIMEOUT_SECONDS
+        )
+    except asyncio.TimeoutError:
+        outcome, value = "timeout", None
+    finally:
+        composer.DIAGNOSTICS.reset(token)
+    if outcome == "ok" and value is None:
+        outcome = "failed"
+    # No user text, answer text or result data in this line: counts and short reason codes only.
+    details = f"{diagnostics.summary()} " if diagnostics is not None else ""
+    logger.info(
+        f"compose {kind}: results={count} {details}outcome={key if outcome == 'ok' else outcome} "
+        f"duration_ms={int((time.monotonic() - started) * 1000)}"
+    )
+    # Off the request path: the span is queued from a worker thread, so the response never waits on the store.
+    try:
+        asyncio.get_running_loop().run_in_executor(
+            None, _record_compose_span, kind, channel_id, getattr(request, "turn_key", None), started_ns,
+            outcome, count, int((time.monotonic() - started) * 1000), diagnostics)
+    except Exception as exc:  # noqa: BLE001 - tracing never fails a compose response
+        logger.warning(f"compose span not scheduled: {exc!r}")
+    if outcome == "ok":
+        return {key: value.model_dump(mode="json")}
+    return {key: None, "reason": outcome}
+
+
+@app.post(
+    "/compose_answer_card",
+    operation_id="compose_answer_card",
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {
+            "description": (
+                "{card: <verified AnswerCard: v, lead, sections, blocks (the sections' blocks, flat, for a page without sections)>} or {card: null, reason: 'no_model' | 'failed' | 'timeout' | 'not_needed'}. "
+                "Always 200; a null card means the client keeps its deterministic view."
+            )
+        },
+        401: {"description": "Invalid or expired JWT token"},
+        422: {"description": f"More than {composer.MAX_RESULTS} results, or an answer over {composer.MAX_ANSWER_CHARS} characters"},
+    },
+)
+async def compose_answer_card(
+    request: composer.AnswerCardRequest,
+    session: SessionData = Depends(get_session_and_ensure_runtime),
+) -> dict[str, Any]:
+    """Compose a verified answer card for a turn's results with the response-generation model (a UI helper, not an MCP tool)."""
+    return await _compose_response("answer_card", "card", composer.compose_answer_card, request, session.channel_id)
+
+
+@app.post(
+    "/compose_question_form",
+    operation_id="compose_question_form",
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {
+            "description": (
+                "{form: <grounded QuestionForm>} or {form: null, reason: 'no_model' | 'failed' | 'timeout' | 'not_needed'}. "
+                "Always 200; a null form means the client keeps the plain question."
+            )
+        },
+        401: {"description": "Invalid or expired JWT token"},
+        422: {"description": f"More than {composer.MAX_RESULTS} results, or a question over {composer.MAX_TEXT_CHARS} characters"},
+    },
+)
+async def compose_question_form(
+    request: composer.QuestionFormRequest,
+    session: SessionData = Depends(get_session_and_ensure_runtime),
+) -> dict[str, Any]:
+    """Compose a grounded form for a question put to the user (a UI helper, not an MCP tool)."""
+    return await _compose_response("question_form", "form", composer.compose_question_form, request, session.channel_id)
+
+
 @app.post(
     "/initialize",
     operation_id="rest_initialize",
@@ -1412,7 +1752,9 @@ async def get_command_schemas(
         202: {"description": "Session initialized; startup turn still running (poll /initialize or /turns)"},
         400: {"description": "Both startup_command and startup_action provided, or user_id missing when startup provided"},
         422: {"description": "Empty channel_id, invalid paths, or missing env vars"},
-        500: {"description": "Internal error during initialization"}
+        500: {"description": "Internal error during initialization"},
+        503: {"description": "The server is at its live-session ceiling and no idle session could be released; "
+                             "see the Retry-After header"}
     }
 )
 async def initialize(
@@ -1426,6 +1768,8 @@ async def initialize(
     (wait-or-defer): 200 with startup_output if it finishes within the wait
     window, else 202 with startup_turn_key. The "already exists" branch returns
     the SAME startup execution's three-state status (§3.3).
+
+    A channel that is finished with can be released with POST /end_session.
     """
     try:
         channel_id = request.channel_id
@@ -1480,12 +1824,17 @@ async def initialize(
 
         startup_command_str = request.startup_command or ARGS.startup_command
 
-        # Prepare startup action if provided in request (takes precedence over CLI args)
-        startup_action = None
+        # Precedence, top wins: the request's startup_action; the process flag --startup_action; the
+        # request's startup_command, else the process flag --startup_command; then, only when none of
+        # the four is given, the workflow folder's startup_action.json.
         if request.startup_action:
             startup_action = fastworkflow.Action(**request.startup_action)
         elif ARGS.startup_action:
             startup_action = fastworkflow.load_startup_action(ARGS.startup_action)
+        elif startup_command_str:
+            startup_action = None
+        else:
+            startup_action = fastworkflow.workflow_startup_action(ARGS.workflow_path)
 
         # Per-session workflow context [R24]: the request field overrides the
         # server-level --context CLI arg for this session; absent means the
@@ -1510,9 +1859,14 @@ async def initialize(
             experiment_bootstrap=request.experiment_bootstrap,
         )
 
+        # A session that replaced one the server dropped carries a notice; this response delivers it, once.
+        dropped_notice = session_manager.take_session_notice(channel_id)
+
         # No startup requested — just return tokens.
         if not (startup_command_str or startup_action):
-            return _tokens_only_response(channel_id, user_id)
+            tokens = _tokens_only_response(channel_id, user_id)
+            tokens.session_notice = dropped_notice
+            return tokens
 
         async with session_manager.leased_session(channel_id) as runtime:
             if not runtime:
@@ -1550,6 +1904,7 @@ async def initialize(
 
             runtime.startup_turn_key = execn.turn_key
             code, resp = _initialize_response_from_execution(channel_id, user_id, execn)
+            resp.session_notice = dropped_notice
             response.status_code = code
             return resp
 
@@ -1642,6 +1997,19 @@ async def refresh_token(
         ) from e
 
 
+def _use_plan_refusal(ctx, use_plan: Optional[str]) -> Optional[JSONResponse]:
+    """The 400 answer for a ``use_plan`` the session cannot honour (an unknown planning command, one outside the current
+    context, or a question waiting for its reply); None when it is absent or fine."""
+    if not use_plan:
+        return None
+    try:
+        ctx.check_use_plan(use_plan)
+    except UsePlanError as error:
+        return JSONResponse(status_code=status.HTTP_400_BAD_REQUEST,
+                            content={"detail": str(error), "reason": "use_plan_refused"})
+    return None
+
+
 @app.post(
     "/invoke_agent",
     operation_id="rest_invoke_agent",
@@ -1657,7 +2025,7 @@ async def refresh_token(
     }
 )
 async def invoke_agent(
-    request: InvokeRequest,
+    request: AgentInvokeRequest,
     session: SessionData = Depends(get_session_and_ensure_runtime)
 ) -> JSONResponse:
     """
@@ -1666,7 +2034,7 @@ async def invoke_agent(
     
     Requires a valid JWT access token in the Authorization header (Bearer token format).
     """
-    apply_dspy_cache_choice(request.use_dspy_cache)
+    cache_notice = apply_dspy_cache_choice(request.use_dspy_cache)
     channel_id = session.channel_id
     user_id = session.user_id
     try:
@@ -1678,18 +2046,21 @@ async def invoke_agent(
                 )
 
             ctx = runtime.execution_context
+            if bad_plan := _use_plan_refusal(ctx, request.use_plan):
+                return bad_plan
             user_query = request.user_query.lstrip('/')
             # Approval binding (ADR-EXP-025): an HTTP or MCP request is a host surface. Its identity
             # is verified only when the JWT signature is checked (owner answer 2).
-            approval_surface = approval_binding.Surface(
-                kind="host", verified=bool(jwt_manager.EXPECT_ENCRYPTED_JWT), uid=user_id)
+            approval_surface = approval_surface_for(user_id)
             delivered: dict = {}
 
             def _work():
                 output = ctx.process_turn(
                     user_query, unattended=request.unattended,
-                    approval_surface=approval_surface, approval_token=request.approval_token)
+                    approval_surface=approval_surface, approval_token=request.approval_token,
+                    **({"use_plan": request.use_plan} if request.use_plan else {}))
                 delivered.update(approval_binding.take_host_delivery(ctx.app_workflow))
+                _hand_live_extras_to_execution(channel_id, delivered)
                 return output
 
             execn = await _submit_turn_endpoint(
@@ -1697,13 +2068,13 @@ async def invoke_agent(
                 kind="invoke_agent",
                 work_fn=_work,
                 # A retry differing only in `unattended` is a different turn.
-                idempotency_args=(user_query, *(("unattended",) if request.unattended else ())),
+                idempotency_args=(user_query, *(("unattended",) if request.unattended else ()),
+                                  *(("use_plan", request.use_plan) if request.use_plan else ())),
                 wait_seconds=request.timeout_seconds,
                 user_id=user_id,
                 http_bearer_token=session.http_bearer_token,
             )
-            execn.live_extras = delivered
-            return _turn_json_response(execn, channel_id)
+            return with_cache_notice(_turn_json_response(execn, channel_id), cache_notice)
 
     except HTTPException:
         raise
@@ -1755,7 +2126,7 @@ async def invoke_agent(
     }
 )
 async def invoke_agent_stream(
-    request: InvokeRequest,
+    request: AgentInvokeRequest,
     session: SessionData = Depends(get_session_and_ensure_runtime)
 ):
     """
@@ -1796,10 +2167,14 @@ async def invoke_agent_stream(
     answered 202 with its key rather than a second body, so no two consumers
     ever read one stream.
 
-    Requires a valid JWT access token in the Authorization header (Bearer token format).
-    Exposed as 'invoke_agent' tool for MCP clients (who don't need JWT auth).
+    Requires a valid JWT access token in the Authorization header (Bearer token format); an MCP client sends the
+    same Bearer token on its connection (from /initialize or /admin/generate_mcp_token) and passes no token as an
+    argument of the tool. Without it the call is refused with 401.
+    Without an agent model (LLM_AGENT unset) a turn may complete with the artifact ``fw_not_run`` on its last
+    command output: the parts and planning-command steps that were not run here, with a suggested plan for the client.
+    Exposed as the 'invoke_agent' tool for MCP clients.
     """
-    apply_dspy_cache_choice(request.use_dspy_cache)
+    cache_notice = apply_dspy_cache_choice(request.use_dspy_cache)
     channel_id = session.channel_id
     user_id = session.user_id
 
@@ -1814,16 +2189,30 @@ async def invoke_agent_stream(
                 content={"detail": f"User session not found: {channel_id}"}
             )
 
+        if bad_plan := _use_plan_refusal(runtime.execution_context, request.use_plan):
+            return bad_plan
+
         # Events are queued by the owning turn and drained by the response body.
         # Separating them is the point: a client that disconnects stops draining,
         # while the turn runs to completion and retires itself normally. The
         # channel owns frame order, sequencing and turn identity (see
         # TurnStreamChannel for the order/deduplication contract).
         stream = TurnStreamChannel()
+        # None under the default channel surface: the turn then gets no surface and no token, as before.
+        chat_surface = approval_surface_for(user_id, scope="chat")
+        delivered: dict = {}
+
+        # First use of a session that replaced a dropped one: the output frame says so, once.
+        stream_notice = session_manager.take_session_notice(channel_id)
 
         async def streaming_work() -> fastworkflow.TurnOutput:
             async def on_trace(trace_json: dict) -> None:
                 await stream.emit("trace", trace_json)
+
+            async def on_progress(progress_json: dict) -> None:
+                # The stage the turn is in (fastworkflow.core.turn_progress); a client
+                # that does not know the frame type ignores it.
+                await stream.emit("progress", progress_json)
 
             async def on_timeout(detail: str) -> None:
                 # NOT an 'error': the deadline governs delivery, not ownership.
@@ -1849,8 +2238,19 @@ async def invoke_agent_stream(
                 user_id=user_id,
                 on_timeout=on_timeout,
                 unattended=request.unattended,
+                on_progress=on_progress,
+                approval_surface=chat_surface,
+                approval_token=request.approval_token,
+                delivered=delivered,
+                use_plan=request.use_plan,
             )
-            await stream.emit("output", turn_output.model_dump(mode="json"))
+            # The token rides this one live frame only: it is merged into the frame, never into the
+            # TurnOutput, so the stored record and GET /turns never hold it. The queue is drained once
+            # and not retained or logged (TurnStreamChannel).
+            frame = {**turn_output.model_dump(mode="json"), **delivered}
+            if stream_notice:
+                frame["session_notice"] = stream_notice
+            await stream.emit("output", frame)
             return turn_output
 
         async def owned_turn(execn) -> None:
@@ -1861,6 +2261,7 @@ async def invoke_agent_stream(
                 execn.turn_key,
                 lambda: resolve_logical_turn_key(execn, runtime, turn_registry),
             )
+            stream.on_frame = lambda frame: note_stream_frame(execn, frame)
 
             async def finish_stream() -> None:
                 """Deliver the terminal event, then end the body.
@@ -1923,6 +2324,7 @@ async def invoke_agent_stream(
                 idempotency_key=compute_idempotency_key(
                     channel_id, "invoke_agent_stream", request.user_query,
                     *(("unattended",) if request.unattended else ()),
+                    *(("use_plan", request.use_plan) if request.use_plan else ()),
                 ),
                 user_id=user_id,
                 http_bearer_token=session.http_bearer_token,
@@ -1977,6 +2379,8 @@ async def invoke_agent_stream(
         STREAM_TURN_KEY_HEADER: execn.turn_key,
         STREAM_FORMAT_HEADER: stream_format,
     }
+    if cache_notice:
+        headers[DSPY_CACHE_HEADER] = cache_notice
     if stream_format == "sse":
         headers.update({"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
         return StreamingResponse(
@@ -2012,7 +2416,7 @@ async def invoke_assistant(
     
     Requires a valid JWT access token in the Authorization header (Bearer token format).
     """
-    apply_dspy_cache_choice(request.use_dspy_cache)
+    cache_notice = apply_dspy_cache_choice(request.use_dspy_cache)
     channel_id = session.channel_id
     user_id = session.user_id
     try:
@@ -2024,15 +2428,22 @@ async def invoke_assistant(
                 )
 
             ctx = runtime.execution_context
+            chat_surface = approval_surface_for(user_id, scope="chat")
+            delivered: dict = {}
 
             def assistant_work_fn():
                 # Resolve the assistant prefix inside the turn (under the lock).
-                if "is_assistant_mode_command" in ctx.cme_workflow.context:
+                if ctx.assistant_round:
                     assistant_query = request.user_query
                 else:
                     assistant_query = f"/{request.user_query.lstrip('/')}"
-                return ctx.process_turn(
-                    assistant_query, unattended=request.unattended)
+                output = ctx.process_turn(
+                    assistant_query, unattended=request.unattended,
+                    **turn_approval_kwargs(chat_surface, request.approval_token))
+                if chat_surface is not None:
+                    delivered.update(approval_binding.take_host_delivery(ctx.app_workflow))
+                _hand_live_extras_to_execution(channel_id, delivered)
+                return output
 
             execn = await _submit_turn_endpoint(
                 runtime,
@@ -2043,7 +2454,7 @@ async def invoke_assistant(
                 user_id=user_id,
                 http_bearer_token=session.http_bearer_token,
             )
-            return _turn_json_response(execn, channel_id)
+            return with_cache_notice(_turn_json_response(execn, channel_id), cache_notice)
 
     except HTTPException:
         raise
@@ -2100,13 +2511,13 @@ async def perform_action(
                 ) from e
 
             ctx = runtime.execution_context
-            perform_surface = approval_binding.Surface(
-                kind="host", verified=bool(jwt_manager.EXPECT_ENCRYPTED_JWT), uid=user_id)
+            perform_surface = approval_surface_for(user_id)
             delivered: dict = {}
 
             def _perform():
                 output = ctx.process_action_turn(action, approval_surface=perform_surface)
                 delivered.update(approval_binding.take_host_delivery(ctx.app_workflow))
+                _hand_live_extras_to_execution(channel_id, delivered)
                 return output
 
             execn = await _submit_turn_endpoint(
@@ -2118,7 +2529,6 @@ async def perform_action(
                 user_id=user_id,
                 http_bearer_token=session.http_bearer_token,
             )
-            execn.live_extras = delivered
             return _turn_json_response(execn, channel_id)
 
     except HTTPException:
@@ -2161,6 +2571,56 @@ async def cancel_pending(
             session_manager.session_state_store.clear(channel_id)
 
         return {"status": "ok", "cleared": cleared}
+
+
+@app.post(
+    "/end_session",
+    operation_id="end_session",
+    response_model=EndSessionResponse,
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {"description": "The channel's live session was released, or it had none (ended false)"},
+        401: {"description": "Invalid or expired JWT token"},
+        409: {"description": "A turn is running, the channel is in use, or a question is pending and "
+                             "discard_pending was not set"},
+        503: {"description": "The session state could not be saved; the session was left live"},
+    },
+)
+async def end_session(
+    request: Optional[EndSessionRequest] = None,
+    session: SessionData = Depends(get_session_from_jwt),
+) -> EndSessionResponse:
+    """
+    End your channel's live session on the server. Call it when you are finished with a channel.
+
+    Acts only on the channel of the token. Kept: every finished turn (get_turn and get_latest_turn still
+    read them for their normal retention), the conversation history and all observability records. Dropped:
+    the live session held in the server's memory. A session whose state can be checkpointed is saved first,
+    so the next call on the channel restores it; a session that cannot be checkpointed (a workflow whose
+    context class has no get_state hook, reported as pinned: true) loses its in-memory workflow state, and
+    the next call on the channel starts from launch configuration and reports session_notice (context_dropped) once. Without this call a pinned session stays
+    in server memory for the life of the process.
+
+    Refused with 409 while a turn is running or another request is using the channel, and while a question
+    is waiting for your answer (the message names it) unless discard_pending is true. Calling it on a
+    channel with no live session succeeds with ended false.
+    """
+    channel_id = session.channel_id
+    discard = bool(request and request.discard_pending)
+    try:
+        ending = await session_manager.end_session(channel_id, discard_pending=discard)
+    except SessionEndRefused as refusal:
+        code = (
+            status.HTTP_503_SERVICE_UNAVAILABLE if refusal.reason == "not_saved"
+            else status.HTTP_409_CONFLICT
+        )
+        raise HTTPException(status_code=code, detail=str(refusal)) from refusal
+    return EndSessionResponse(
+        channel_id=ending.channel_id,
+        ended=ending.ended,
+        pinned=ending.pinned,
+        pending_discarded=ending.pending_discarded,
+    )
 
 
 def _settle_pending_for_new_conversation(runtime, session_manager) -> None:
@@ -2795,7 +3255,7 @@ async def generate_mcp_token(
 # can discover and convert them to MCP tools automatically
 # =========================================================================
 
-setup_mcp(
+mcp_mount = setup_mcp(
     app=app,
     session_manager=session_manager,
 )
@@ -2820,17 +3280,20 @@ def main():
 
     server_memory.install_policy()
 
-    # Chatbot-spawned children pass --parent_pid so an unclean chatbot exit
-    # (SIGHUP / SIGKILL / crash) cannot leave this process orphaned.
+    # A launcher that spawns this server passes --parent_pid so an unclean exit of the
+    # launcher (SIGHUP / SIGKILL / crash) cannot leave this process orphaned.
     start_parent_liveness_watch(getattr(ARGS, "parent_pid", None))
     
-    # Read LOG_LEVEL from env file to configure uvicorn's logger
-    # (env file isn't loaded until lifespan, but uvicorn needs log_level at startup)
+    # uvicorn's log level, read before lifespan loads the env files: LOG_LEVEL under the one precedence rule (the
+    # process, then the env file) and the one reader (`parse_log_level`, any case; a bad value keeps uvicorn's default).
+    from fastworkflow.utils.logging import parse_log_level
+
     log_level = "info"  # uvicorn default
-    if hasattr(ARGS, 'env_file_path') and ARGS.env_file_path:
-        env_vars = dotenv_values(ARGS.env_file_path)
-        if "LOG_LEVEL" in env_vars:
-            log_level = env_vars["LOG_LEVEL"].lower()
+    text = os.environ.get("LOG_LEVEL")
+    if text is None and getattr(ARGS, "env_file_path", None):
+        text = dotenv_values(ARGS.env_file_path).get("LOG_LEVEL")
+    if text and (level := parse_log_level(text)) is not None:
+        log_level = logging.getLevelName(level).lower()
     
     # Add filter to suppress successful probe requests from uvicorn's access logger
     # This preserves access logs for other endpoints while eliminating probe spam

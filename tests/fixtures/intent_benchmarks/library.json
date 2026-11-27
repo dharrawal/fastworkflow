@@ -1,0 +1,1099 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "context": "*",
+      "utterance": "Tell me the opening hours for the Riverside branch on Thursday",
+      "kind": "routing",
+      "expected_label": "library_hours"
+    },
+    {
+      "context": "*",
+      "utterance": "Are you still open after 5pm?",
+      "kind": "routing",
+      "expected_label": "library_hours"
+    },
+    {
+      "context": "*",
+      "utterance": "sunday hours?",
+      "kind": "routing",
+      "expected_label": "library_hours"
+    },
+    {
+      "context": "*",
+      "utterance": "Give me Central's schedule for this week",
+      "kind": "routing",
+      "expected_label": "library_hours"
+    },
+    {
+      "context": "*",
+      "utterance": "How late does Riverside stay open tonight?",
+      "kind": "routing",
+      "expected_label": "library_hours"
+    },
+    {
+      "context": "*",
+      "utterance": "what sort of things can I ask you for",
+      "kind": "routing",
+      "expected_label": "IntentDetection/what_can_i_do"
+    },
+    {
+      "context": "*",
+      "utterance": "help - which commands are available",
+      "kind": "routing",
+      "expected_label": "IntentDetection/what_can_i_do"
+    },
+    {
+      "context": "Library",
+      "utterance": "List each Frank Herbert book along with the number of copies we own",
+      "kind": "routing",
+      "expected_label": "Library/author_books"
+    },
+    {
+      "context": "Library",
+      "utterance": "Which Jane Austen novels do we stock, and how many copies of each one?",
+      "kind": "routing",
+      "expected_label": "Library/author_books"
+    },
+    {
+      "context": "Library",
+      "utterance": "austen titles + copy counts",
+      "kind": "routing",
+      "expected_label": "Library/author_books"
+    },
+    {
+      "context": "Library",
+      "utterance": "Run through everything Herbert wrote that we hold, with copies per title",
+      "kind": "routing",
+      "expected_label": "Library/author_books"
+    },
+    {
+      "context": "Library",
+      "utterance": "For the author Jane Austen, what books are there and what's the copy count on each?",
+      "kind": "routing",
+      "expected_label": "Library/author_books"
+    },
+    {
+      "context": "Library",
+      "utterance": "Look up the title Persuasion and tell me its author and number of copies",
+      "kind": "routing",
+      "expected_label": "Library/book_by_title"
+    },
+    {
+      "context": "Library",
+      "utterance": "Who's the writer of Emma?",
+      "kind": "routing",
+      "expected_label": "Library/book_by_title"
+    },
+    {
+      "context": "Library",
+      "utterance": "dune messiah - author? copies?",
+      "kind": "routing",
+      "expected_label": "Library/book_by_title"
+    },
+    {
+      "context": "Library",
+      "utterance": "Whose book is Persuasion and how many do we stock?",
+      "kind": "routing",
+      "expected_label": "Library/book_by_title"
+    },
+    {
+      "context": "Library",
+      "utterance": "Give me the author of Dune",
+      "kind": "routing",
+      "expected_label": "Library/book_by_title"
+    },
+    {
+      "context": "Library",
+      "utterance": "Tell me which members currently have Emma checked out",
+      "kind": "routing",
+      "expected_label": "Library/book_loans"
+    },
+    {
+      "context": "Library",
+      "utterance": "Who's got Dune on loan?",
+      "kind": "routing",
+      "expected_label": "Library/book_loans"
+    },
+    {
+      "context": "Library",
+      "utterance": "persuasion borrowers?",
+      "kind": "routing",
+      "expected_label": "Library/book_loans"
+    },
+    {
+      "context": "Library",
+      "utterance": "Is Dune Messiah lent out to anybody at the moment?",
+      "kind": "routing",
+      "expected_label": "Library/book_loans"
+    },
+    {
+      "context": "Library",
+      "utterance": "Find out who took out Emma and when it's due back",
+      "kind": "routing",
+      "expected_label": "Library/book_loans"
+    },
+    {
+      "context": "Library",
+      "utterance": "Count the books in the catalogue written by Frank Herbert",
+      "kind": "routing",
+      "expected_label": "Library/count_books"
+    },
+    {
+      "context": "Library",
+      "utterance": "How many titles do we carry that match Dune?",
+      "kind": "routing",
+      "expected_label": "Library/count_books"
+    },
+    {
+      "context": "Library",
+      "utterance": "number of austen books?",
+      "kind": "routing",
+      "expected_label": "Library/count_books"
+    },
+    {
+      "context": "Library",
+      "utterance": "What's the total count of books with Emma in the title?",
+      "kind": "routing",
+      "expected_label": "Library/count_books"
+    },
+    {
+      "context": "Library",
+      "utterance": "Give me a count of everything matching Persuasion",
+      "kind": "routing",
+      "expected_label": "Library/count_books"
+    },
+    {
+      "context": "Library",
+      "utterance": "Count up the overdue loans for the Riverside branch",
+      "kind": "routing",
+      "expected_label": "Library/count_overdue"
+    },
+    {
+      "context": "Library",
+      "utterance": "How many items are overdue right now?",
+      "kind": "routing",
+      "expected_label": "Library/count_overdue"
+    },
+    {
+      "context": "Library",
+      "utterance": "overdue total, central",
+      "kind": "routing",
+      "expected_label": "Library/count_overdue"
+    },
+    {
+      "context": "Library",
+      "utterance": "What's the number of loans that have gone past due across the whole library?",
+      "kind": "routing",
+      "expected_label": "Library/count_overdue"
+    },
+    {
+      "context": "Library",
+      "utterance": "Tell me how many late returns Central has",
+      "kind": "routing",
+      "expected_label": "Library/count_overdue"
+    },
+    {
+      "context": "Library",
+      "utterance": "Search for books by Frank Herbert",
+      "kind": "routing",
+      "expected_label": "Library/find_book"
+    },
+    {
+      "context": "Library",
+      "utterance": "Can you search the catalogue for Emma?",
+      "kind": "routing",
+      "expected_label": "Library/find_book"
+    },
+    {
+      "context": "Library",
+      "utterance": "books matching 'dune'",
+      "kind": "routing",
+      "expected_label": "Library/find_book"
+    },
+    {
+      "context": "Library",
+      "utterance": "Show me whatever titles or authors contain the word Austen",
+      "kind": "routing",
+      "expected_label": "Library/find_book"
+    },
+    {
+      "context": "Library",
+      "utterance": "Do a catalogue lookup on Persuasion and list the hits",
+      "kind": "routing",
+      "expected_label": "Library/find_book"
+    },
+    {
+      "context": "Library",
+      "utterance": "Search for a member called Mia Chen",
+      "kind": "routing",
+      "expected_label": "Library/find_member"
+    },
+    {
+      "context": "Library",
+      "utterance": "Can you look up members with the surname Patel?",
+      "kind": "routing",
+      "expected_label": "Library/find_member"
+    },
+    {
+      "context": "Library",
+      "utterance": "member search: lee",
+      "kind": "routing",
+      "expected_label": "Library/find_member"
+    },
+    {
+      "context": "Library",
+      "utterance": "Who are the patrons whose names contain Raj?",
+      "kind": "routing",
+      "expected_label": "Library/find_member"
+    },
+    {
+      "context": "Library",
+      "utterance": "Find me every member matching Chen",
+      "kind": "routing",
+      "expected_label": "Library/find_member"
+    },
+    {
+      "context": "Library",
+      "utterance": "Check if there's a member called Ann Lee and tell me who matches",
+      "kind": "routing",
+      "expected_label": "Library/find_record"
+    },
+    {
+      "context": "Library",
+      "utterance": "Do we have a book by the name of Persuasion?",
+      "kind": "routing",
+      "expected_label": "Library/find_record"
+    },
+    {
+      "context": "Library",
+      "utterance": "any patron called chen?",
+      "kind": "routing",
+      "expected_label": "Library/find_record"
+    },
+    {
+      "context": "Library",
+      "utterance": "Is Emma a book we have on record?",
+      "kind": "routing",
+      "expected_label": "Library/find_record"
+    },
+    {
+      "context": "Library",
+      "utterance": "Does a member named Patel exist in our system?",
+      "kind": "routing",
+      "expected_label": "Library/find_record"
+    },
+    {
+      "context": "Library",
+      "utterance": "Show me all of the library's branches",
+      "kind": "routing",
+      "expected_label": "Library/list_branches"
+    },
+    {
+      "context": "Library",
+      "utterance": "What are the names of your locations?",
+      "kind": "routing",
+      "expected_label": "Library/list_branches"
+    },
+    {
+      "context": "Library",
+      "utterance": "branches?",
+      "kind": "routing",
+      "expected_label": "Library/list_branches"
+    },
+    {
+      "context": "Library",
+      "utterance": "How many sites does this library run, and what are they?",
+      "kind": "routing",
+      "expected_label": "Library/list_branches"
+    },
+    {
+      "context": "Library",
+      "utterance": "Give me a rundown of every branch",
+      "kind": "routing",
+      "expected_label": "Library/list_branches"
+    },
+    {
+      "context": "Library",
+      "utterance": "Give me a report on Ann Lee with her current loans and any notes",
+      "kind": "routing",
+      "expected_label": "Library/member_report"
+    },
+    {
+      "context": "Library",
+      "utterance": "What does Raj Patel have checked out right now?",
+      "kind": "routing",
+      "expected_label": "Library/member_report"
+    },
+    {
+      "context": "Library",
+      "utterance": "mia chen - loans and notes",
+      "kind": "routing",
+      "expected_label": "Library/member_report"
+    },
+    {
+      "context": "Library",
+      "utterance": "Are there notes on file for Ann Lee?",
+      "kind": "routing",
+      "expected_label": "Library/member_report"
+    },
+    {
+      "context": "Library",
+      "utterance": "Pull together Raj Patel's borrowed books and record notes",
+      "kind": "routing",
+      "expected_label": "Library/member_report"
+    },
+    {
+      "context": "Library",
+      "utterance": "Add a note to Mia Chen's record: prefers phone calls after 5pm",
+      "kind": "routing",
+      "expected_label": "Library/note_member"
+    },
+    {
+      "context": "Library",
+      "utterance": "Can you jot on Ann Lee's file that she lost her card?",
+      "kind": "routing",
+      "expected_label": "Library/note_member"
+    },
+    {
+      "context": "Library",
+      "utterance": "note for raj patel: owes late fee",
+      "kind": "routing",
+      "expected_label": "Library/note_member"
+    },
+    {
+      "context": "Library",
+      "utterance": "Please make a note against Mia Chen that her address changed",
+      "kind": "routing",
+      "expected_label": "Library/note_member"
+    },
+    {
+      "context": "Library",
+      "utterance": "Write down on Raj Patel's account that he requested a renewal reminder",
+      "kind": "routing",
+      "expected_label": "Library/note_member"
+    },
+    {
+      "context": "Library",
+      "utterance": "Open the book b4",
+      "kind": "routing",
+      "expected_label": "Library/open_book"
+    },
+    {
+      "context": "Library",
+      "utterance": "Can you switch to book b1?",
+      "kind": "routing",
+      "expected_label": "Library/open_book"
+    },
+    {
+      "context": "Library",
+      "utterance": "book b2 pls",
+      "kind": "routing",
+      "expected_label": "Library/open_book"
+    },
+    {
+      "context": "Library",
+      "utterance": "Navigate to the book Persuasion",
+      "kind": "routing",
+      "expected_label": "Library/open_book"
+    },
+    {
+      "context": "Library",
+      "utterance": "Let's work with book uid b3 from here",
+      "kind": "routing",
+      "expected_label": "Library/open_book"
+    },
+    {
+      "context": "Library",
+      "utterance": "Open the member with uid m2",
+      "kind": "routing",
+      "expected_label": "Library/open_member"
+    },
+    {
+      "context": "Library",
+      "utterance": "Can you switch over to Mia Chen's member record?",
+      "kind": "routing",
+      "expected_label": "Library/open_member"
+    },
+    {
+      "context": "Library",
+      "utterance": "member m1 pls",
+      "kind": "routing",
+      "expected_label": "Library/open_member"
+    },
+    {
+      "context": "Library",
+      "utterance": "Navigate to patron m3",
+      "kind": "routing",
+      "expected_label": "Library/open_member"
+    },
+    {
+      "context": "Library",
+      "utterance": "Let's work on Ann Lee's membership from here",
+      "kind": "routing",
+      "expected_label": "Library/open_member"
+    },
+    {
+      "context": "Library",
+      "utterance": "Give me a summary of the branches along with the overdue loan count at Riverside",
+      "kind": "routing",
+      "expected_label": "Library/overdue_summary"
+    },
+    {
+      "context": "Library",
+      "utterance": "What's the overall state of the library - which branches are there and how many loans are late?",
+      "kind": "routing",
+      "expected_label": "Library/overdue_summary"
+    },
+    {
+      "context": "Library",
+      "utterance": "library status rundown",
+      "kind": "routing",
+      "expected_label": "Library/overdue_summary"
+    },
+    {
+      "context": "Library",
+      "utterance": "Brief me on the library: its branches and the late loans at Central",
+      "kind": "routing",
+      "expected_label": "Library/overdue_summary"
+    },
+    {
+      "context": "Library",
+      "utterance": "Can I get the big-picture report for the library, overdue numbers included?",
+      "kind": "routing",
+      "expected_label": "Library/overdue_summary"
+    },
+    {
+      "context": "Library",
+      "utterance": "which actions are open to me at the library level",
+      "kind": "routing",
+      "expected_label": "IntentDetection/what_can_i_do"
+    },
+    {
+      "context": "Library",
+      "utterance": "show me the available commands here",
+      "kind": "routing",
+      "expected_label": "IntentDetection/what_can_i_do"
+    },
+    {
+      "context": "Book",
+      "utterance": "List all loans on this book with borrower and due date",
+      "kind": "routing",
+      "expected_label": "Book/list_loans"
+    },
+    {
+      "context": "Book",
+      "utterance": "Can I see the loans for this title from row 21 onward?",
+      "kind": "routing",
+      "expected_label": "Book/list_loans"
+    },
+    {
+      "context": "Book",
+      "utterance": "loans list for this book",
+      "kind": "routing",
+      "expected_label": "Book/list_loans"
+    },
+    {
+      "context": "Book",
+      "utterance": "Show the next page of this book's loans",
+      "kind": "routing",
+      "expected_label": "Book/list_loans"
+    },
+    {
+      "context": "Book",
+      "utterance": "What's the total number of loans recorded against this book?",
+      "kind": "routing",
+      "expected_label": "Book/list_loans"
+    },
+    {
+      "context": "Book",
+      "utterance": "Tell me who currently has this book and the date it's due",
+      "kind": "routing",
+      "expected_label": "Book/loan_report"
+    },
+    {
+      "context": "Book",
+      "utterance": "Who borrowed it, and when does it need to come back?",
+      "kind": "routing",
+      "expected_label": "Book/loan_report"
+    },
+    {
+      "context": "Book",
+      "utterance": "who's got it rn",
+      "kind": "routing",
+      "expected_label": "Book/loan_report"
+    },
+    {
+      "context": "Book",
+      "utterance": "Has somebody checked this one out? Until what date?",
+      "kind": "routing",
+      "expected_label": "Book/loan_report"
+    },
+    {
+      "context": "Book",
+      "utterance": "Report who is holding this book and the return dates",
+      "kind": "routing",
+      "expected_label": "Book/loan_report"
+    },
+    {
+      "context": "Book",
+      "utterance": "Tell me the branch this book lives at, the copies, and who's borrowing them",
+      "kind": "routing",
+      "expected_label": "Book/shelf_report"
+    },
+    {
+      "context": "Book",
+      "utterance": "Where is this one shelved, and is it out with anyone?",
+      "kind": "routing",
+      "expected_label": "Book/shelf_report"
+    },
+    {
+      "context": "Book",
+      "utterance": "shelf + loan status pls",
+      "kind": "routing",
+      "expected_label": "Book/shelf_report"
+    },
+    {
+      "context": "Book",
+      "utterance": "Is a copy of this available on the shelf, and at which branch?",
+      "kind": "routing",
+      "expected_label": "Book/shelf_report"
+    },
+    {
+      "context": "Book",
+      "utterance": "Give me the location of this book plus whoever has copies out",
+      "kind": "routing",
+      "expected_label": "Book/shelf_report"
+    },
+    {
+      "context": "Book",
+      "utterance": "Display this book's title, author and copy count",
+      "kind": "routing",
+      "expected_label": "Book/show_book"
+    },
+    {
+      "context": "Book",
+      "utterance": "What are the details on the book I've got open?",
+      "kind": "routing",
+      "expected_label": "Book/show_book"
+    },
+    {
+      "context": "Book",
+      "utterance": "book info",
+      "kind": "routing",
+      "expected_label": "Book/show_book"
+    },
+    {
+      "context": "Book",
+      "utterance": "Who's the author of this one and what branch is it at?",
+      "kind": "routing",
+      "expected_label": "Book/show_book"
+    },
+    {
+      "context": "Book",
+      "utterance": "Pull up the full record of the current book",
+      "kind": "routing",
+      "expected_label": "Book/show_book"
+    },
+    {
+      "context": "Book",
+      "utterance": "Add a note to this book: page 42 is missing",
+      "kind": "routing",
+      "expected_label": "Record/add_note"
+    },
+    {
+      "context": "Book",
+      "utterance": "Could you note down that this copy has water damage?",
+      "kind": "routing",
+      "expected_label": "Record/add_note"
+    },
+    {
+      "context": "Book",
+      "utterance": "note: dust jacket lost",
+      "kind": "routing",
+      "expected_label": "Record/add_note"
+    },
+    {
+      "context": "Book",
+      "utterance": "Make a remark on this book that it was rebound in March",
+      "kind": "routing",
+      "expected_label": "Record/add_note"
+    },
+    {
+      "context": "Book",
+      "utterance": "Write on this record that the barcode sticker is peeling off",
+      "kind": "routing",
+      "expected_label": "Record/add_note"
+    },
+    {
+      "context": "Book",
+      "utterance": "Show me every note attached to this book",
+      "kind": "routing",
+      "expected_label": "Record/show_notes"
+    },
+    {
+      "context": "Book",
+      "utterance": "Are there any remarks recorded for this book?",
+      "kind": "routing",
+      "expected_label": "Record/show_notes"
+    },
+    {
+      "context": "Book",
+      "utterance": "notes pls",
+      "kind": "routing",
+      "expected_label": "Record/show_notes"
+    },
+    {
+      "context": "Book",
+      "utterance": "What's been written on this title's record so far?",
+      "kind": "routing",
+      "expected_label": "Record/show_notes"
+    },
+    {
+      "context": "Book",
+      "utterance": "Display the notes for the open book",
+      "kind": "routing",
+      "expected_label": "Record/show_notes"
+    },
+    {
+      "context": "Book",
+      "utterance": "what am I able to do with this book",
+      "kind": "routing",
+      "expected_label": "IntentDetection/what_can_i_do"
+    },
+    {
+      "context": "Book",
+      "utterance": "list the things I can ask for while I'm on a book",
+      "kind": "routing",
+      "expected_label": "IntentDetection/what_can_i_do"
+    },
+    {
+      "context": "Member",
+      "utterance": "List everything this member currently has checked out with due dates",
+      "kind": "routing",
+      "expected_label": "Member/list_member_loans"
+    },
+    {
+      "context": "Member",
+      "utterance": "Which titles is this patron borrowing at the moment?",
+      "kind": "routing",
+      "expected_label": "Member/list_member_loans"
+    },
+    {
+      "context": "Member",
+      "utterance": "their loans?",
+      "kind": "routing",
+      "expected_label": "Member/list_member_loans"
+    },
+    {
+      "context": "Member",
+      "utterance": "Show loans for this member starting at row 11",
+      "kind": "routing",
+      "expected_label": "Member/list_member_loans"
+    },
+    {
+      "context": "Member",
+      "utterance": "How many items has this member got on loan right now?",
+      "kind": "routing",
+      "expected_label": "Member/list_member_loans"
+    },
+    {
+      "context": "Member",
+      "utterance": "Display this member's name and number of loans",
+      "kind": "routing",
+      "expected_label": "Member/show_member"
+    },
+    {
+      "context": "Member",
+      "utterance": "Who is the member I currently have open?",
+      "kind": "routing",
+      "expected_label": "Member/show_member"
+    },
+    {
+      "context": "Member",
+      "utterance": "member info",
+      "kind": "routing",
+      "expected_label": "Member/show_member"
+    },
+    {
+      "context": "Member",
+      "utterance": "What's the name on this patron's card?",
+      "kind": "routing",
+      "expected_label": "Member/show_member"
+    },
+    {
+      "context": "Member",
+      "utterance": "Give me a quick overview of this member",
+      "kind": "routing",
+      "expected_label": "Member/show_member"
+    },
+    {
+      "context": "Member",
+      "utterance": "Add a note to this member: phone number updated",
+      "kind": "routing",
+      "expected_label": "Record/add_note"
+    },
+    {
+      "context": "Member",
+      "utterance": "Can you record that this patron prefers text reminders?",
+      "kind": "routing",
+      "expected_label": "Record/add_note"
+    },
+    {
+      "context": "Member",
+      "utterance": "note: paid the late fee",
+      "kind": "routing",
+      "expected_label": "Record/add_note"
+    },
+    {
+      "context": "Member",
+      "utterance": "Put a remark here that the member requested a new card",
+      "kind": "routing",
+      "expected_label": "Record/add_note"
+    },
+    {
+      "context": "Member",
+      "utterance": "Write down that this member volunteers at story time on Fridays",
+      "kind": "routing",
+      "expected_label": "Record/add_note"
+    },
+    {
+      "context": "Member",
+      "utterance": "Show all the notes on this member's record",
+      "kind": "routing",
+      "expected_label": "Record/show_notes"
+    },
+    {
+      "context": "Member",
+      "utterance": "Has anything been noted about this patron?",
+      "kind": "routing",
+      "expected_label": "Record/show_notes"
+    },
+    {
+      "context": "Member",
+      "utterance": "notes on file?",
+      "kind": "routing",
+      "expected_label": "Record/show_notes"
+    },
+    {
+      "context": "Member",
+      "utterance": "What remarks do we have for this member?",
+      "kind": "routing",
+      "expected_label": "Record/show_notes"
+    },
+    {
+      "context": "Member",
+      "utterance": "Display this member's note log",
+      "kind": "routing",
+      "expected_label": "Record/show_notes"
+    },
+    {
+      "context": "Member",
+      "utterance": "what can be done from a member's record",
+      "kind": "routing",
+      "expected_label": "IntentDetection/what_can_i_do"
+    },
+    {
+      "context": "Member",
+      "utterance": "which commands work on this member",
+      "kind": "routing",
+      "expected_label": "IntentDetection/what_can_i_do"
+    },
+    {
+      "context": "Record",
+      "utterance": "Add the note 'checked by staff on Monday' to this record",
+      "kind": "routing",
+      "expected_label": "Record/add_note"
+    },
+    {
+      "context": "Record",
+      "utterance": "Would you attach a note saying the label needs replacing?",
+      "kind": "routing",
+      "expected_label": "Record/add_note"
+    },
+    {
+      "context": "Record",
+      "utterance": "new note: follow up next week",
+      "kind": "routing",
+      "expected_label": "Record/add_note"
+    },
+    {
+      "context": "Record",
+      "utterance": "Please write a remark on this record that it was audited",
+      "kind": "routing",
+      "expected_label": "Record/add_note"
+    },
+    {
+      "context": "Record",
+      "utterance": "Stick a note on here: contact details verified",
+      "kind": "routing",
+      "expected_label": "Record/add_note"
+    },
+    {
+      "context": "Record",
+      "utterance": "Display every note stored on this record",
+      "kind": "routing",
+      "expected_label": "Record/show_notes"
+    },
+    {
+      "context": "Record",
+      "utterance": "What notes have been left on this record?",
+      "kind": "routing",
+      "expected_label": "Record/show_notes"
+    },
+    {
+      "context": "Record",
+      "utterance": "notes so far?",
+      "kind": "routing",
+      "expected_label": "Record/show_notes"
+    },
+    {
+      "context": "Record",
+      "utterance": "Is there a note history I can look at for this record?",
+      "kind": "routing",
+      "expected_label": "Record/show_notes"
+    },
+    {
+      "context": "Record",
+      "utterance": "Read back the remarks attached here",
+      "kind": "routing",
+      "expected_label": "Record/show_notes"
+    },
+    {
+      "context": "Record",
+      "utterance": "what operations does this record support",
+      "kind": "routing",
+      "expected_label": "IntentDetection/what_can_i_do"
+    },
+    {
+      "context": "Record",
+      "utterance": "tell me what I can ask for at this point",
+      "kind": "routing",
+      "expected_label": "IntentDetection/what_can_i_do"
+    },
+    {
+      "context": "Library",
+      "utterance": "What time does Central open in the morning?",
+      "kind": "escalation",
+      "expected_label": "wildcard",
+      "expected_ancestor_command": "library_hours"
+    },
+    {
+      "context": "Library",
+      "utterance": "Is Riverside open on Mondays?",
+      "kind": "escalation",
+      "expected_label": "wildcard",
+      "expected_ancestor_command": "library_hours"
+    },
+    {
+      "context": "Library",
+      "utterance": "closing time today?",
+      "kind": "escalation",
+      "expected_label": "wildcard",
+      "expected_ancestor_command": "library_hours"
+    },
+    {
+      "context": "Library",
+      "utterance": "Tell me the hours for both branches",
+      "kind": "escalation",
+      "expected_label": "wildcard",
+      "expected_ancestor_command": "library_hours"
+    },
+    {
+      "context": "Library",
+      "utterance": "Until when can I visit the Central branch on a Saturday?",
+      "kind": "escalation",
+      "expected_label": "wildcard",
+      "expected_ancestor_command": "library_hours"
+    },
+    {
+      "context": "Library",
+      "utterance": "Are you open right now?",
+      "kind": "escalation",
+      "expected_label": "wildcard",
+      "expected_ancestor_command": "library_hours"
+    },
+    {
+      "context": "Library",
+      "utterance": "riverside hours pls",
+      "kind": "escalation",
+      "expected_label": "wildcard",
+      "expected_ancestor_command": "library_hours"
+    },
+    {
+      "context": "Library",
+      "utterance": "What days of the week is the library open?",
+      "kind": "escalation",
+      "expected_label": "wildcard",
+      "expected_ancestor_command": "library_hours"
+    },
+    {
+      "context": "Book",
+      "utterance": "Count the overdue loans across every branch",
+      "kind": "escalation",
+      "expected_label": "wildcard",
+      "expected_ancestor_command": "Library/count_overdue"
+    },
+    {
+      "context": "Book",
+      "utterance": "Search the member list for someone named Chen",
+      "kind": "escalation",
+      "expected_label": "wildcard",
+      "expected_ancestor_command": "Library/find_member"
+    },
+    {
+      "context": "Book",
+      "utterance": "What branches does this library operate?",
+      "kind": "escalation",
+      "expected_label": "wildcard",
+      "expected_ancestor_command": "Library/list_branches"
+    },
+    {
+      "context": "Book",
+      "utterance": "What time does the Central branch open on Monday?",
+      "kind": "escalation",
+      "expected_label": "wildcard",
+      "expected_ancestor_command": "library_hours"
+    },
+    {
+      "context": "Book",
+      "utterance": "Switch over to member m2's record",
+      "kind": "escalation",
+      "expected_label": "wildcard",
+      "expected_ancestor_command": "Library/open_member"
+    },
+    {
+      "context": "Book",
+      "utterance": "What books by Jane Austen are in the catalogue?",
+      "kind": "escalation",
+      "expected_label": "wildcard",
+      "expected_ancestor_command": "Library/find_book"
+    },
+    {
+      "context": "Book",
+      "utterance": "Give me a full report on Ann Lee, loans and notes",
+      "kind": "escalation",
+      "expected_label": "wildcard",
+      "expected_ancestor_command": "Library/member_report"
+    },
+    {
+      "context": "Book",
+      "utterance": "How many Frank Herbert titles does the library hold?",
+      "kind": "escalation",
+      "expected_label": "wildcard",
+      "expected_ancestor_command": "Library/count_books"
+    },
+    {
+      "context": "Member",
+      "utterance": "When does Riverside shut on a Saturday?",
+      "kind": "escalation",
+      "expected_label": "wildcard",
+      "expected_ancestor_command": "library_hours"
+    },
+    {
+      "context": "Member",
+      "utterance": "Search the catalogue for Dune Messiah",
+      "kind": "escalation",
+      "expected_label": "wildcard",
+      "expected_ancestor_command": "Library/find_book"
+    },
+    {
+      "context": "Member",
+      "utterance": "Jump to the book with id b3",
+      "kind": "escalation",
+      "expected_label": "wildcard",
+      "expected_ancestor_command": "Library/open_book"
+    },
+    {
+      "context": "Member",
+      "utterance": "Tell me Persuasion's author and copy count",
+      "kind": "escalation",
+      "expected_label": "wildcard",
+      "expected_ancestor_command": "Library/book_by_title"
+    },
+    {
+      "context": "Member",
+      "utterance": "Which members currently have Emma out?",
+      "kind": "escalation",
+      "expected_label": "wildcard",
+      "expected_ancestor_command": "Library/book_loans"
+    },
+    {
+      "context": "Member",
+      "utterance": "How many loans are running late at Central?",
+      "kind": "escalation",
+      "expected_label": "wildcard",
+      "expected_ancestor_command": "Library/count_overdue"
+    },
+    {
+      "context": "Member",
+      "utterance": "Name the library's branches for me",
+      "kind": "escalation",
+      "expected_label": "wildcard",
+      "expected_ancestor_command": "Library/list_branches"
+    },
+    {
+      "context": "Member",
+      "utterance": "Give me every Herbert book with its number of copies",
+      "kind": "escalation",
+      "expected_label": "wildcard",
+      "expected_ancestor_command": "Library/author_books"
+    },
+    {
+      "context": "Record",
+      "utterance": "What are the opening hours this Friday?",
+      "kind": "escalation",
+      "expected_label": "wildcard",
+      "expected_ancestor_command": "library_hours"
+    },
+    {
+      "context": "Record",
+      "utterance": "Look for a member whose name includes Ann",
+      "kind": "escalation",
+      "expected_label": "wildcard",
+      "expected_ancestor_command": "Library/find_member"
+    },
+    {
+      "context": "Record",
+      "utterance": "Search books for the author Herbert",
+      "kind": "escalation",
+      "expected_label": "wildcard",
+      "expected_ancestor_command": "Library/find_book"
+    },
+    {
+      "context": "Record",
+      "utterance": "How many overdue loans does the library have in total?",
+      "kind": "escalation",
+      "expected_label": "wildcard",
+      "expected_ancestor_command": "Library/count_overdue"
+    },
+    {
+      "context": "Record",
+      "utterance": "Tell me all the library's sites",
+      "kind": "escalation",
+      "expected_label": "wildcard",
+      "expected_ancestor_command": "Library/list_branches"
+    },
+    {
+      "context": "Record",
+      "utterance": "Give me the overall library status with branches and late loans",
+      "kind": "escalation",
+      "expected_label": "wildcard",
+      "expected_ancestor_command": "Library/overdue_summary"
+    },
+    {
+      "context": "Record",
+      "utterance": "Take me to book b2",
+      "kind": "escalation",
+      "expected_label": "wildcard",
+      "expected_ancestor_command": "Library/open_book"
+    },
+    {
+      "context": "Record",
+      "utterance": "Is there a patron by the name of Raj Patel?",
+      "kind": "escalation",
+      "expected_label": "wildcard",
+      "expected_ancestor_command": "Library/find_record"
+    }
+  ]
+}

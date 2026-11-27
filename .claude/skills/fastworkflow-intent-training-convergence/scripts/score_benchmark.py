@@ -41,7 +41,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import fastworkflow
-from fastworkflow.model_pipeline_training import CommandRouter
+from fastworkflow.intent.router import CommandRouter
 from fastworkflow.train import artifact_versioning, heldout_evaluation
 
 

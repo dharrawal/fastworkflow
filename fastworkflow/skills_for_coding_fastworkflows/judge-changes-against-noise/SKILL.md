@@ -38,11 +38,24 @@ repeated LLM runs require on top of that. Code and templates are in [reference.m
   - the lane and worker layout;
   - env and budget values;
   - the benchmark version digest;
-  - framework and app commits, taken from clean trees.
+  - framework and app commits, taken from clean trees;
+  - the intent head: the workflow's current trained version and its commit threshold.
 
   Write all of it into each experiment description before a runner binds the registration.
-  Afterwards edits are refused (`update_experiment_description`). Recompute the fingerprint
-  before comparing: a working checkout once moved three commits between a baseline and its rerun.
+  Afterwards edits are refused (`update_experiment_description`). Check the recorded commits and
+  clean-tree flags before comparing: a working checkout once moved three commits between a
+  baseline and its rerun.
+- **Hold the intent head still.** Learning from use is on by default and changes routing
+  between runs. The experiment harness forces `INTENT_LEARNING_REFIT=off` and `INTENT_LEARNING_RECORD=off` for its run and records the head version in force on each attempt; set them in the env file yourself only for turns driven outside the harness. Otherwise, after
+  every 25 new teaching rows (`INTENT_LEARNING_REFIT_EVERY`) a background refit publishes a new
+  head, and a running process picks it up within about 3 s, mid-stage. With recording on, the benchmark's own requests land in the learning store
+  and a later `fastworkflow learn` teaches them to the head (and may lower its threshold),
+  leaking the benchmark into the system under test. Do not run `fastworkflow learn` inside a
+  stage.
+- **Retrain before the stage, not during it.** A commit that edits a command changes the
+  training inputs, so run `fastworkflow train` on it before the first run. In the default
+  `embedding` layout any command change refits the whole head, so the head's routing is part of
+  what that commit changes; read the training report's confused pairs as collateral (§3).
 - **Restore state between rounds.** Tasks that write need the data put back to a documented
   baseline before each round. Log the restore so graders can check it.
 - **List each change's target tasks before the run**: the tasks the change was built to fix.
@@ -93,7 +106,7 @@ For each change:
 2. **Compare the runs as sets, not as means.** Write them as "old R1/R2/R3 → new R1/R2/R3", for
    example `10 / 8.5 / 9 → 12.5 / 13.5 / 13`.
 3. **Check collateral damage through the cause tags.** A change can help its targets and hurt
-   elsewhere. For example, new skill descriptions that the splitter also reads can add split
+   elsewhere. For example, new planning-command descriptions that the splitter also reads can add split
    losses on other tiers. Compare lines lost per cause outside the target set, old vs new.
 4. **Check the side effects that are not scores:** LLM calls per job, time per job, and fan-out
    caps hit.
@@ -146,9 +159,9 @@ exactly.
 
 ## 6. Offline component replays: useful, and easy to fool yourself with
 
-Before spending a full stage, replay the cheap LLM components (the request splitter, the skill
-matcher) on every benchmark prompt. Score them with small checkers, such as an expected job list
-per prompt or an expected skill per task. This catches routing drift early. It does not replace a
+Before spending a full stage, replay the cheap LLM components (the request splitter, the intent
+decision on each part) on every benchmark prompt. Score them with small checkers, such as an
+expected job list per prompt or an expected command per task. This catches routing drift early. It does not replace a
 stage, because a replay's gain did not always survive live runs.
 
 Five pitfalls, each of which has produced a false conclusion:
@@ -159,11 +172,10 @@ Five pitfalls, each of which has produced a false conclusion:
    conclude causation from 2-run controls.
 2. **Make sure the cache is really off.** If repeats are cache hits, they look perfectly stable and
    every comparison is meaningless. `FW_LM_CACHE=0` disables the DSPy response cache
-   (`fastworkflow/utils/dspy_utils.py`). It is read through `fastworkflow.get_env_var`, which looks
-   at the env files the workflow loaded. When the caller passes a default, as this read does,
-   `os.environ` is never consulted. So setting it in `os.environ` inside a harness does nothing.
-   Put it in the env file the harness passes to `fastworkflow.init`, the way `ExperimentHarness`
-   sets it in the loaded values. Then **verify** it. `cache_hit` is often absent on recorded
+   (`fastworkflow/utils/dspy_utils.py`). It is read through `fastworkflow.get_env_var`: the env
+   files `fastworkflow.init` loaded first, then the process environment. So a value in a loaded
+   env file wins over one exported in the shell. `ExperimentHarness` sets it in the loaded values
+   (its default `defeat_caches`). Then **verify** it. `cache_hit` is often absent on recorded
    `fw.llm.call` spans, and absent means unknown, not a miss. Use evidence that does not depend
    on the flag:
    - repeats of a nontrivial prompt should sometimes differ, so count the distinct answers;
@@ -194,12 +206,12 @@ Publish one results page per stage. Keep the grades JSON as the record. The page
 - lost lines per run, grouped by cause (and stage) with the tasks behind each group;
 - **next fixes**, each with its "lines at stake": the lines lost per run on the tasks it targets.
   That number is a ceiling, not a forecast, and the page says so;
-- what ran: the commits, models, cache, unattended setting, lanes, the state restores, and the
-  grading setup.
+- what ran: the commits, intent head version, models, cache, learning settings, unattended
+  setting, lanes, the state restores, and the grading setup.
 
 Results are immutable. A correction is a new version of the page or file, and it leaves the
 original in place. The template is in [reference.md](reference.md#results-page-outline). Record the conclusion in the
-experiment notes as well, and the cross-stage synthesis in the benchmark analysis (see
+experiment notes as well, and the cross-stage synthesis as a task summary comment (see
 [optimize-workflow-with-feedback](../optimize-workflow-with-feedback/SKILL.md)).
 
 ## Anti-patterns
@@ -218,6 +230,7 @@ experiment notes as well, and the cross-stage synthesis in the benchmark analysi
 ```
 - [ ] Hypotheses, target tasks, metrics and the keep/revert rule pre-registered
 - [ ] Three or more runs per task; one configuration; commits in the experiment descriptions
+- [ ] Head retrained before the stage; learning off (the harness forces it; set it by hand outside the harness)
 - [ ] Repeats checked for distinct answers; noise floor known; pins recomputed; no dropped spans
 - [ ] Target tasks listed per change before the run
 - [ ] Each risky change is its own commit

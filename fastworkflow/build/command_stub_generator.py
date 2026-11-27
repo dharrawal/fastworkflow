@@ -11,9 +11,9 @@ import os
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple, Set
 
-from fastworkflow.command_context_model import CommandContextModel, CommandContextModelValidationError
+from fastworkflow.core.command_context_model import CommandContextModel, CommandContextModelValidationError
 from fastworkflow.utils.logging import logger
-from fastworkflow.utils.context_utils import get_context_names
+from fastworkflow.core.context_utils import get_context_names
 
 __all__ = ["CommandStubGenerator"]
 
@@ -24,7 +24,8 @@ class CommandStubGenerator:
     def __init__(
         self, 
         commands_root: str | Path = "_commands", 
-        model_path: str | Path = "_commands/context_inheritance_model.json"
+        model_path: str | Path = "_commands/context_inheritance_model.json",
+        model: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Initialize the command stub generator.
 
@@ -35,7 +36,9 @@ class CommandStubGenerator:
         """
         self.commands_root = Path(commands_root)
         self.model_path = Path(model_path)
-        self._model_data: Optional[Dict[str, Any]] = None
+        # ``{context: {"base": [...]}}`` given by the caller (``fastworkflow build`` derives it from the classes and
+        # writes no file); without it the model is read from *model_path*
+        self._model_data: Optional[Dict[str, Any]] = model
 
     def load_context_model(self) -> Dict[str, Any]:
         """Load the context model using the ContextModelLoader.

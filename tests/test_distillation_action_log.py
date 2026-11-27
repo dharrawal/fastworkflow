@@ -24,9 +24,9 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow.distillation import DistillationSession, distill_message
-from fastworkflow.workflow_agent import _append_action_record
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.evaluation.distillation import DistillationSession, distill_message
+from fastworkflow.agent.workflow_agent import _append_action_record
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 
 @pytest.fixture
@@ -37,7 +37,7 @@ def todo_workflow_path() -> str:
 @pytest.fixture
 def initialized_fastworkflow():
     fastworkflow.init({})
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     RoutingRegistry.clear_registry()
     yield
@@ -186,14 +186,14 @@ def test_run_agent_pass_returns_a_detached_action_snapshot(
         return _ScriptedAgent(chat_session, pass_commands.pop(0))
 
     monkeypatch.setattr(
-        "fastworkflow.workflow_agent.initialize_workflow_tool_agent", scripted_agent
+        "fastworkflow.agent.workflow_agent.initialize_workflow_tool_agent", scripted_agent
     )
     monkeypatch.setattr(
-        "fastworkflow.workflow_agent.build_query_with_next_steps",
+        "fastworkflow.agent.workflow_agent.build_query_with_next_steps",
         lambda user_query, session, **kwargs: user_query,
     )
     monkeypatch.setattr(
-        "fastworkflow.workflow_agent._what_can_i_do", lambda session: "commands"
+        "fastworkflow.agent.workflow_agent._what_can_i_do", lambda session: "commands"
     )
     monkeypatch.setattr(
         "fastworkflow.utils.dspy_utils.get_lm", lambda *args, **kwargs: None
@@ -209,17 +209,13 @@ def test_run_agent_pass_returns_a_detached_action_snapshot(
     _, _, teacher_actions, _ = ds._run_agent_pass(
         "list my tasks",
         agent_lm_role="LLM_TEACHER_AGENT",
-        agent_api_key_role="LITELLM_API_KEY_TEACHER_AGENT",
         planner_lm_role="LLM_TEACHER_PLANNER",
-        planner_api_key_role="LITELLM_API_KEY_TEACHER_PLANNER",
     )
     ds.restore_workflow_state(initial)
     _, _, student_actions, _ = ds._run_agent_pass(
         "list my tasks",
         agent_lm_role="LLM_STUDENT_AGENT",
-        agent_api_key_role="LITELLM_API_KEY_STUDENT_AGENT",
         planner_lm_role="LLM_STUDENT_PLANNER",
-        planner_api_key_role="LITELLM_API_KEY_STUDENT_PLANNER",
     )
 
     assert [a["command_name"] for a in teacher_actions] == [

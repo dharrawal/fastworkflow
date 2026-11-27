@@ -17,8 +17,8 @@ import json
 import dspy
 from dspy.utils.dummies import dotdict
 
-from fastworkflow.utils.chat_adapter import CommandsSystemPreludeAdapter
-from fastworkflow.utils.react import fastWorkflowReAct
+from fastworkflow.agent.chat_adapter import CommandsSystemPreludeAdapter
+from fastworkflow.agent.react import fastWorkflowReAct
 
 AVAILABLE = (
     "Commands available in the current context (ItemExplorer):\n"

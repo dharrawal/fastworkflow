@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Changes data or needs a yes · Design idioms · fastWorkflow</title>
+<link rel="stylesheet" href="idioms.css">
+</head>
+<body data-page="e-writes">
+<aside class="rail"></aside>
+
+<main id="top">
+  <section class="group execution">
+<!-- IDIOM BODY START -->
+    <article class="idiom" id="e-writes">
+      <div class="prose">
+        <p class="num">09</p>
+        <h3>Changes data or needs a yes</h3>
+        <p>Some commands are risky to run: they add a note, cancel an order, send an email. fastWorkflow gives you two marks for them, with different jobs.</p>
+        <ul>
+          <li><code>@fastworkflow.writes</code> says "this command changes data". It asks no one. It limits what a <em>planning command</em> (a command that lists steps for an agent to carry out instead of running code; see <a href="p-plan.html">A plan in place of a body</a>) may run: a step can run it only when the step names it.</li>
+          <li><code>@fastworkflow.user_approval_for_execution(...)</code> says "a person must say yes first". The framework stops just before the command runs and asks the user.</li>
+        </ul>
+        <p>Put <code>@writes</code> on every command that changes data, even one whose change is easy to undo. Add the approval mark only when the user must confirm each run. Neither mark replaces the other: <code>@writes</code> (the fact that the command changes data) never asks anyone, and the approval mark (who must agree) does not tell the framework the command changes data; the review's "changes data" note, its explicit <code>yes</code>, the look-up-only guard and a policy table's write rules read <code>@writes</code> only. One rule reads both: a command a model chose is confirmed when it carries either mark (below). A command that only reads, or only moves the user to another record, carries neither. Both marks go on the <code>ResponseGenerator</code> of an <em>execution command</em> (a command whose Python code does the work; see <a href="e-file.html">One file, two classes</a>). Here is the library example's <code>add_note</code> with both. The shipped file carries only <code>@writes</code>; the approval lines are added to show the second mark.</p>
+      </div>
+      <figure>
+        <figcaption>fastworkflow/examples/library/_commands/Record/add_note.py (approval added)</figcaption>
+        <pre><code>import fastworkflow
+from pydantic import BaseModel, Field
+
+
+class Signature:
+    """Add a note to the open record."""
+
+    class Input(BaseModel):
+        text: str = Field(description="the note to add", examples=["the cover is torn"])
+
+    class Output(BaseModel):
+        total: int = Field(description="how many notes the record holds now")
+
+    plain_utterances = ["add a note: card renewed", "note that the cover is torn"]   <span class="c"># six more in the file</span>
+
+
+@fastworkflow.user_approval_for_execution(
+    fastworkflow.UserApproval.REQUIRED_ALWAYS)   <span class="c"># ask the user first; or REQUIRED_UNTIL_DELEGATED</span>
+@fastworkflow.writes                             <span class="c"># running this changes the application's data</span>
+class ResponseGenerator:
+    approval_template = 'the note "{text}"'      <span class="c"># optional: your wording in the question</span>
+
+    def __call__(self, workflow: fastworkflow.Workflow, command: str,
+                 input: Signature.Input) -&gt; Signature.Output:
+        record = workflow.record
+        record.notes.append(input.text)
+        return Signature.Output(total=len(record.notes))</code></pre>
+      </figure>
+      <div class="prose">
+        <h4>@writes: the command changes data</h4>
+        <p>The decorator takes no arguments and changes nothing about how the command itself runs. A planning command never carries it: the framework works out that a planning command writes when one of its steps runs a command marked <code>@writes</code>, directly or through another planning command it calls. The framework reads it in four places.</p>
+      </div>
+      <figure>
+        <figcaption>what @writes makes the framework do</figcaption>
+        <ol class="walk">
+          <li><strong>Inside a planning command, a write runs only when a step names it.</strong> While an agent carries out one phase (one group of steps) of a planning command, the list of commands it is shown leaves out every <code>@writes</code> command that no step of that phase names. If the agent calls one anyway, the call is refused and not run, and the agent reads: "add_note was not run: it changes the application's data, and no step of this part of the job runs it." So a planning command that only looks things up can never change your data by accident.</li>
+          <li><strong>No more often than the steps name it.</strong> A step that names <code>add_note</code> once allows one successful run of it in that phase. A second call is refused with "it already ran as many times in this part of the job as its steps name it. Do not repeat it". A run the user approved (below) counts too, so a repeat is refused, not asked about again. A phase that repeats for each item (see <a href="p-fan.html">Once per item</a>) gets a fresh count for each item. For the same reason, when a phase finds nothing and the framework would normally plan the call again, it does not do so when that phase's steps name a write, so nothing is written twice.</li>
+          <li><strong>The review says "changes data".</strong> When the framework shows the user the parts of a request before running them (see <a href="r-turn.html#p-review">the review</a>), a part whose command writes ends with " - changes data". An ad hoc part (no command matched it, so the agent plans it) ends with " - may change data" when the workflow has any command that writes and an agent model is set, because code cannot tell which commands the agent will call. If the user asks to only look that part up ("just look up step 2", "only check it, don't change anything"), the framework picks a command for it again from the commands that do not write; when none fits, the part becomes an ad hoc part. Either way the part is look-up only while it runs: a command that writes (one that carries <code>@writes</code>, or a planning command whose steps reach one) is refused unrun, whether the agent calls it, code runs it as a step, or it is a step of a planning command the part runs, and the agent (or, with no agent model, the part's not-run entry) reads "Record/add_note was not run: it changes the application's data, and you asked for this part only to be looked up." The review then shows that part with " - look up only" instead of " - changes data", and when no other part changes or may change data the turn does not need an explicit <code>yes</code>. Merging a look-up-only part with another keeps the merged part look-up only, and splitting it makes every piece look-up only. The guard is only as complete as the <code>@writes</code> marks: a command that changes data without the mark is not refused. The review of a turn that has a part that changes or may change data accepts only an explicit <code>yes</code> (see <a href="r-turn.html#p-review">the review</a>), and says so: "This request changes data, so I need an explicit yes to run it." ("may change data" when only an ad hoc part may). A reply such as "don't change anything" or "go ahead" does not accept it, and the question is asked again.</li>
+          <li><strong>A command a model chose waits for a yes.</strong> A command that writes, or that carries the approval mark (while <code>FW_APPROVAL_BINDING</code> is <code>enforce</code>), runs only when the user named it (typed its exact name, picked it at the which-command question, or a client pinned it or called it directly), or after the user says yes to it. A close misspelling of its name is not naming it. When the local or the remote model, or a misspelling of its name, chose it, a request that is that one command goes to the review instead of running at once, and on the <code>/</code> path the user is asked "Did you mean the command 'add_note'?", answered by its name or a yes (the whole reply is <code>yes</code>, <code>true</code>, <code>ok</code>, <code>agreed</code>, <code>accept</code> or <code>go</code>; case and a trailing <code>.</code> or <code>!</code> are ignored). When the command's approval question (below) will be asked anyway, that question is the yes and nothing else is asked.</li>
+        </ol>
+      </figure>
+      <div class="prose">
+        <p>Outside a planning command (a command the user typed, or the main agent answering a request) <code>@writes</code> refuses no call; it only decides whether a model's pick needs a yes. This planning command from the library carries no mark; it writes because a step runs <code>add_note</code>:</p>
+      </div>
+      <figure>
+        <figcaption>fastworkflow/examples/library/_commands/Library/note_member.py</figcaption>
+        <pre><code>class PlanGenerator:
+    def note(self, input):
+        return [run("find_member", query=input.member),
+                run("open_member", named=input.member),
+                run("add_note", text=input.text),   <span class="c"># the one write this phase may make, once</span>
+                "say whose record the note was added to"]</code></pre>
+      </figure>
+      <div class="prose">
+        <h4 id="e-approval">The approval mark: ask before it runs</h4>
+        <p>Leave the approval mark off and the command runs whenever the agent (the model that picks and calls commands for the user) decides to call it. With it, the framework stops before the run, shows the user what is about to happen, and waits. The mark takes one of two values of <code>fastworkflow.UserApproval</code>:</p>
+        <ul>
+          <li><code>REQUIRED_ALWAYS</code>: a person confirms every run, even a command they typed themselves (a <code>/</code> message or assistant mode), and it can never be delegated.</li>
+          <li><code>REQUIRED_UNTIL_DELEGATED</code>: the agent needs the user's say. The user's own typed command counts as that say (its exact name, or a pick at the which-command question; a model's pick from the user's words is confirmed first, as above), and so does a standing <code>always</code> approval, so those runs go ahead without a question. A step of a planning command the user typed is asked about like an agent's call, because the step is the agent's.</li>
+        </ul>
+        <p>What the user sees, word for word: "The agent wants to run Record/add_note with text=card renewed. Reply yes to approve or no to decline. You are asked every time." For a <code>REQUIRED_UNTIL_DELEGATED</code> command the question ends "Reply yes to approve, no to decline, or always to approve this command from now on." The question never says whether the change can be undone, because the framework does not know; if your users should read that, write it in <code>approval_template</code>. When the user typed the command, it opens "You asked to run" instead. The part after "with" lists the parameter values. The optional <code>approval_template</code> string on the class replaces it with your own wording, filled from the values like <code>str.format</code>; a template that does not fill falls back to the list. The template is checked when the files load: a name in braces that is not a field of <code>Input</code>, or a template on a command with no approval mark, fails the load of that command (see <a href="removed.html#load-rule">what a mistake stops</a>).</p>
+        <p>The reply is read whole. A yes (<code>yes</code>, <code>true</code>, <code>ok</code>, <code>agreed</code>, <code>accept</code> or <code>go</code>; case and a trailing <code>.</code> or <code>!</code> are ignored) runs that one call, once, with the values shown. <code>no</code>, read the same way, declines and nothing runs. <code>always</code> is offered only for <code>REQUIRED_UNTIL_DELEGATED</code>: it runs the call and records a standing approval for that user, workflow and command, so later agent calls run without a question. A <code>REQUIRED_ALWAYS</code> question does not offer <code>always</code>; typing it anyway is not read as a yes, records nothing and gets the question again. Anything else gets the same question again too. A standing approval recorded earlier for a <code>REQUIRED_ALWAYS</code> command is ignored, though it still shows in <code>/approvals</code> and <code>/revoke_approval</code> removes it. The user lists standing approvals with <code>/approvals</code> and removes one with <code>/revoke_approval &lt;command&gt;</code>; <code>/cancel_pending</code> drops the question. The question expires after 2 turns or 15 minutes, and if the values changed since it was asked, the call is not run.</p>
+        <p>One limit, and one refusal. The setting <code>FW_APPROVAL_BINDING</code> turns every approval mark off for the whole process: <code>off</code> asks nothing, <code>shadow</code> records each decision but runs the call (the default is <code>enforce</code>). And the gate does not run a call it cannot check: when the workflow's routing or a command's mark cannot be read, or a short name matches several commands one of which carries a mark, the call is refused with a message ("... that name matches several commands (...) and one of them needs your approval. Call it by its full name.").</p>
+        <p>One question is out at a time. When no person can answer (an unattended run), the call is not run, nothing is kept waiting, and the caller reads "Record/add_note was not run: it needs your approval, and no one can give it on this turn. Run it again when you can answer." A standing approval does not change that for a <code>REQUIRED_UNTIL_DELEGATED</code> command, unless the server verifies who each end user is; for a <code>REQUIRED_ALWAYS</code> command it never does. A second call that needs approval while one question is open is not run either: "Record/add_note was not run: it needs your approval, and another approval is already waiting for your answer. Answer that one first, then run it again."</p>
+        <h4>Beginner mistakes</h4>
+        <p>Forget <code>@writes</code> on a command that changes data, and the framework treats it as read-only: an agent working through a planning command that only looks things up may run it unasked, a model's pick of it runs with no yes, and the review does not warn the user. The guard, the note and the yes are only as complete as the marks and the step names. Some shipped examples that change data carry no mark (the messaging apps' <code>send_message</code>, <code>simple_workflow_template</code>'s <code>mark_as_complete</code>, <code>add_child_workitem</code>, <code>remove_child_workitem</code> and <code>remove_all_child_workitems</code>); do not copy them.</p>
+        <p>Put <code>@writes</code> on a planning command's <code>PlanGenerator</code>, and that command does not load: "a planning command cannot carry @writes ... put the decorator on that execution command". The old spelling, a class attribute <code>writes = True</code>, also fails the load of its command and names the decorator.</p>
+        <p>Put the approval mark on a <code>PlanGenerator</code>, and the command fails to load with "a planning command cannot carry @user_approval_for_execution. Its steps are asked about when they run a command that carries it: put the decorator on that execution command". Both marks follow one rule on a planning command: it needs what the commands its steps run need, directly or through another planning command it calls. The command lists mark it "(needs your approval before it runs)" when a step reaches a <code>REQUIRED_ALWAYS</code> command, else "(may need your approval)" when one reaches a <code>REQUIRED_UNTIL_DELEGATED</code> command. The planning command itself is never stopped; each such step's call is asked about.</p>
+      </div>
+    </article>
+<!-- IDIOM BODY END -->
+  </section>
+
+  <nav class="pager" aria-label="Previous and next">
+    <a class="prev" href="e-return.html"><span>Previous</span>What it returns</a>
+    <a class="next" href="e-root.html"><span>Next</span>The root object</a>
+  </nav>
+</main>
+<script src="nav.js"></script>
+<script src="idioms.js"></script>
+</body>
+</html>

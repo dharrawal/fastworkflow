@@ -2,8 +2,8 @@ import json
 
 import dspy
 import pytest
-from fastworkflow.conversation_summary import bounded_summary_inputs
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.session.conversation_summary import bounded_summary_inputs
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 
 def test_large_history_is_bounded_without_losing_source_evidence():
@@ -65,3 +65,33 @@ def test_successful_summary_receives_bounded_input_and_retains_raw_traces(monkey
     assert len(json.dumps(lm.history[-1]["messages"])) < 70000
     assert json.loads(traces)["agent_workflow_interactions"] == actions
 
+
+
+def test_context_built_without_init_finalises_with_turn_defaults(monkeypatch):
+    """A context made without ``__init__`` (state restore, tests) reads every per-turn attribute the finalise path
+    touches from a safe default, and mutable defaults are not shared between instances."""
+    from fastworkflow.utils import dspy_utils
+    monkeypatch.setattr(dspy_utils, "get_lm", lambda *a: (_ for _ in ()).throw(RuntimeError("no lm")))
+    host = object.__new__(WorkflowExecutionContext)
+    other = object.__new__(WorkflowExecutionContext)
+    host._conversation_history = dspy.History(messages=[])
+    host._turn_outputs = []
+    host._app_workflow = None
+    host._keep_alive = False
+    host._command_output_queue = None
+    host._command_trace_queue = None
+    host._action_log = []
+    assert host._turn_parts_of_answer is None
+    assert host._last_nested_stop is None
+    assert host._plan_resolution is None
+    assert host._resolution_pending is False
+    assert host._turn_plan_previews == {}
+    assert host._ask_user_rounds == []
+    host._turn_not_run.append({"sub_task": 1})
+    host._ask_user_rounds.append({"reply": "x"})
+    assert other._turn_not_run == [] and other._ask_user_rounds == []
+    host._tag_not_run()
+    assert host._turn_not_run == [{"sub_task": 1}]
+    host._turn_not_run.clear()
+    output = host._finalize_agent_output("audit", dspy.Prediction(final_answer="Done"))
+    assert output.command_response.response == "Done"

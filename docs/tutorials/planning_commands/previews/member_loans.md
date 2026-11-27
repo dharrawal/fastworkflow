@@ -13,7 +13,9 @@ Depth: 1 (lower bound; open steps name no command)
 
 | input | type | default | sample | classifier_confirms / classifier_decides | copied_from_command_text / record_named_in_command_text | description |
 |---|---|---|---|---|---|---|
-| `member` | str | required | `<member>` |  |  | the member's name |
+| `member` | str | required | `<member>` |  | yes | the member's name |
+
+- `member` must be written in the command text (`copied_from_command_text`).
 
 ## Example requests
 

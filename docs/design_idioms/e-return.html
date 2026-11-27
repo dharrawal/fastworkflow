@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>What it returns · Design idioms · fastWorkflow</title>
+<link rel="stylesheet" href="idioms.css">
+</head>
+<body data-page="e-return">
+<aside class="rail"></aside>
+
+<main id="top">
+  <section class="group execution">
+<!-- IDIOM BODY START -->
+    <article class="idiom" id="e-return">
+      <div class="prose">
+        <p class="num">08</p>
+        <h3>What it returns</h3>
+        <p>Every execution command says what it gives back with an <code>Output</code> class, and its code returns one. <code>Output</code> is a Pydantic model you nest inside the command's <code>Signature</code> class (the class that describes the command; see <a href="e-file.html">one file, two classes</a>). Reach for it in every command that answers with data: it is how the agent, a client and a later step all get your result without reading prose.</p>
+        <p>The one form to write: declare <code>Signature.Output</code>, give <code>__call__</code> the return annotation <code>-&gt; Signature.Output</code> (for you and your editor; the framework finds <code>Output</code> in the module, not in the annotation), and end <code>__call__</code> with <code>return Signature.Output(...)</code>. <code>__call__</code> is the method of <code>ResponseGenerator</code> that the framework calls to run the command. The example below is the library example's book search.</p>
+      </div>
+      <figure>
+        <figcaption>fastworkflow/examples/library/_commands/Library/find_book.py (trimmed: the fields' examples and the seed utterances left out, comments added)</figcaption>
+        <pre><code>class Signature:
+    """Find books by title or author."""
+
+    class Input(BaseModel):
+        query: str = Field(description="words of the title or the author's name",
+                           json_schema_extra={"copied_from_command_text": True})
+        start: Optional[int] = Field(default=None, ge=0, description="the first row of the page")
+
+    <span class="c"># what the command gives back: one field per value, each with a description</span>
+    class Output(BaseModel):
+        book_uids: list[str] = Field(description="the uid of each book found, in row order, such as "
+                                                 "b1, b2; open_book takes one",
+                                     json_schema_extra={"ui": {"table": "books"}})
+        titles: list[str] = Field(description="the title of each book found, in row order",
+                                  json_schema_extra={"ui": {"table": "books"}})
+        total: int = Field(description="how many books match, on every page")
+
+class ResponseGenerator:
+    def __call__(self, workflow: fastworkflow.Workflow, command: str,
+                 input: Signature.Input) -&gt; Signature.Output:
+        library: Library = workflow.record
+        found = library.find_books(input.query)
+        rows = page(found, input.start)
+        <span class="c"># return the instance; the framework writes the response text from it</span>
+        return Signature.Output(book_uids=rows, titles=[library.books[u].title for u in rows],
+                                total=len(found))</code></pre>
+      </figure>
+      <div class="prose">
+        <p>What the framework does with the returned <code>Output</code>:</p>
+        <ul>
+          <li>The response text is the <code>Output</code> as JSON. That text is what the agent reads, and what a person sees in assistant mode. When the command reads one page of rows (its <code>Input</code> has an <code>int</code> field named <code>start</code>, and its <code>Output</code> has a <code>total</code> and list fields of one length) and rows remain, the framework adds a line such as <code>Rows 1-20 of 57; next page: start=20.</code> It adds it only when <code>__call__</code> returns the <code>Output</code> itself, not inside a <code>CommandResponse</code>.</li>
+          <li>The instance itself is kept beside the text. <code>GET /command_schemas</code> publishes the <code>Output</code> JSON schema, descriptions included. A per-command MCP tool, with the schema and the instance as its structured result, exists only in the example MCP server (<code>fastworkflow/mcp_server.py</code>); the shipped <code>run_fastapi_mcp</code> server exposes turn tools, and the <code>Output</code> arrives inside the turn's command outputs.</li>
+          <li>A planning command can read it with no parsing. A facts field typed <code>find_book.Output</code> is filled with this command's <code>Output</code> from its run (see <a href="p-facts.html">what a phase hands on</a>), so the ids, labels and counts arrive exactly.</li>
+          <li>Two or more list fields that are the columns of one table share a <code>ui</code> table group, as above. A client such as the chat page may draw them as one table. Without the hint, <code>fastworkflow command preview --check</code> prints a notice. The other display hints are taught at the end of this page, <a href="e-return.html#ui">how a result is shown</a>.</li>
+        </ul>
+        <p>To decline, raise <code>fastworkflow.Refused("message")</code> instead of returning (see <a href="e-hook.html">correct or refuse</a>). The user is told the message and the command counts as failed. Build a real <code>Output</code> on every path that does return, including "found nothing" (an empty list and a total of 0), so a caller can rely on it.</p>
+        <p>Two other returns exist, for narrow cases. Return <code>fastworkflow.CommandResponse(response=..., output=Signature.Output(...))</code> when the agent should read your own sentence instead of the JSON, or when the command also hands the client <code>artifacts</code> (a dict) or <code>next_actions</code>. The <code>Output</code> still rides along in <code>output</code>. A plain <code>str</code> is accepted only from a command that declares no <code>Output</code>; it is text and nothing else, so no later step and no client can read a value from it.</p>
+        <p>Beginner mistakes, each a call error that names the command: returning a <code>str</code>, a <code>dict</code> or a <code>CommandResponse</code> with no <code>output</code> from a command that declares an <code>Output</code> ("find_book declares an Output but returned str; return the Output, or CommandResponse(response=..., output=&lt;Output&gt;)"); returning an instance of a different model, even a subclass of <code>Output</code>, whether directly or inside <code>CommandResponse(output=...)</code> (the class must be exactly the declared <code>Output</code>); building a <code>CommandOutput</code> yourself; and setting <code>success=False</code> on a <code>CommandResponse</code> (success is the framework's to set; refuse with <code>Refused</code>). Declaring <code>Output</code> as a subclass of another model is fine: <code>fastworkflow/examples/extended_workflow_example/_commands/WorkItem/get_status.py</code> writes <code>class Output(BaseSig.Output)</code> with two more fields and returns its own <code>Signature.Output(...)</code>.</p>
+        <p>A planning command's <code>__result__</code> follows the same rule, with the same errors: when the command declares an <code>Output</code>, it must return that <code>Output</code>, alone or inside <code>CommandResponse(output=...)</code>, and returning text is an error there too. <code>Output</code> is a command's public result in both kinds. A <code>__result__</code> that raises, returns <code>None</code> or returns anything else fails the command; <code>fastworkflow.planning.ANSWER_BY_MODEL</code> is the one way to leave the answer to a model, for a command that declares no <code>Output</code>: one that declares an <code>Output</code> and returns it fails the call (see <a href="p-result.html">the answer, in code</a>).</p>
+        <p class="see">See also <a href="e-file.html">one file, two classes</a>, <a href="e-hook.html">correct or refuse</a>, <a href="p-facts.html">what a phase hands on</a>, <a href="p-run.html#p-pages">every page of a list</a>.</p>
+      </div>
+      <figure>
+        <figcaption>the narrow case: a sentence or artifacts, with the Output still attached</figcaption>
+        <pre><code>output = Signature.Output(book_uids=rows, titles=titles, total=len(found))
+return fastworkflow.CommandResponse(
+    response=f"Found {len(found)} books.",   <span class="c"># what the agent reads</span>
+    output=output,                           <span class="c"># required: Signature.Output is declared</span>
+    artifacts={"query": input.query})        <span class="c"># optional: passed to the client</span></code></pre>
+      </figure>
+      <div class="prose">
+        <h4 id="ui">How a result is shown</h4>
+        <p>A <em>display hint</em> is a small note on an <code>Output</code> field, written as <code>json_schema_extra={"ui": {...}}</code>, that tells a client how to draw the value: leave it out of the view, show it first, format it as money, put it in a table. Reach for one when a result looks wrong on the chat page, for example a list of ids in the way.</p>
+        <p><strong>A hint never changes what the command returns.</strong> The value is still in the <code>Output</code>, in the response text the agent reads, in the structured result an MCP client gets, and the schema that <code>GET /command_schemas</code> publishes carries the hint itself under the key <code>ui</code>. No check, extraction or plan reads it; a client may follow it or ignore it. Specifically, <code>hidden</code> hides the field from what the chat page draws (the result card and the composed answer card, and the result data the model that writes the card reads leaves it out; that model also reads the turn's answer text, which may quote the value, and a quote of a hidden value of 6 or more characters is screened out of the card afterwards). It does not hide it from the agent, from an MCP client or from the JSON. To keep a value out of the agent's text, return <code>CommandResponse(response=...)</code> with your own sentence, as the figure below does.</p>
+        <p>The keys, what they fit, and what the chat page does with them:</p>
+        <table class="ref">
+          <thead><tr><th>Hint</th><th>Fits</th><th>The chat page</th></tr></thead>
+          <tbody>
+            <tr><td><code>"hidden": True</code></td><td>any Output field</td><td>Leaves the field out of the result card, the stat strip and tables, and the composed answer card.</td></tr>
+            <tr><td><code>"hero": True</code></td><td>one value (<code>str</code>, <code>int</code>, <code>float</code>, <code>bool</code>)</td><td>Puts it in the highlighted strip at the top of the card. With no hero, the page picks up to four short values itself. Not allowed with <code>table</code> on one field.</td></tr>
+            <tr><td><code>"format": "currency"</code></td><td><code>int</code>, <code>float</code></td><td>Shows two decimals; with <code>"currency": "USD"</code> (a three-letter code, either case) it shows the currency symbol too. <code>currency</code> needs this format.</td></tr>
+            <tr><td><code>"format": "percent"</code></td><td><code>int</code>, <code>float</code></td><td>Adds a percent sign: 12 is shown as 12%.</td></tr>
+            <tr><td><code>"format": "code"</code></td><td><code>str</code> (any scalar)</td><td>Shows it in a monospace style, for ids, paths and commands.</td></tr>
+            <tr><td><code>"format": "badge"</code></td><td><code>str</code>, <code>Literal</code>, <code>Enum</code>, or a number (without <code>tones</code>)</td><td>Shows a coloured label. With <code>"tones": {"delivered": "good"}</code> you choose each value's colour from <code>good</code>, <code>warning</code>, <code>bad</code>, <code>neutral</code>; a value you leave out gets the page's own guess. <code>tones</code> needs this format, and on a <code>Literal</code> or <code>Enum</code> every key must be a declared value.</td></tr>
+            <tr><td><code>"table": "name"</code></td><td>a list of <code>str</code>, <code>int</code>, <code>float</code>, <code>bool</code> or <code>Literal</code></td><td>The list fields that share a group name are the columns of one table, as in <code>find_book</code> above.</td></tr>
+          </tbody>
+        </table>
+        <p><code>format</code> can also sit on a list column of a <code>table</code> group. With no hint at all, the page decides from the value's type: numbers get thousands separators, <code>bool</code> is shown as yes or no, a list is drawn as bullets, a list of objects as a table, and the field's name never changes how it is drawn.</p>
+        <p><strong>The table group rule.</strong> Give every column of one table the same group name, in the fields' order. A group needs at least two list fields, and at least two of them not hidden. The results panel of the chat page draws a table only when every column in the group is present and has the same length; otherwise it draws each list as bullets and never trims or pads, and it never guesses columns from equal lengths alone. The answer card is different: it infers a table from any output that has an integer <code>total</code> and scalar lists of one length, and it ignores a declared group. That difference is known and under review.</p>
+        <p><strong>Mistakes and what you see.</strong> A mistake in a hint is not silent. A <code>badge</code> on a number is allowed: a score drawn as a badge is a presentation choice.</p>
+        <ul>
+          <li>Two or more visible list fields and no <code>table</code> group: the page draws separate lists, and <code>fastworkflow command preview --check</code> prints a <code>notice:</code> naming the fields. Nothing fails. If they are not columns of one table, ignore it.</li>
+          <li>A hint on the wrong kind of field (<code>table</code> on a <code>str</code>, <code>tones</code> on an <code>int</code>, <code>currency</code> on a <code>str</code>, a <code>tones</code> key that is not a declared value, <code>hero</code> on a list, <code>format: "percent"</code> or <code>"currency"</code> on a non-number, a key that only an <code>Input</code> field uses on an <code>Output</code> field), a <code>format</code> that is not one of <code>currency</code>, <code>percent</code>, <code>code</code>, <code>badge</code>, <code>"hidden": False</code> (leave the key out instead), a misspelt key (<code>hiden</code> gives "did you mean 'hidden'?"), or a <code>widget</code> on an Output field: the command does not load, and <code>fastworkflow run_cli</code>, <code>train</code>, the server and <code>fastworkflow command preview --check</code> list it with the file and the field (see <a href="removed.html#load-rule">what a mistake stops</a>).</li>
+          <li>The same hints on an <code>Input</code> field (except <code>widget</code>, see <a href="e-input.html">an input</a>) fail the load the same way.</li>
+        </ul>
+      </div>
+      <figure>
+        <figcaption>fastworkflow/examples/retail_workflow/_commands/get_order_details.py (trimmed: descriptions shortened, the rest of the file left out)</figcaption>
+        <pre><code>class Output(BaseModel):
+    order_details: str = Field(description="Detailed information about the order ...")
+    <span class="c"># ids for a later step to use; a person does not need to read them</span>
+    item_ids: List[str] = Field(
+        default_factory=list,
+        json_schema_extra={"ui": {"hidden": True}},
+        description="The ids of the items in the order; empty when the order is not found.")
+    product_ids: List[str] = Field(
+        default_factory=list,
+        json_schema_extra={"ui": {"hidden": True}},
+        description="The ids of the products the order's items belong to; ...")
+    payment_method_ids: List[str] = Field(
+        default_factory=list,
+        json_schema_extra={"ui": {"hidden": True}},
+        description="The ids of the payment methods the order was paid with; ...")</code></pre>
+      </figure>
+      <div class="prose">
+        <p>The three id lists are still in the <code>Output</code>, so a later step can read them; the chat page shows only <code>order_details</code>. This command also returns <code>CommandResponse(response=...)</code> with just <code>order_details</code>, so the agent's text leaves the lists out too. The shipped examples use only <code>hidden</code> and <code>table</code>; the other hints are covered by tests, and you add them the same way.</p>
+      </div>
+    </article>
+<!-- IDIOM BODY END -->
+  </section>
+
+  <nav class="pager" aria-label="Previous and next">
+    <a class="prev" href="e-hook.html"><span>Previous</span>Correct or refuse</a>
+    <a class="next" href="e-writes.html"><span>Next</span>Changes data or needs a yes</a>
+  </nav>
+</main>
+<script src="nav.js"></script>
+<script src="idioms.js"></script>
+</body>
+</html>

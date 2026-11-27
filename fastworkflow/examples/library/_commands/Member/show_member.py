@@ -9,8 +9,8 @@ class Signature:
     """Show the open member: their name and how many books they have on loan."""
 
     class Output(BaseModel):
-        member_uid: str = Field(description="the member's uid")
-        name: str = Field(description="the member's name")
+        member_uid: str = Field(description="the member's uid, such as m1", examples=["m1", "m2"])
+        name: str = Field(description="the member's name", examples=["Raj Patel", "Ann Lee"])
         on_loan: int = Field(description="how many books the member has on loan")
 
     plain_utterances = [

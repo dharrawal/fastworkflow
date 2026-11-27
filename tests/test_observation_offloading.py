@@ -16,8 +16,8 @@ import dspy
 import pytest
 
 import fastworkflow
-from fastworkflow import tracing
-from fastworkflow.observation_offloading.agent import (
+from fastworkflow.observability import tracing
+from fastworkflow.agent.tool_agent import (
     build_compacting_step,
     build_tool_agent,
 )
@@ -54,7 +54,7 @@ from fastworkflow.observation_offloading.manifest import (
     observation_row,
     uninstall_span_policy,
 )
-from fastworkflow.utils.react import fastWorkflowReAct
+from fastworkflow.agent.react import fastWorkflowReAct
 from fastworkflow.observation_offloading.search import search_memory
 
 from fastworkflow.observation_offloading.state import (
@@ -62,9 +62,9 @@ from fastworkflow.observation_offloading.state import (
     reset_observation_state,
     snapshot_events,
 )
-from fastworkflow.answer_rehydration import rehydrated_label
+from fastworkflow.observation_offloading.answer_rehydration import rehydrated_label
 from fastworkflow.observation_offloading.compact import RECENT_OBSERVATIONS_PROTECTED
-from fastworkflow.workflow_agent import WorkflowAgentSignature, initialize_workflow_tool_agent
+from fastworkflow.agent.workflow_agent import WorkflowAgentSignature, initialize_workflow_tool_agent
 
 # The budgets derive from the agent model's window; pin it to the reference.
 pytestmark = pytest.mark.usefixtures("reference_agent_window")
@@ -444,7 +444,7 @@ class ManifestAgainstRealSteps(unittest.TestCase):
         trajectory: dict = {}
         with tracing.host_scope(host):
             agent._run_loop(trajectory, 0, {"user_query": "who holds it"}, 3, 0)
-        steps = [span for span in sink.spans if span.name == tracing.SPAN_AGENT_STEP]
+        steps = [span for span in sink.spans if span.name == tracing.SPAN_STEP]
         self.assertEqual(len(steps), 1)
         recorded = steps[0].attributes["observation"]
         digest = (
@@ -690,7 +690,7 @@ class PerTurnScope(unittest.TestCase):
         turn = {"key": "turn-1"}
         step = build_compacting_step(object(), selected_archive=archive)
         texts = {}
-        with patch("fastworkflow.observation_offloading.agent.scope_for_host",
+        with patch("fastworkflow.agent.tool_agent.scope_for_host",
                    side_effect=lambda host: self._scope(turn["key"])):
             for turn["key"] in ("turn-1", "turn-2"):
                 text = f"{turn['key']} dump\n" + ("row\n" * 3_000)
@@ -747,10 +747,10 @@ class HookIsolation(unittest.TestCase):
             "observation_0": "x" * 30_000,
         }
         with patch(
-            "fastworkflow.observation_offloading.agent.scope_for_host",
+            "fastworkflow.agent.tool_agent.scope_for_host",
             return_value=self.scope,
         ), patch(
-            "fastworkflow.observation_offloading.agent.compact_trajectory",
+            "fastworkflow.agent.tool_agent.compact_trajectory",
             side_effect=ValueError("broken compaction"),
         ):
             self.assertTrue(step(0, trajectory))
@@ -779,9 +779,9 @@ class HookIsolation(unittest.TestCase):
             step = build_compacting_step(SimpleNamespace(workflow_tool_agent=agent),
                                          selected_archive=self.archive)
             view = dict(trajectory)
-            with patch("fastworkflow.observation_offloading.agent.scope_for_host",
+            with patch("fastworkflow.agent.tool_agent.scope_for_host",
                        return_value=self.scope), \
-                 patch("fastworkflow.context_budget.trajectory_max_bytes", return_value=40_000):
+                 patch("fastworkflow.observation_offloading.context_budget.trajectory_max_bytes", return_value=40_000):
                 step(5, view)
             return view["observation_0"] != large
 

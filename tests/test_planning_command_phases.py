@@ -15,17 +15,18 @@ import dspy
 import pytest
 from pydantic import BaseModel, Field, create_model, model_validator
 
-from fastworkflow import planning_phases, tracing
+from fastworkflow.planning import planning_phases
+from fastworkflow.observability import tracing
 from fastworkflow.planning import phase, planned
 from fastworkflow.observation_offloading.archive import command_run_record
-from fastworkflow.planning_commands import (
+from fastworkflow.planning.planning_commands import (
     PlanningCommandCallPlan,
     PlanningCommandFormatError,
     call_phases,
     phases_for,
 )
 
-from fastworkflow.planning_phases import (
+from fastworkflow.planning.planning_phases import (
     Phase,
     PhaseError,
     bound_arguments,
@@ -41,9 +42,9 @@ from fastworkflow.planning_phases import (
 )
 from fastworkflow.observation_offloading import finish_check
 from fastworkflow.observation_offloading.facts import MissingFactError
-from fastworkflow.turn import TurnStatus
-from fastworkflow.utils.react import fastWorkflowReAct
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.core.turn import TurnStatus
+from fastworkflow.agent.react import fastWorkflowReAct
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 from tests.test_turn_result_capture import no_review_gate  # noqa: F401 - the review gate is off for these turns
 from tests.test_turn_result_capture import (  # noqa: F401 - shared fixtures
     _make_agent_ctx,
@@ -57,7 +58,7 @@ def command_from_module(name, module, path):
     """The skill a module of runtime parts gives (``plan(input) -> list[Phase]`` and/or
     ``steps(input)``), through ``planning_commands.planning_command_from_parts``, as the loader builds it
     from a ``PlanGenerator``: these runtime tests hand-build their ``Phase`` lists."""
-    from fastworkflow import planning_commands
+    from fastworkflow.planning import planning_commands
     return planning_commands.planning_command_from_parts(name, module.Signature, path,
                                            steps_fn=getattr(module, "steps", None),
                                            plan_fn=getattr(module, "plan", None))
@@ -228,7 +229,7 @@ def _module(**attrs):
 def _phased_command(**attrs):
     """The library skill: its PlanGenerator class, or a function plan given as ``plan=`` (which
     has no __result__: its last phase answers as an executor or the model does)."""
-    from fastworkflow import planning_commands
+    from fastworkflow.planning import planning_commands
     path = "_commands/show_book.py"
     if "plan" in attrs:
         return command_from_module("show_book", _module(**attrs), path).command
@@ -277,7 +278,7 @@ def test_when_false_leaves_the_phase_out():
 
 def test_a_malformed_from_fails_the_load():
     # A copy (a facts field with a "from", well formed or not) is a load error: copies are no longer read.
-    from fastworkflow.typed_phase_facts import check_typed_facts_model
+    from fastworkflow.planning.typed_phase_facts import check_typed_facts_model
 
     class Bad(BaseModel):
         uid: str = Field(json_schema_extra={"from": "open_book_by_uid"})
@@ -313,7 +314,7 @@ def test_a_plan_that_does_not_return_phases_fails_the_load():
 
 
 def test_a_plan_without_params_is_one_plan_for_every_call():
-    from fastworkflow.planning_commands import planning_command_from_parts
+    from fastworkflow.planning.planning_commands import planning_command_from_parts
 
     class NoParams:
         """Show the shelves."""
@@ -344,8 +345,8 @@ class ListLoans:
 def test_a_missing_source_field_is_a_load_warning_not_a_failure():
     # check_phase_sources is gone with the copies it checked: no phase output names a field of
     # another command to be missing. The facts of the library skill are typed with Outputs, which load.
-    from fastworkflow import planning_commands
-    from fastworkflow.typed_phase_facts import check_typed_facts_model
+    from fastworkflow.planning import planning_commands
+    from fastworkflow.planning.typed_phase_facts import check_typed_facts_model
 
     assert not hasattr(planning_commands, "check_phase_sources")
     command = _phased_command()
@@ -358,7 +359,7 @@ def test_a_missing_source_field_is_a_load_warning_not_a_failure():
 def test_a_plain_name_several_contexts_define_passes_when_one_context_resolves_it():
     # A facts model typed with the Output of a command several contexts define loads: each context's
     # Output is its own type, and the model names one of them.
-    from fastworkflow.typed_phase_facts import check_typed_facts_model
+    from fastworkflow.planning.typed_phase_facts import check_typed_facts_model
 
     class Shelf(BaseModel):
         loans: ListLoans.Output
@@ -561,7 +562,7 @@ def test_the_planned_row_is_picked_out_of_many():
 
 
 def test_narrowed_output_reads_equal_length_lists_as_rows():
-    from fastworkflow.planning_phases import narrowed_output
+    from fastworkflow.planning.planning_phases import narrowed_output
 
     output = {"uids": ["u1", "u2", "u3"], "labels": ["Ann", "Bo", "Cy"], "codes": ["x", "y"],
               "scope": "branch", "total": 3}
@@ -731,8 +732,8 @@ def test_the_last_phase_sees_the_request():
 
 def test_the_last_phase_code_ran_wholly_is_told_to_answer_from_the_outputs():
     # fix-hia1.34: nothing remains, so never "do these steps"; the copy rule applies.
-    from fastworkflow import planning_phases
-    from fastworkflow.planning_phases import clean_answer
+    from fastworkflow.planning import planning_phases
+    from fastworkflow.planning.planning_phases import clean_answer
 
     query = phase_query("show the book Dune", "1. find_book query=Dune\n2. list_loans",
                         index=0, count=1, name="show", code_steps=True, code_ran_all=True)
@@ -885,10 +886,11 @@ def phased(initialized_fastworkflow, todo_workflow_path, monkeypatch):
         session._initial_plan_text = "1. find_book query=Dune"
         return user_query
 
-    monkeypatch.setattr("fastworkflow.workflow_agent.build_query_with_next_steps", fake_plan)
-    monkeypatch.setattr("fastworkflow.workflow_agent.planner_planning_command_for",
-                        lambda text, folder, **_: ("", state.command))
-    monkeypatch.setattr("fastworkflow.workflow_agent.split_into_subtasks",
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.build_query_with_next_steps", fake_plan)
+    from tests.conftest import script_plan
+
+    script_plan(monkeypatch, lambda text: state.command)
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.split_into_subtasks",
                         lambda *args, **kwargs: ["show the book Dune"])
 
     def no_hand_off(k):
@@ -926,7 +928,7 @@ def phased(initialized_fastworkflow, todo_workflow_path, monkeypatch):
         name = next((n for n in state.script if f"({n})" in query), "report")
         return state.script[name]["answer"]
 
-    monkeypatch.setattr("fastworkflow.planning_phases.write_answer", fake_answer)
+    monkeypatch.setattr("fastworkflow.planning.planning_phases.write_answer", fake_answer)
     state.ctx, state.sink, state.reviews, state.start = ctx, sink, reviews, start
     state.answered = answered
     return state
@@ -987,7 +989,7 @@ def test_a_missing_fact_fails_the_phase_cleanly_and_stops_the_call(phased):
     assert "BookFacts.loans" in result.answer and "list_loans" in result.answer
     assert "Not run" not in result.answer        # book is the last phase here
     assert "report" not in SEEN                  # __result__ never ran
-    span = phased.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)[-1]
+    span = phased.sink.named(tracing.SPAN_PHASE)[-1]
     assert span.status == tracing.STATUS_ERROR
     assert "BookFacts.loans" in span.attributes["facts_error"]
     assert phased.ctx._phase_run is None
@@ -1023,7 +1025,7 @@ def test_a_planning_command_without_plan_runs_as_one_phase_with_the_executor_ste
     assert len(executor.calls) == 1
     # Its budget is the executor's own max_iters, not PHASE_MAX_STEPS.
     assert executor.calls[0]["max_iters"] == 25
-    (span,) = phased.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
+    (span,) = phased.sink.named(tracing.SPAN_PHASE)
     assert span.attributes["phase"] == "show_book" and span.attributes["phase_count"] == 1
     assert span.attributes["step_budget"] == 25
     assert result.answer == "found b1"
@@ -1038,7 +1040,7 @@ def test_a_phase_that_reaches_its_budget_is_not_handed_off(phased, monkeypatch):
     # _hand_off raises in this fixture; the turn completes.
     assert result.status == TurnStatus.COMPLETED
     assert [call["max_iters"] for call in executor.calls] == [3, 3]
-    book = phased.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)[1]
+    book = phased.sink.named(tracing.SPAN_PHASE)[1]
     assert book.attributes["exhausted"] is True and book.attributes["steps_used"] == 3
     assert book.attributes["step_budget"] == 3
 
@@ -1085,7 +1087,7 @@ def test_the_trace_shows_each_phase(phased):
     phased.start()
     phased.ctx.process_turn("show the book Dune")
 
-    spans = phased.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
+    spans = phased.sink.named(tracing.SPAN_PHASE)
     assert [s.attributes["phase"] for s in spans] == ["find", "book"]
     assert [s.attributes["phase_index"] for s in spans] == [0, 1]
     assert {s.attributes["phase_count"] for s in spans} == {2}
@@ -1096,12 +1098,12 @@ def test_the_trace_shows_each_phase(phased):
     assert spans[1].attributes["facts"] == {"opened": {"book_uid": "b1"}, "loans": {"loan_uids": ["l1", "l2"]}}
     assert spans[1].attributes["record"] == BOOK
     assert all(s.status == tracing.STATUS_OK for s in spans)
-    contract = tracing.SPAN_CONTRACTS[tracing.SPAN_PLANNING_COMMAND_PHASE].attributes
+    contract = tracing.SPAN_CONTRACTS[tracing.SPAN_PHASE].attributes
     for span in spans:
         assert set(span.attributes) - tracing.ENVELOPE_ATTRIBUTES <= contract
-    # Each phase's executor run is its child.
-    executes = phased.sink.named(tracing.SPAN_AGENT_EXECUTE)
-    assert [e.parent_span_id for e in executes] == [s.span_id for s in spans]
+    # Each phase records the agent loop that ran it (bd fix-qjne.34: there is no fw.agent.execute span any more).
+    assert not phased.sink.named("fw.agent.execute")
+    assert [s.attributes["attempts"] for s in spans] == [1, 1]
 
 
 def test_a_phase_suspended_on_ask_user_resumes_and_the_rest_run(phased):
@@ -1119,7 +1121,7 @@ def test_a_phase_suspended_on_ask_user_resumes_and_the_rest_run(phased):
     assert second.status == TurnStatus.COMPLETED
     assert second.answer == "B1 has loans l1, l2."
     assert phased.answered == []
-    spans = phased.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
+    spans = phased.sink.named(tracing.SPAN_PHASE)
     assert [(s.attributes["phase"], s.attributes["resumed"]) for s in spans] == [
         ("find", False), ("book", False), ("book", True)]
     assert spans[1].attributes["suspended"] is True
@@ -1140,9 +1142,9 @@ def test_a_phase_executor_is_held_to_its_phase(phased):
     assert "answer the request" not in queries[1]
     assert queries[1].endswith("1. open_book_by_uid book_uid=b1\n2. list_loans (full list)")
     assert phased.answered == []
-    # The executor span records the same input.
-    executes = phased.sink.named(tracing.SPAN_AGENT_EXECUTE)
-    assert [e.attributes["agent_input"] for e in executes] == queries
+    # No executor span records it (bd fix-qjne.34): the phases are the record, one per executor run.
+    assert not phased.sink.named("fw.agent.execute")
+    assert len(phased.sink.named(tracing.SPAN_PHASE)) == len(queries)
 
 
 def test_a_search_phase_that_ended_on_a_record_fills_from_its_own_search(phased):
@@ -1154,7 +1156,7 @@ def test_a_search_phase_that_ended_on_a_record_fills_from_its_own_search(phased)
     result = phased.ctx.process_turn("show the book Dune")
 
     assert result.answer == "B1 has loans l1, l2."
-    find = phased.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)[0]
+    find = phased.sink.named(tracing.SPAN_PHASE)[0]
     assert find.status == tracing.STATUS_OK
     assert find.attributes["facts"] == {"book_uids": ["b1"]}
     assert find.attributes["record"] == BOOK
@@ -1168,7 +1170,7 @@ def test_an_off_plan_search_in_a_phase_does_not_replace_its_fact(phased):
     result = phased.ctx.process_turn("show the book Dune")
 
     assert result.answer == "B1 has loans l1, l2."
-    find = phased.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)[0]
+    find = phased.sink.named(tracing.SPAN_PHASE)[0]
     assert find.attributes["facts"] == {"book_uids": ["b1"]}
 
 
@@ -1184,7 +1186,7 @@ def test_a_record_phase_never_reads_another_record_runs(phased):
     assert len(executor.calls) == 2
     assert "stopped at its part 'book'" in result.answer and "BookFacts.opened" in result.answer
     assert "no successful run of 'open_book_by_uid'" in result.answer
-    book = phased.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)[1]
+    book = phased.sink.named(tracing.SPAN_PHASE)[1]
     assert book.status == tracing.STATUS_ERROR and book.attributes["record"] == OTHER_BOOK
 
 
@@ -1218,7 +1220,7 @@ def test_a_phase_whose_opening_step_finds_the_record_already_open_fills_its_fact
     result = phased.ctx.process_turn("show the book Dune")
 
     assert result.answer == "B1 has loans l1, l2."
-    book = phased.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)[1]
+    book = phased.sink.named(tracing.SPAN_PHASE)[1]
     assert book.status == tracing.STATUS_OK
     assert book.attributes["facts"] == {"opened": {"book_uid": "b1"}, "loans": {"loan_uids": ["l1", "l2"]}}
 
@@ -1227,7 +1229,7 @@ def test_a_phase_whose_opening_step_finds_the_record_already_open_fills_its_fact
 # Answer-only phases (fix-hia1.7)
 # ----------------------------------------------------------------------
 
-from fastworkflow.planning_phases import (  # noqa: E402
+from fastworkflow.planning.planning_phases import (  # noqa: E402
     ANSWER_ONLY_RULE,
     check_bindings,
     fan_out_items,
@@ -1310,17 +1312,14 @@ def test_the_trace_shows_an_answer_only_phase_and_its_model_call(phased):
     phased.start()
     phased.ctx.process_turn("show the book Dune")
 
-    report = phased.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)[-1]
+    report = phased.sink.named(tracing.SPAN_PHASE)[-1]
     assert report.attributes["phase"] == "report"
     assert report.attributes["answer_only"] is True and report.attributes["steps_used"] == 0
     assert report.status == tracing.STATUS_OK
-    execute = phased.sink.named(tracing.SPAN_AGENT_EXECUTE)[-1]
-    assert execute.parent_span_id == report.span_id
-    assert ANSWER_ONLY_RULE in execute.attributes["agent_input"]
-    assert execute.attributes["final_answer"] == "Dune (b1) is on loan: l1, l2."
-    # No tool call under it.
-    assert not [s for s in phased.sink.named(tracing.SPAN_AGENT_TOOL_CALL)
-                if s.parent_span_id == execute.span_id]
+    # Its one model call is the phase's own loop (``attempts``), not a span of its own; no step ran under it.
+    assert report.attributes["attempts"] == 1 and not phased.sink.named("fw.agent.execute")
+    assert ANSWER_ONLY_RULE in phased.answered[-1]
+    assert not [s for s in phased.sink.named(tracing.SPAN_STEP) if s.parent_span_id == report.span_id]
 
 
 # ----------------------------------------------------------------------
@@ -1399,7 +1398,7 @@ def test_n_items_run_as_n_sub_plans_and_one_final_phase(fanned):
                                                      ("b3", [])]
     assert fanned.answered == []
     assert result.answer == "b1: l1; b2: l2, l3; b3: none."
-    spans = fanned.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
+    spans = fanned.sink.named(tracing.SPAN_PHASE)
     assert [(s.attributes["phase"], s.attributes.get("item")) for s in spans] == [
         ("find", None), ("books", "b1"), ("books", "b2"), ("books", "b3")]
     items = spans[1:4]
@@ -1422,7 +1421,7 @@ def test_a_step_on_another_item_record_is_flagged(fanned):
     note = executor.notes[2]
     assert note and "list_loans ran on Book b1 Dune, the record of item b1, not of item b2" in note
     assert "item b2 was never opened" in note
-    span = fanned.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)[2]
+    span = fanned.sink.named(tracing.SPAN_PHASE)[2]
     assert span.status == tracing.STATUS_ERROR and span.attributes["item"] == "b2"
     assert any("the record of item b1" in issue for issue in span.attributes["record_issues"])
     assert "stopped at its part 'books'" in result.answer
@@ -1458,7 +1457,7 @@ def test_a_bound_item_fills_from_its_record_even_when_it_ended_elsewhere(fanned)
     fanned.start()
     fanned.ctx.process_turn("show the book Dune")
 
-    span = fanned.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)[2]
+    span = fanned.sink.named(tracing.SPAN_PHASE)[2]
     assert span.status == tracing.STATUS_OK
     assert span.attributes["record"] == SECOND
     assert span.attributes["facts"] == {"opened": {"book_uid": "b2"}, "loans": {"loan_uids": ["l2"]}}
@@ -1473,7 +1472,7 @@ def test_the_cap_is_applied_and_said_in_the_answer(fanned, monkeypatch):
     assert [b.uid for b in SEEN["report_books"]["books"]] == ["b1", "b2"]
     assert result.answer.endswith(
         "Note: only the first 2 of 3 items were covered.")
-    spans = fanned.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
+    spans = fanned.sink.named(tracing.SPAN_PHASE)
     assert {(s.attributes["item_count"], s.attributes["items_total"])
             for s in spans if "item" in s.attributes} == {(2, 3)}
 
@@ -1560,7 +1559,7 @@ def test_a_bad_over_fails_the_load():
 # stops on a condition (fix-hia1.9)
 # ----------------------------------------------------------------------
 
-from fastworkflow.planning_phases import (  # noqa: E402
+from fastworkflow.planning.planning_phases import (  # noqa: E402
     cap_note,
     fan_out_note,
     is_flat_plan,
@@ -1614,7 +1613,7 @@ def test_a_flat_plan_result_runs_the_call_as_a_flat_planning_command_call(phased
 
     assert len(executor.calls) == 1
     assert executor.calls[0]["max_iters"] == 25       # one phase, with the executor's step cap
-    assert [s.attributes["phase"] for s in phased.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)] == [
+    assert [s.attributes["phase"] for s in phased.sink.named(tracing.SPAN_PHASE)] == [
         "show_book"]
     assert phased.ctx._phase_run is None
     assert result.answer == "found b1"
@@ -1626,7 +1625,7 @@ def test_the_same_planning_command_runs_phased_for_other_inputs(phased):
     executor = phased.start()
     result = phased.ctx.process_turn("show the book Dune and its notes")
 
-    assert [s.attributes["phase"] for s in phased.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)] == [
+    assert [s.attributes["phase"] for s in phased.sink.named(tracing.SPAN_PHASE)] == [
         "find", "book", "notes"]
     assert {call["max_iters"] for call in executor.calls} == {15}
     # A function plan has no __result__: the last phase's own answer is the turn's.
@@ -1666,7 +1665,7 @@ def test_a_phase_whose_condition_holds_runs(phased):
 
     assert SEEN["notes"]["book"].uid == "b1"
     assert SEEN["report"]["notes"].total == 3
-    notes = phased.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)[2]
+    notes = phased.sink.named(tracing.SPAN_PHASE)[2]
     assert notes.attributes["phase"] == "notes" and "skipped" not in notes.attributes
 
 
@@ -1680,11 +1679,11 @@ def test_a_phase_whose_condition_fails_is_skipped_and_counts_as_not_run(phased):
     assert not any("(notes)" in call["user_query"] for call in executor.calls)
     assert "notes" not in SEEN
     assert SEEN["report"]["notes"] is None          # skipped phase: None (step 1a), not a default
-    spans = phased.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
+    spans = phased.sink.named(tracing.SPAN_PHASE)
     assert [s.attributes["phase"] for s in spans] == ["find", "book", "notes"]
     assert spans[2].attributes["skipped"] is True and spans[2].status == tracing.STATUS_OK
-    assert not [s for s in phased.sink.named(tracing.SPAN_AGENT_EXECUTE)
-                if s.parent_span_id == spans[2].span_id]
+    assert spans[2].attributes.get("attempts") is None      # no loop ran it
+    assert not [s for s in phased.sink.named(tracing.SPAN_STEP) if s.parent_span_id == spans[2].span_id]
     assert phased.answered == []                 # __result__ wrote the answer, from the book
     assert result.answer == "B1 has loans none."
 
@@ -1698,7 +1697,7 @@ def test_a_condition_that_raises_fails_the_phase(phased):
 
     assert "stopped at its part 'report'" in result.answer
     assert "when failed: AttributeError" in result.answer
-    span = phased.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)[-1]
+    span = phased.sink.named(tracing.SPAN_PHASE)[-1]
     assert span.status == tracing.STATUS_ERROR and span.attributes["skipped"] is False
 
 
@@ -1804,7 +1803,7 @@ def test_a_fan_out_stops_once_its_condition_holds(five):
     assert [b.uid for b in SEEN["report_books"]["books"]] == ["b1", "b2", "b3"]
     assert result.answer.endswith(
         "Note: the work stopped after 3 of 5 items because its stop condition was met.")
-    items = [s for s in five.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE) if "item" in s.attributes]
+    items = [s for s in five.sink.named(tracing.SPAN_PHASE) if "item" in s.attributes]
     assert [s.attributes["stop_condition_met"] for s in items] == [False, False, True]
 
 
@@ -2008,7 +2007,7 @@ def test_a_phase_whose_steps_ran_on_two_records_is_not_rebound():
 # Optional phases; a failed call shows only facts; answer-only checks (stage 10)
 # ----------------------------------------------------------------------
 
-from fastworkflow.planning_phases import (  # noqa: E402
+from fastworkflow.planning.planning_phases import (  # noqa: E402
     FOUND_FACTS_LEAD,
     MISSING_ITEMS_LEAD,
     answer_from_steps,
@@ -2057,7 +2056,7 @@ def test_an_optional_phase_that_fails_does_not_stop_the_call(phased):
     assert "7 notes" not in result.answer            # the failed phase's own text is dropped
     assert SEEN["report"]["notes"] is None          # counts as not run: None (step 1a)
     assert phased.answered == []
-    notes = phased.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)[2]
+    notes = phased.sink.named(tracing.SPAN_PHASE)[2]
     assert notes.status == tracing.STATUS_ERROR and "no successful run of 'count_notes'" in notes.attributes["facts_error"]
     assert phased.ctx._phase_run is None
 
@@ -2133,7 +2132,7 @@ def test_an_answer_only_answer_that_drops_a_list_item_gets_it_appended(phased):
 
 def test_an_answer_only_reply_that_is_empty_is_written_from_the_steps(phased, monkeypatch):
     phased.command = _phased_command(plan=answer_by_model_plan)
-    monkeypatch.setattr("fastworkflow.planning_phases.write_answer", lambda query: "```\n```")
+    monkeypatch.setattr("fastworkflow.planning.planning_phases.write_answer", lambda query: "```\n```")
     phased.start()
     result = phased.ctx.process_turn("show the book Dune")
     # The judgement step is written from the steps too, as a line of its own.
@@ -2147,7 +2146,7 @@ def test_an_answer_only_reply_that_cannot_be_parsed_is_written_from_the_steps(mo
         raise AdapterParseError(adapter_name="ChatAdapter", lm_response="?",
                                 signature=dspy.Signature("user_query -> final_answer"))
 
-    monkeypatch.setattr("fastworkflow.planning_phases.write_answer", unparsable)
+    monkeypatch.setattr("fastworkflow.planning.planning_phases.write_answer", unparsable)
     book = BookFacts(uid="b1", loan_uids=["l1", "l2", "l3", "l4"])
     # written from the steps, so laid out as a code-written answer, and still checked
     steps = "1. say which loan is due first\n2. say what b1 has on loan, naming each: l1, l2, l3, l4"
@@ -2166,10 +2165,10 @@ def test_write_answer_retries_an_empty_reply_once_and_strips_field_markers():
 
 
 def test_the_star_import_is_the_author_api():
-    from fastworkflow import planning_phases
+    from fastworkflow.planning import planning_phases
 
     names: dict = {}
-    exec("from fastworkflow.planning_phases import *", names)
+    exec("from fastworkflow.planning.planning_phases import *", names)
     assert {"Phase", "concatenated_steps", "facts_text"} <= set(names)
     assert "fact_from" not in names
     assert "write_answer" not in names and "item_record" not in names
@@ -2180,10 +2179,10 @@ def test_the_star_import_is_the_author_api():
 def test_fact_from_is_the_field_of_a_fact_copied_from_a_command_field():
     # fact_from is removed: it is no longer importable, and the field it wrote (a "from" in the
     # field's json_schema_extra) is a load error, with the tail that says copies are not read.
-    from fastworkflow.typed_phase_facts import check_typed_facts_model
+    from fastworkflow.planning.typed_phase_facts import check_typed_facts_model
 
     with pytest.raises(ImportError):
-        from fastworkflow.planning_phases import fact_from  # noqa: F401
+        from fastworkflow.planning.planning_phases import fact_from  # noqa: F401
     with pytest.raises(ImportError):
         from fastworkflow.planning import fact_from  # noqa: F401,F811
 
@@ -2277,7 +2276,7 @@ def test_missing_list_items_pairs_a_nested_lists_rows_only_within_their_own_mode
 
 
 def test_answer_only_answer_appends_rows_left_out(monkeypatch):
-    monkeypatch.setattr("fastworkflow.planning_phases.write_answer", lambda query: "Loans: l1.")
+    monkeypatch.setattr("fastworkflow.planning.planning_phases.write_answer", lambda query: "Loans: l1.")
     book = ListLoansOutput(loan_uids=["l1", "l2"])
     # "list ...: facts" is no verbatim step (only "say that" is), so the model writes it.
     assert answer_only_answer("q", "1. list the loans of b1: l1, l2",
@@ -2290,7 +2289,7 @@ def test_answer_only_answer_appends_rows_left_out(monkeypatch):
 # verbatim only for "say that", fix-ajir.10)
 # ----------------------------------------------------------------------
 
-from fastworkflow.planning_phases import answer_by_code, answer_step_kind  # noqa: E402
+from fastworkflow.planning.planning_phases import answer_by_code, answer_step_kind  # noqa: E402
 
 
 def test_answer_steps_are_verbatim_guard_or_judgement():
@@ -2337,7 +2336,7 @@ def test_answer_from_steps_writes_each_verbatim_step_as_a_line():
 
 def test_answer_only_answer_makes_no_model_call_when_every_step_is_verbatim(monkeypatch):
     calls = []
-    monkeypatch.setattr("fastworkflow.planning_phases.write_answer",
+    monkeypatch.setattr("fastworkflow.planning.planning_phases.write_answer",
                         lambda query: calls.append(query) or "Model text.")
     book = ListLoansOutput(loan_uids=["l1", "l2"])
     steps = "1. say that what b1 has on loan: l1, l2\n2. apply no change"
@@ -2356,7 +2355,7 @@ def test_answer_only_answer_makes_no_model_call_when_every_step_is_verbatim(monk
 
 
 def test_bulleted_answer_splits_only_runs_of_output_values():
-    from fastworkflow.planning_phases import bulleted_answer
+    from fastworkflow.planning.planning_phases import bulleted_answer
 
     class Shelf(BaseModel):
         uids: list[str] = []
@@ -2381,7 +2380,7 @@ def test_bulleted_answer_splits_only_runs_of_output_values():
 
 
 def test_answer_only_answer_bullets_a_code_written_answer_after_its_checks(monkeypatch):
-    monkeypatch.setattr("fastworkflow.planning_phases.write_answer", lambda query: "a, b, c, d")
+    monkeypatch.setattr("fastworkflow.planning.planning_phases.write_answer", lambda query: "a, b, c, d")
     book = BookFacts(uid="b1", loan_uids=["l1", "l2", "l3", "l4"])
     steps = ("1. say that what b1 has on loan, naming each: l1, l2, l3, l4\n"
              "2. say that it is due back\n3. apply no change")
@@ -2405,7 +2404,7 @@ def test_a_say_that_phase_before_the_last_writes_no_answer_and_its_span_says_so(
     result = phased.ctx.process_turn("show the book Dune")
     assert phased.answered == []                       # no model call wrote it
     assert "b1 has loans l1" not in result.answer
-    spans = phased.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
+    spans = phased.sink.named(tracing.SPAN_PHASE)
     report = spans[1]
     assert report.attributes["phase"] == "report"
     assert report.attributes["answer_only"] is True
@@ -2416,7 +2415,7 @@ def test_a_say_that_phase_before_the_last_writes_no_answer_and_its_span_says_so(
 # Stage-10 follow-ups: leaked framing, long background lists, extra command steps
 # ----------------------------------------------------------------------
 
-from fastworkflow.planning_phases import (  # noqa: E402
+from fastworkflow.planning.planning_phases import (  # noqa: E402
     EXTRA_STEPS_PHASE,
     STEPS_BEFORE_PHASE,
     capped_steps,
@@ -2519,7 +2518,7 @@ def test_a_planner_command_step_runs_before_the_answer_only_last_phase(phased, m
     assert len(phased.answered) == 1 and "part 4 of 4 (report)" in phased.answered[0]
     assert "say how many notes it has" in phased.answered[0]
     assert "count_notes" not in phased.answered[0]
-    spans = phased.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
+    spans = phased.sink.named(tracing.SPAN_PHASE)
     assert [s.attributes["phase"] for s in spans] == ["find", "book", "extra_steps", "report"]
     assert spans[-1].attributes["answer_only"] is True
     assert result.answer == "Dune (b1) is on loan: l1, l2.\n\nb1 has 3 notes."
@@ -2533,7 +2532,7 @@ def test_the_extra_steps_phase_is_rebuilt_after_a_restore(phased, monkeypatch):
         answer="b1 has 3 notes.")
     monkeypatch.setattr(phased.ctx, "_phase_command_names",
                         lambda: {"commands": list(COMMANDS), "core_commands": list(CORE)})
-    monkeypatch.setattr("fastworkflow.workflow_agent.load_planning_command_map",
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.load_planning_command_map",
                         lambda folder: {"show_book": phased.command})
     phased.start(suspend_in="extra_steps")
     first = phased.ctx.process_turn("show the book Dune")
@@ -2586,7 +2585,7 @@ def test_steps_before_run_first_then_the_first_phase_runs_as_without_them(phased
     # The first phase gets only its own steps, numbered from 1, as with no steps_before.
     assert "part 2 of 4 (find)" in queries[1] and "count_notes" not in queries[1]
     assert executor.plans[1].startswith("1. ")
-    spans = phased.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
+    spans = phased.sink.named(tracing.SPAN_PHASE)
     assert [s.attributes["phase"] for s in spans] == [STEPS_BEFORE_PHASE, "find", "book",
                                                       "report"]
     # The steps_before phase fills nothing; the first phase still fills its facts, from
@@ -2602,7 +2601,7 @@ def test_steps_before_run_first_then_the_first_phase_runs_as_without_them(phased
 
 def test_the_steps_before_phase_is_rebuilt_after_a_restore(phased, monkeypatch):
     _with_steps_before(phased, monkeypatch)
-    monkeypatch.setattr("fastworkflow.workflow_agent.load_planning_command_map",
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.load_planning_command_map",
                         lambda folder: {"show_book": phased.command})
     phased.start(suspend_in=STEPS_BEFORE_PHASE)
     first = phased.ctx.process_turn("show the book Dune")
@@ -2747,7 +2746,7 @@ def _extraction_stub(phased, monkeypatch, *, extracted, on_extract=None):
             on_extract(len(queries))
         return dict(extracted)
 
-    monkeypatch.setattr("fastworkflow.planning_commands.extracted_arguments", fake_extracted)
+    monkeypatch.setattr("fastworkflow.planning.planning_commands.extracted_arguments", fake_extracted)
     return queries
 
 
@@ -2768,7 +2767,7 @@ def test_a_first_phase_that_finds_nothing_is_extracted_again_and_the_call_restar
     assert "find_book query=Dune" in finds[1]["user_query"]
     assert result.status == TurnStatus.COMPLETED
     assert result.answer == "B1 has loans l1, l2."
-    spans = phased.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
+    spans = phased.sink.named(tracing.SPAN_PHASE)
     assert spans[0].status == tracing.STATUS_ERROR
     assert "no successful run of 'find_book'" in spans[0].attributes["facts_error"]
     assert [s.attributes.get("reextracted") for s in spans[:3]] == [None, True, True]
@@ -2805,7 +2804,7 @@ def test_a_failure_after_an_earlier_phase_ran_does_not_restart_the_call(phased, 
 def test_a_first_phase_whose_steps_name_a_writing_command_is_not_restarted(phased, monkeypatch):
     # The library's find_book is declared @writes (stubbed here: the todo workflow declares none). Its
     # step ran before the facts failed, so a restart would write it twice: no re-extraction, no second plan.
-    from fastworkflow import command_writes
+    from fastworkflow.core import command_writes
     monkeypatch.setattr(command_writes, "write_commands",
                         lambda folderpath: frozenset({"find_book"}))
     phased.args.update(name="Dunne")

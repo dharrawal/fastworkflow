@@ -63,13 +63,13 @@ second racing one. Today's `asyncio.wait_for(...)` → `504` path is exactly the
 
 fastWorkflow 2.21.6 already ships the turn vocabulary. Do **not** invent a parallel status enum.
 
-- `fastworkflow/turn.py`:
+- `fastworkflow/core/turn.py`:
   - `TurnStatus` (`COMPLETED | AWAITING_USER | FAILED | CANCELLED | ABANDONED`, lines 83–91).
   - `TurnOutput` (line 168) — consumer-facing slice with `turn_key`, `status`, `failure_reason`,
     `answer`, `command_outputs`, computed `success`.
   - `TurnResult` (line 240) — internal system-of-record.
   - `mint_turn_key()` (line 93) — colon-free, lexicographically sortable id.
-- `fastworkflow/workflow_execution_context.py`:
+- `fastworkflow/engine/workflow_execution_context.py`:
   - `process_turn(message) -> TurnOutput` (line 485) — **non-deprecated** path; same dispatch as
     `process_message` plus it builds the `TurnResult`.
   - `process_message(message) -> CommandOutput` (line 470) — **deprecated** (emits
@@ -503,9 +503,9 @@ so a deadline cancels the in-flight HTTP request instead of orphaning a thread. 
 
 ## Appendix A — Verified code references (fastWorkflow 2.21.6, under `.venv`)
 
-- `fastworkflow/turn.py` — `TurnStatus` (83–91), `mint_turn_key()` (93), `TurnOutput` (168),
+- `fastworkflow/core/turn.py` — `TurnStatus` (83–91), `mint_turn_key()` (93), `TurnOutput` (168),
   `TurnResult` (240).
-- `fastworkflow/workflow_execution_context.py` — `process_message()` deprecated (470, warns 477–483),
+- `fastworkflow/engine/workflow_execution_context.py` — `process_message()` deprecated (470, warns 477–483),
   `process_turn()` (485), `_build_turn_result()` (525), `process_action()` (579, no `TurnResult`).
 - `fastworkflow/__init__.py` — exports `TurnOutput`/`TurnStatus` (286–297), unused by server.
 - `fastworkflow/run_fastapi_mcp/__main__.py` —

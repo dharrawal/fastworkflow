@@ -1,5 +1,7 @@
 # Out-of-Scope Utterance Rejection: Design Proposal
 
+> **Update (fix-o5wi.8):** the similarity cache this proposal reads and reuses (`fastworkflow/cache_matching.py`, `cache_match`, `get_embedding`, the adaptive correction cache) was removed from intent detection. Every passage below that cites it describes a component that no longer exists.
+
 > **Status:** UNRESOLVED DESIGN PROPOSAL; `fix-d28` REMAINS OPEN. The soft fallback
 > wording is implemented, but no satisfactory out-of-scope solution has been established.
 > `ErrorCorrection/you_misunderstood.py` now presents the capability list without
@@ -32,7 +34,7 @@
 > working tree. The tree is dirty with in-flight R1/R2/R3/R7 work and
 > `model_pipeline_training.py` and `intent_detection.py` are offset by hundreds of lines.
 > Two exceptions, stated where they occur: `fastworkflow/cache_matching.py` and
-> `fastworkflow/utils/signatures.py` are clean (identical either way), and
+> `fastworkflow/parameters/signatures.py` are clean (identical either way), and
 > `fastworkflow/train/heldout_evaluation.py` is untracked, so its line numbers are
 > working-tree only. `_commands/wildcard.py`'s cited ranges (65–90, 99–124, 140–165) were
 > checked line-by-line and are identical in both.
@@ -132,7 +134,7 @@ context** is worth stating precisely, because it is not what the ambiguity machi
 name suggests. `intent_detection.py` builds the three-option "The command is ambiguous.
 Please choose…" message, stores the candidates, and returns `command_name=None`. In
 `_commands/wildcard.py:99-124` that enters the parent walk; retail's
-`context_inheritance_model.json` is empty, so `is_command_context_for_response_generation_root`
+`context_inheritance_model.json` (a removed spelling: a context's bases are now `inherits` on its `class Context`) is empty, so `is_command_context_for_response_generation_root`
 is true, the walk body never executes, and control reaches line 111 — `# out of scope
 commands` — which runs `ErrorCorrection/you_misunderstood`. The three-option message is
 discarded on this turn; what the user actually sees is `you_misunderstood`'s **full command
@@ -311,7 +313,9 @@ recommends; D and E exist to keep the comparison honest.
 
 Reject when `max_prob` falls below a threshold chosen as a real operating point rather
 than, as today, the mean confidence of misclassified test rows
-(`model_pipeline_training.py:1174-1190`).
+(`model_pipeline_training.py:1174-1190`). (As measured at that commit. Since fix-1hs8 the large tier uses the
+10th percentile of correct-row confidences when fewer than 5 test rows are misclassified; the failed mean is
+unchanged otherwise, and the small tier is unchanged.)
 
 **What it costs:** almost nothing. The artifact
 (`tiny_ambiguous_threshold.json` / `large_ambiguous_threshold.json`) and the reader
@@ -715,7 +719,7 @@ loop. Behaviour change must be flag-guarded.
 
 | File | Change | Risk |
 |---|---|---|
-| `fastworkflow/model_pipeline_training.py` | Write `seed_embeddings.npz` (+ a manifest of source utterances and command names) per context at train time, next to `label_encoder.pkl` | Low. Additive; `get_artifact_path` already handles placement |
+| `fastworkflow/train/model_pipeline_training.py` | Write `seed_embeddings.npz` (+ a manifest of source utterances and command names) per context at train time, next to `label_encoder.pkl` | Low. Additive; `get_artifact_path` already handles placement |
 | `fastworkflow/train/artifact_versioning.py` | Include the new artifact in versioned assembly | Low |
 | `fastworkflow/train/selective_training.py` | Bank invalidation on seed-table change, via the corrected upward-closure rule (`close_dirty_contexts`, AR2) | **Medium.** A stale bank degrades the gate silently — the failure mode is invisible |
 | `fastworkflow/cache_matching.py` | Extract/expose a `max_similarity_to_bank` helper; reuse `get_embedding`'s LRU | Low |
@@ -773,7 +777,7 @@ larger and less predictable cost and is *per workflow*, not one-off.
   churn dominates.
 - **§1.3's account of what the ambiguous 60% actually see.** Established by reading
   `intent_detection.py` and `_commands/wildcard.py:99-124` plus retail's empty
-  `context_inheritance_model.json`, not by capturing a live turn. It is the one claim in
+  `context_inheritance_model.json` (a removed spelling: a context's bases are now `inherits` on its `class Context`), not by capturing a live turn. It is the one claim in
   this document that a single integration test would settle, and §7.1 makes that the first
   task.
 - **That `fix-d28` should be p2.** That is a recommendation (§3.1) contingent on §3.3's
@@ -801,11 +805,11 @@ Re-verification one-liners:
 
 ```bash
 # Thresholds are the mean confidence of misclassified test rows, not an operating point
-git show 23dbe35:fastworkflow/model_pipeline_training.py | sed -n '1174,1190p'
+git show 23dbe35:fastworkflow/train/model_pipeline_training.py | sed -n '1174,1190p'
 cat fastworkflow/examples/retail_workflow/___command_info/global/*threshold*.json
 
 # The only rejection mechanism today
-git show 23dbe35:fastworkflow/model_pipeline_training.py | sed -n '321,334p'
+git show 23dbe35:fastworkflow/train/model_pipeline_training.py | sed -n '321,334p'
 
 # CME commands execute with no parameter stage; app commands do not
 sed -n '65,90p'  fastworkflow/_workflows/command_metadata_extraction/_commands/wildcard.py
@@ -815,7 +819,7 @@ sed -n '140,165p' fastworkflow/_workflows/command_metadata_extraction/_commands/
 sed -n '99,124p' fastworkflow/_workflows/command_metadata_extraction/_commands/wildcard.py
 
 # NOT_FOUND is treated as missing, which is what stops the mutating commands
-sed -n '337,341p' fastworkflow/utils/signatures.py
+sed -n '337,341p' fastworkflow/parameters/signatures.py
 
 # The embedding is already computed on every intent-detection turn
 git show 23dbe35:fastworkflow/_workflows/command_metadata_extraction/intent_detection.py | sed -n '116,126p'
@@ -1371,3 +1375,18 @@ detector.
 | 48 | near_domain | why was my credit application declined | no (prompt) | `modify_pending_order_payment` | 0.3084 | 0.6375 |
 | 49 | near_domain | can i speak to your legal department about a trademark | no (prompt) | `modify_pending_order_items` | 0.2142 | 0.4949 |
 | 50 | near_domain | what is your policy on child labour in the supply chain | **yes** | `IntentDetection/what_can_i_do` | 0.7071 | 0.8090 |
+
+
+## Addendum (fix-1hs8): where the "not here" class comes from for a head with no foreign command
+
+The sparse "not here" class (`wildcard` label) is built only from seeds of foreign commands
+(`not_here_seed_rows`). A head with no foreign command (a single-context workflow without core
+commands, e.g. the built-in plan review-reply head) therefore had no class at all, and a
+vague reply ("hmm", "it depends") was routed confidently to the nearest real command and acted on.
+Such a head is now seeded from a short built-in list of domain-neutral vague replies
+(`BUILT_IN_VAGUE_REPLIES`, recorded under the source name `built_in/vague_reply` in the head's
+not-here samples and training signature). The rows are used as written (no generation, as for every
+foreign seed) and repeated `BUILT_IN_VAGUE_WEIGHT` times, because nine rows are out-voted by the
+34-41 rows of each real command. Heads that have a foreign seed read nothing from the list, and the
+internal CME still has no class. The held-out report records, per context, that the class was seeded
+from the list, so the "at floor without a wildcard class" warning no longer applies to such a head.

@@ -9,7 +9,8 @@ class Signature:
     """Count the overdue loans, in one branch or across the library."""
 
     class Input(BaseModel):
-        branch: str = Field(default="", description="one branch's name; empty for every branch")
+        branch: str = Field(default="", description="one branch's name; empty for every branch",
+                            examples=["Central", "Riverside", "riverside"])
 
     class Output(BaseModel):
         total: int = Field(description="how many loans are overdue")

@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from fastworkflow.command_context_model import (
+from fastworkflow.core.command_context_model import (
     CommandContextModel,
     CommandContextModelValidationError,
 )
@@ -87,7 +87,7 @@ def test_train_workflow_tears_down_personas_after_orchestration_failure(tmp_path
 
     sys.setprofile(observe_context_model_load)
     try:
-        with pytest.raises(CommandContextModelValidationError, match="Invalid JSON"):
+        with pytest.raises(CommandContextModelValidationError, match="is removed and not read"):
             train_workflow(str(workflow_path))
     finally:
         sys.setprofile(None)

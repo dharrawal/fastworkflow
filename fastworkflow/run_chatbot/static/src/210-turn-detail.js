@@ -78,22 +78,12 @@ function statusBadge(turn) {
 /* ======================================================================
    Progressive-disclosure turn viewer
    ======================================================================
-   The levels are fastWorkflow's own abstractions, not the raw span table: a
-   turn plans and then executes; execution is an agent taking steps; a step
-   hands a command to the assistant, which detects intent and then extracts
-   parameters. Each level shows what is known AT that level, then a waterfall
-   of its direct children as the drill-down control, and breadcrumbs to climb.
-
-   Most of the tree is real — the store persists parent_span_id and the old
-   viewer simply ignored it. Two levels are not spans yet: the agent loop as
-   a phase, and the individual step. Those are derived in
-   deriveExecutionChildren(), which is the single seam: when fw.agent.step is
-   emitted for real, that function reads spans instead of inferring them and
-   nothing else here changes. */
-
-var PHASE_PLANNING = "planning";
-var PHASE_EXECUTION = "execution";
-var PHASE_OTHER = "other";
+   The levels are the turn's recorded stages (span contract 63): split,
+   resolve, review, run and answer, each with its parts, a part's plan, phases
+   and steps, and a step's command. Each level shows what is known AT that
+   level, then a waterfall of its direct children as the drill-down control,
+   and breadcrumbs to climb. A turn recorded before span contract 63 is not
+   read (its spans are drawn as they were stored, with no stage grouping). */
 
 function byStartNs(a, b) { return a.start_ns - b.start_ns; }
 
@@ -295,9 +285,6 @@ function makeNode(kind, title, opts) {
     title: title,
     crumb: opts.crumb || title,
     detail: opts.detail || "",
-    /* Which PHASE_* a phase node stands for. Titles are display text and
-       carry ordinals and "(resumed)", so code that needs the stage asks here. */
-    phase: opts.phase || "",
     category: opts.category || "cat-other",
     status: opts.status || "",
     span: opts.span || null,
@@ -321,20 +308,39 @@ function makeNode(kind, title, opts) {
 /* -- span-level titles -------------------------------------------------- */
 function spanTitle(span, role) {
   switch (span.name) {
-    case "fw.planner.plan": return "Planning";
-    case "fw.planner.replan": return "Replanning";
-    case "fw.agent.execute": return "Execution";
-    case "fw.agent.step": return "Step";
-    case "fw.agent.tool_call":
-      return "Agent tool call" + (span.command_name ? " · " + span.command_name : "");
-    case "fw.command.execute":
-      return "Assistant" + (span.command_name ? " · " + span.command_name : "");
-    case "fw.nlu.intent": return "Intent detection";
-    case "fw.nlu.param_extraction": return "Parameter extraction";
-    case "fw.ask_user": return "Ask user";
     case "fw.llm.call": return "LLM call" + (role ? " · " + role : "");
+    case "fw.split": return "Split";
+    case "fw.split.gate": return "One-job gate";
+    case "fw.split.splitter": return "Splitter";
+    case "fw.split.merge": return "Merge";
+    case "fw.split.referent": return "Referent" + partSuffix(span);
+    case "fw.resolve": return "Resolve";
+    case "fw.resolve.part": return "Part" + partSuffix(span) + commandSuffix(span);
+    case "fw.review": return "Review";
+    case "fw.review.reply": return "Review reply";
+    case "fw.review.edit": return "Review edit";
+    case "fw.review.revision": return "Review revision";
+    case "fw.run": return "Run";
+    case "fw.run.part": return "Part" + partSuffix(span) + commandSuffix(span)
+      + ((span.attributes || {}).outcome ? " · " + span.attributes.outcome : "");
+    case "fw.answer": return "Answer";
+    case "fw.intent": return "Intent detection";
+    case "fw.parameters": return "Parameter extraction";
+    case "fw.question": return "Question" + ((span.attributes || {}).kind ? " · " + span.attributes.kind : "");
+    case "fw.plan": return planLabel(span) === "replanning" ? "Replanning" : "Planning";
+    case "fw.phase": return "Phase" + ((span.attributes || {}).phase ? " · " + span.attributes.phase : "");
+    case "fw.step": return (span.attributes || {}).kind === "answer" ? "Answer step" : "Step";
+    case "fw.command": return "Command" + (span.command_name ? " · " + span.command_name : "");
     default: return span.name;
   }
+}
+function partSuffix(span) {
+  var part = (span.attributes || {}).part;
+  return part ? " " + part : "";
+}
+function commandSuffix(span) {
+  var command = span.command_name || (span.attributes || {}).command;
+  return command ? " · " + command : "";
 }
 
 function orderedAttrKeys(attrs) {
@@ -421,14 +427,21 @@ function renderSpanLevel(container, span, role, fold) {
     appendAttrSection(container, "module exception", a.module_exception);
     appendAttrSection(container, "exception", a.exception);
     appendCollapsedSection(container, "call kwargs", a.call_kwargs);
-  } else if (span.name === "fw.agent.tool_call" || span.name === "fw.command.execute") {
+  } else if (span.name === "fw.command") {
     appendAttrSection(container, "command as the agent wrote it", a.raw_command);
     appendAttrSection(container, "extracted parameters", a.parameters);
     appendAttrSection(container, "response", a.response_text);
     appendAttrSection(container, "error type", a.error_type);
-  } else if (span.name === "fw.ask_user") {
-    appendAttrSection(container, "question to the user", a.agent_query);
+    appendAttrSection(container, "resolved by", a.resolved_by);
+    appendAttrSection(container, "parameters read by", a.parameters_read_by);
+  } else if (span.name === "fw.question") {
+    appendAttrSection(container, "question to the user", a.asked);
     appendAttrSection(container, "the user's answer", a.user_response);
+    orderedAttrKeys(a).forEach(function (key) {
+      if (["asked", "user_response"].indexOf(key) === -1) {
+        appendAttrSection(container, key.replace(/_/g, " "), a[key]);
+      }
+    });
   } else {
     /* NLU and anything else: every attribute, one per row, since these spans
        are small and their whole point is the detail. */
@@ -552,7 +565,7 @@ function renderPromptMessages(body, messages, panelTitle) {
 function spanNode(span, kids, byId) {
   var role = span.name === "fw.llm.call" ? llmCallLabel(span, byId) : "";
   var childSpans = (kids[span.span_id] || []).slice().sort(byStartNs);
-  var children = childSpans.map(function (c) { return spanNode(c, kids, byId); });
+  var children = childNodes(childSpans, kids, byId);
   /* Whether this span charges its own usage, money and cache, and if not, why.
      `chargeFolds` reads the whole span set, so a duplicate is caught whether it
      nests (wrapper) or sits beside its twin (shared) — the sibling case used to
@@ -591,35 +604,31 @@ function spanNode(span, kids, byId) {
   });
 }
 
-/* -- phase classification ---------------------------------------------- */
-function reactChain(span) {
-  if (span.name !== "fw.llm.call") { return ""; }
-  var chain = String((span.attributes || {}).module_chain || "");
-  return chain.indexOf("fastWorkflowReAct") === 0 ? chain : "";
-}
-
-function phaseOf(span) {
-  if (span.name === "fw.planner.plan" || span.name === "fw.planner.replan") {
-    return PHASE_PLANNING;
-  }
-  if (span.name === "fw.agent.execute" || span.name === "fw.agent.step" ||
-      span.name === "fw.agent.tool_call" || span.name === "fw.command.execute" ||
-      span.name === "fw.ask_user" || reactChain(span)) {
-    return PHASE_EXECUTION;
-  }
-  return PHASE_OTHER;
+/* The nodes of a span's children. A step (fw.step that is not an answer step)
+   is numbered among its siblings and read as a step, whoever ran it. */
+function childNodes(childSpans, kids, byId) {
+  var ordinal = 0, lastObservation = "";
+  return childSpans.map(function (c) {
+    if (c.name === "fw.step" && (c.attributes || {}).kind !== "answer") {
+      ordinal += 1;
+      var node = buildRecordedStepNode(c, ordinal, lastObservation, kids, byId);
+      lastObservation = (c.attributes || {}).observation || (c.attributes || {}).response_text || "";
+      return node;
+    }
+    return spanNode(c, kids, byId);
+  });
 }
 
 /* What a step label names. `execute_workflow_query` on every step says
    nothing, so such a step shows the command it ran: the routed name from the
-   first fw.command.execute under `roots`, or, when routing failed and no
+   first fw.command under `roots`, or, when routing failed and no
    command ran, the first word of the command the agent sent. */
 function invokedCommand(toolName, toolArgs, roots, kids) {
   if (toolName !== "execute_workflow_query") { return toolName; }
   var pending = roots.slice();
   while (pending.length) {
     var span = pending.shift();
-    if (span.name === "fw.command.execute" && span.command_name) {
+    if (span.name === "fw.command" && span.command_name) {
       return String(span.command_name).split("/").pop();
     }
     pending = (kids[span.span_id] || []).slice().sort(byStartNs).concat(pending);
@@ -628,7 +637,7 @@ function invokedCommand(toolName, toolArgs, roots, kids) {
   return String(args.command || "").trim().split(/\s+/)[0] || toolName;
 }
 
-/* -- recorded agent loop: fw.agent.execute / fw.agent.step -------------- */
+/* -- a recorded step: fw.step ------------------------------------------- */
 function buildRecordedStepNode(span, ordinal, incomingObservation, kids, byId) {
   var attrs = span.attributes || {};
   var children = (kids[span.span_id] || []).slice().sort(byStartNs)
@@ -644,11 +653,16 @@ function buildRecordedStepNode(span, ordinal, incomingObservation, kids, byId) {
     tokens: sumTokens(children),
     cost: sumCost(children),
     render: function (container) {
-      container.appendChild(el("div", "levelLead",
-        "The agent reads the observation from its trajectory, states its " +
-        "reasoning, and names the next tool to call."));
+      /* A step of span contract 63 says who ran it (run_by); code runs a
+         planning command's written steps with no model call. */
+      container.appendChild(el("div", "levelLead", attrs.run_by === "code"
+        ? "Code ran this step: the command it names, with no model call."
+        : "The agent reads the observation from its trajectory, states its " +
+          "reasoning, and names the next tool to call."));
       appendAttrSection(container, "observation in",
         incomingObservation || "(none — this is the agent's first step)");
+      appendAttrSection(container, "run by", attrs.run_by);
+      appendAttrSection(container, "command", attrs.raw_command);
       appendAttrSection(container, "reasoning", attrs.thought);
       appendAttrSection(container, "next tool", attrs.tool_name);
       appendAttrSection(container, "tool arguments", attrs.tool_args);
@@ -678,284 +692,11 @@ function appendPolicySection(container, attrs) {
   appendAttrSection(container, "enforced intent", attrs.policy_intent);
 }
 
-function buildRecordedExecutionNode(span, kids, byId, ordinalLabel) {
-  var attrs = span.attributes || {};
-  var childSpans = (kids[span.span_id] || []).slice().sort(byStartNs);
-  var children = [], stepCount = 0, lastObservation = "";
-  childSpans.forEach(function (child) {
-    if (child.name === "fw.agent.step") {
-      stepCount += 1;
-      children.push(buildRecordedStepNode(
-        child, stepCount, lastObservation, kids, byId));
-      lastObservation = (child.attributes || {}).observation || "";
-      return;
-    }
-    var node = spanNode(child, kids, byId);
-    if (child.name === "fw.llm.call" && llmCallLabel(child, byId) === "final answer") {
-      /* ReAct's extract call: it runs inside forward(), after the loop and
-         before the agent returns, so it belongs to execution rather than to
-         the turn — even though its output becomes the turn's answer. */
-      node.title = "Answer synthesis";
-      node.crumb = "Answer synthesis";
-    }
-    children.push(node);
-  });
-  var label = "Execution" + (ordinalLabel || "") + (attrs.resumed ? " (resumed)" : "");
-  return makeNode("phase", label, {
-    crumb: label,
-    detail: stepCount + (stepCount === 1 ? " step" : " steps"),
-    phase: PHASE_EXECUTION,
-    category: "cat-tool",
-    status: span.status,
-    span: span,
-    children: children,
-    extent: spanExtent([span]),
-    tokens: sumTokens(children),
-    cost: sumCost(children),
-    render: function (container) {
-      container.appendChild(el("div", "levelLead",
-        "The agent loop: each step turns an observation into reasoning and a " +
-        "next action. Tool calls go to the assistant, which resolves intent " +
-        "and parameters before running the command."));
-      var kv = el("dl", "kv");
-      kv.appendChild(el("dt", null, "steps"));
-      kv.appendChild(el("dd", null, String(stepCount)));
-      if (attrs.attempts && attrs.attempts > 1) {
-        kv.appendChild(el("dt", null, "agent retries"));
-        kv.appendChild(el("dd", null, String(attrs.attempts - 1)));
-      }
-      container.appendChild(kv);
-      appendAttrSection(container,
-        attrs.resumed ? "the user's answer, resuming the agent"
-                      : "input received from the planner",
-        attrs.agent_input);
-      appendAttrSection(container, "answer returned to the turn", attrs.final_answer);
-      appendAttrSection(container, "still awaiting the user", attrs.clarification);
-      if (attrs.exhausted) {
-        appendAttrSection(container, "note",
-          "the loop hit max_iters without the agent choosing finish");
-      }
-    }
-  });
-}
-
-/* -- legacy: agent steps derived for turns recorded before fw.agent.step -- */
-function deriveExecutionChildren(spans) {
-  /* Kept only for turns already in the database. Live turns carry real
-     fw.agent.execute / fw.agent.step spans and take the recorded path above;
-     this reconstruction runs when those are absent, so old recordings stay
-     readable instead of collapsing into a flat list.
-
-     ReAct's own two modules tell the steps apart: the Predict picks the next
-     tool, the ChainOfThought turns the finished trajectory into the answer.
-     A step therefore opens on a Predict call and owns every tool call until
-     the next one. */
-  var out = [], step = null, stepNo = 0;
-  spans.forEach(function (s) {
-    var chain = reactChain(s);
-    var isExtract = chain && chain.indexOf("ChainOfThought") !== -1;
-    if (chain && !isExtract) {
-      stepNo += 1;
-      step = { no: stepNo, reasoning: s, actions: [] };
-      out.push({ type: "step", step: step });
-    } else if (isExtract) {
-      step = null;
-      out.push({ type: "final", span: s });
-    } else if (step) {
-      step.actions.push(s);
-    } else {
-      out.push({ type: "span", span: s });
-    }
-  });
-  return out;
-}
-
 function attrObject(value) {
   var parsed = parsedAttr(value);
   return (parsed && typeof parsed === "object") ? parsed : null;
 }
 
-function moduleKwargs(span) {
-  var input = attrObject((span.attributes || {}).module_input);
-  return (input && attrObject(input.kwargs)) || input || null;
-}
-
-function buildStepNode(step, incomingObservation, kids, byId) {
-  var out = attrObject((step.reasoning.attributes || {}).module_output) || {};
-  var toolName = out.next_tool_name || "";
-  var children = [spanNode(step.reasoning, kids, byId)].concat(
-    step.actions.map(function (s) { return spanNode(s, kids, byId); })
-  );
-  var covered = [step.reasoning].concat(step.actions);
-  return makeNode("step", "Step " + step.no, {
-    crumb: "Step " + step.no,
-    detail: invokedCommand(toolName, out.next_tool_args, step.actions, kids),
-    category: "cat-tool",
-    children: children,
-    extent: spanExtent(covered),
-    tokens: sumTokens(children),
-    cost: sumCost(children),
-    render: function (container) {
-      var lead = el("div", "levelLead",
-        "The agent reads the observation from its trajectory, states its " +
-        "reasoning, and names the next tool to call.");
-      container.appendChild(lead);
-      appendAttrSection(container, "observation in",
-        incomingObservation || "(none — this is the agent's first step)");
-      appendAttrSection(container, "reasoning", out.next_thought);
-      appendAttrSection(container, "next tool", toolName);
-      appendAttrSection(container, "tool arguments", out.next_tool_args);
-      var last = step.actions[step.actions.length - 1];
-      if (last) {
-        appendAttrSection(container, "observation out",
-          (last.attributes || {}).response_text);
-      }
-    }
-  });
-}
-
-function buildExecutionNode(spans, kids, byId, ordinalLabel) {
-  var recorded = spans.filter(function (s) { return s.name === "fw.agent.execute"; });
-  if (recorded.length) {
-    /* The executor recorded its own shape — read it instead of inferring one. */
-    return recorded.map(function (s) {
-      return buildRecordedExecutionNode(s, kids, byId, ordinalLabel);
-    });
-  }
-  var derived = deriveExecutionChildren(spans);
-  var children = [], stepCount = 0, finalAnswer = null, firstReact = null;
-  var lastObservation = "";
-  derived.forEach(function (item) {
-    if (item.type === "step") {
-      stepCount += 1;
-      if (!firstReact) { firstReact = item.step.reasoning; }
-      children.push(buildStepNode(item.step, lastObservation, kids, byId));
-      var last = item.step.actions[item.step.actions.length - 1];
-      if (last) { lastObservation = (last.attributes || {}).response_text || ""; }
-    } else if (item.type === "final") {
-      /* Not the turn's answer field, but the call that produces it: ReAct
-         runs this ChainOfThought inside forward(), after the loop stops and
-         BEFORE the agent returns, so it is the tail of execution rather than
-         something the turn does afterwards. Its output then becomes the
-         turn's answer verbatim. */
-      finalAnswer = item.span;
-      var node = spanNode(item.span, kids, byId);
-      node.title = "Answer synthesis";
-      node.crumb = "Answer synthesis";
-      children.push(node);
-    } else {
-      children.push(spanNode(item.span, kids, byId));
-    }
-  });
-  var answerText = "";
-  if (finalAnswer) {
-    var out = attrObject((finalAnswer.attributes || {}).module_output) || {};
-    answerText = out.final_answer || "";
-  }
-  var handoff = firstReact ? (moduleKwargs(firstReact) || {}).user_query : "";
-  if (!stepCount && !finalAnswer) {
-    /* Deterministic ("/" prefixed) and assistant-mode turns run no agent
-       loop at all — the turn goes straight to a command. Hoisting the
-       children keeps the levels to the ones that actually happened instead
-       of interposing an "Execution · 0 steps" hop that explains nothing. */
-    return children;
-  }
-  return makeNode("phase", "Execution" + (ordinalLabel || ""), {
-    crumb: "Execution" + (ordinalLabel || ""),
-    detail: stepCount + (stepCount === 1 ? " step" : " steps"),
-    phase: PHASE_EXECUTION,
-    category: "cat-tool",
-    children: children,
-    extent: spanExtent(spans),
-    tokens: sumTokens(children),
-    cost: sumCost(children),
-    render: function (container) {
-      container.appendChild(el("div", "levelLead",
-        "The agent loop: each step turns an observation into reasoning and a " +
-        "next action. Tool calls go to the assistant, which resolves intent " +
-        "and parameters before running the command."));
-      var kv = el("dl", "kv");
-      kv.appendChild(el("dt", null, "steps"));
-      kv.appendChild(el("dd", null, String(stepCount)));
-      container.appendChild(kv);
-      appendAttrSection(container, "input received from the planner", handoff);
-      appendAttrSection(container, "answer returned to the turn", answerText);
-    }
-  });
-}
-
-function buildPlanningNode(spans, kids, byId, ordinalLabel) {
-  /* One planner span per run in practice; if a run ever holds more, the
-     extra spans still appear as children rather than being dropped. */
-  var planner = spans.filter(function (s) {
-    return s.name === "fw.planner.plan" || s.name === "fw.planner.replan";
-  })[0] || spans[0];
-  var attrs = planner ? (planner.attributes || {}) : {};
-  var isReplan = planner && planner.name === "fw.planner.replan";
-  var children = [];
-  spans.forEach(function (s) {
-    (kids[s.span_id] || []).slice().sort(byStartNs).forEach(function (c) {
-      children.push(spanNode(c, kids, byId));
-    });
-  });
-  var llm = spans.reduce(function (found, s) {
-    return found || (kids[s.span_id] || []).filter(function (c) {
-      return c.name === "fw.llm.call";
-    })[0];
-  }, null);
-  var planIn = llm ? moduleKwargs(llm) : null;
-  var label = (isReplan ? "Replanning" : "Planning") + (ordinalLabel || "");
-  return makeNode("phase", label, {
-    crumb: label,
-    detail: attrs.replan_trigger && attrs.replan_trigger !== "None"
-      ? "triggered by " + attrs.replan_trigger : "",
-    phase: PHASE_PLANNING,
-    category: "cat-planner",
-    children: children,
-    extent: spanExtent(spans),
-    tokens: sumTokens(children),
-    cost: sumCost(children),
-    render: function (container) {
-      container.appendChild(el("div", "levelLead",
-        "The planner turns the user's message into the numbered next steps " +
-        "it hands to the executor."));
-      var kv = el("dl", "kv");
-      if (attrs.model) {
-        kv.appendChild(el("dt", null, "model"));
-        kv.appendChild(el("dd", null, attrs.model));
-      }
-      if (attrs.replan_trigger && attrs.replan_trigger !== "None") {
-        kv.appendChild(el("dt", null, "replan trigger"));
-        kv.appendChild(el("dd", null, attrs.replan_trigger));
-      }
-      container.appendChild(kv);
-      appendAttrSection(container, "planner input", planIn, { collapsed: true });
-      appendAttrSection(container, "plan handed to the executor", attrs.plan);
-    }
-  });
-}
-
-function buildOtherNode(spans, kids, byId) {
-  /* Work that belongs to neither phase — today the post-turn conversation
-     summarizer. Named for what it is rather than hidden. */
-  var children = spans.map(function (s) { return spanNode(s, kids, byId); });
-  var only = children.length === 1 ? children[0] : null;
-  if (only) { return only; }
-  return makeNode("phase", "Post-turn work", {
-    crumb: "Post-turn",
-    phase: PHASE_OTHER,
-    category: "cat-other",
-    children: children,
-    extent: spanExtent(spans),
-    tokens: sumTokens(children),
-    cost: sumCost(children),
-    render: function (container) {
-      container.appendChild(el("div", "levelLead",
-        "Work outside planning and execution — bookkeeping the turn does " +
-        "once the answer exists."));
-    }
-  });
-}
 
 function buildTurnTree(turn, spans) {
   var byId = {}, kids = {};
@@ -975,35 +716,11 @@ function buildTurnTree(turn, spans) {
   });
   top.sort(byStartNs);
 
-  var runs = [];
-  top.forEach(function (s) {
-    var phase = phaseOf(s);
-    var last = runs[runs.length - 1];
-    if (last && last.phase === phase) { last.spans.push(s); }
-    else { runs.push({ phase: phase, spans: [s] }); }
-  });
-
-  var counts = {};
-  runs.forEach(function (run) { counts[run.phase] = (counts[run.phase] || 0) + 1; });
-  var seen = {};
-  var children = [];
-  runs.forEach(function (run) {
-    seen[run.phase] = (seen[run.phase] || 0) + 1;
-    /* Only number a phase when the turn really has more than one of it —
-       a replan makes "Planning 2 / Execution 2" meaningful, and a plain turn
-       should not carry a "1" that implies a missing sibling. */
-    var ordinal = counts[run.phase] > 1 ? " " + seen[run.phase] : "";
-    var built;
-    if (run.phase === PHASE_PLANNING) {
-      built = buildPlanningNode(run.spans, kids, byId, ordinal);
-    } else if (run.phase === PHASE_EXECUTION) {
-      built = buildExecutionNode(run.spans, kids, byId, ordinal);
-    } else {
-      built = buildOtherNode(run.spans, kids, byId);
-    }
-    /* A phase builder may decline to wrap and hand back its children instead. */
-    children = children.concat(built);
-  });
+  /* The turn's stages are its levels (split, resolve, review, run, answer),
+     each with its parts and their work, as recorded. Anything outside a stage
+     (a distillation pass, a compose call, a span whose parent was never
+     recorded) sits beside them. */
+  var children = childNodes(top, kids, byId);
 
   var extent = rootSpan
     ? spanExtent([rootSpan])

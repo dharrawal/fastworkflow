@@ -17,12 +17,13 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow.command_directory import CommandDirectory
-from fastworkflow.command_routing import RoutingDefinition, RoutingRegistry
-from fastworkflow import model_pipeline_training
-from fastworkflow.model_pipeline_training import TrainingDataError
+from fastworkflow.core.command_directory import CommandDirectory
+from fastworkflow.core.command_routing import RoutingDefinition, RoutingRegistry
+from fastworkflow.train import model_pipeline_training
+from fastworkflow.train.model_pipeline_training import TrainingDataError
 from fastworkflow.train import __main__ as train_orchestration
 from fastworkflow.train import artifact_versioning as av
+from fastworkflow.train import intent_model_layout
 from fastworkflow.train import selective_training
 from fastworkflow.train import training_report
 
@@ -89,12 +90,12 @@ def cme_copy(tmp_path: Path, setup_test_environment):
     with _FASTWORKFLOW_GLOBAL_STATE_LOCK:
         package_root = Path(fastworkflow.__file__).parent
         source = package_root / "_workflows" / "command_metadata_extraction"
-        consultation_source = package_root / "_workflows" / "consultation"
+        plan_source = package_root / "_workflows" / "plan_metadata_extraction"
         copied_package_root = tmp_path / "fastworkflow"
         destination = (
             copied_package_root / "_workflows" / "command_metadata_extraction"
         )
-        consultation_destination = copied_package_root / "_workflows" / "consultation"
+        plan_destination = copied_package_root / "_workflows" / "plan_metadata_extraction"
         destination.parent.mkdir(parents=True)
         shutil.copytree(
             source,
@@ -106,10 +107,10 @@ def cme_copy(tmp_path: Path, setup_test_environment):
                 "__pycache__",
             ),
         )
-        if consultation_source.is_dir():
+        if plan_source.is_dir():
             shutil.copytree(
-                consultation_source,
-                consultation_destination,
+                plan_source,
+                plan_destination,
                 ignore=shutil.ignore_patterns(
                     "___command_info",
                     "___workflow_contexts",
@@ -117,8 +118,8 @@ def cme_copy(tmp_path: Path, setup_test_environment):
                     "__pycache__",
                 ),
             )
-            RoutingDefinition.build(str(consultation_destination))
-            CommandDirectory.load(str(consultation_destination)).save()
+            RoutingDefinition.build(str(plan_destination))
+            CommandDirectory.load(str(plan_destination)).save()
         RoutingRegistry.clear_registry()
         RoutingDefinition.build(str(destination))
         CommandDirectory.load(str(destination)).save()
@@ -260,9 +261,9 @@ def test_cme_readiness_checks_only_contexts_the_trainer_produces(cme_copy):
     )
     av.write_manifest(str(cme_workflow), version_id, **record_fields)
 
-    consultation_workflow = package_root / "_workflows" / "consultation"
-    if consultation_workflow.is_dir():
-        _stamp_internal_workflow_trained(consultation_workflow)
+    plan_workflow = package_root / "_workflows" / "plan_metadata_extraction"
+    if plan_workflow.is_dir():
+        _stamp_internal_workflow_trained(plan_workflow)
 
     assert train_orchestration.is_fast_workflow_trained(str(package_root))
     assert not (command_info / "ErrorCorrection").exists()
@@ -362,25 +363,42 @@ def test_nonempty_full_retrain_plan_is_always_formatted():
     )
 
 
-def test_trains_the_fastworkflow_package_is_a_path_test_not_a_substring_test(tmp_path):
-    """A workflow inside a checkout named 'fastworkflow' must still get the CME check.
+def test_the_framework_check_is_a_path_test_not_a_substring_test(tmp_path):
+    """A workflow inside a checkout named 'fastworkflow' must still get the framework check.
 
     The old substring test skipped the CME check for every such workflow, which made the
-    CME unretrainable through `fastworkflow train <app>` there (fix-3rsq.9.6).
+    CME unretrainable through `fastworkflow train <app>` there (fix-3rsq.9.6). The package
+    root is no workflow (fix-bl97.2): only the two framework workflows skip the check.
     """
     decoy = tmp_path / "fastworkflow" / "my_app"
     decoy.mkdir(parents=True)
 
-    assert not train_orchestration._trains_the_fastworkflow_package(str(decoy))
-    assert train_orchestration._trains_the_fastworkflow_package(
+    assert not intent_model_layout.is_framework_workflow(str(decoy))
+    assert not intent_model_layout.is_framework_workflow(
         os.path.realpath(fastworkflow.get_fastworkflow_package_path())
     )
-    assert train_orchestration._trains_the_fastworkflow_package(
+    assert intent_model_layout.is_framework_workflow(
         fastworkflow.get_internal_workflow_path("command_metadata_extraction")
     )
-    assert train_orchestration._trains_the_fastworkflow_package(
-        fastworkflow.get_internal_workflow_path("consultation")
+    assert intent_model_layout.is_framework_workflow(
+        fastworkflow.get_internal_workflow_path("plan_metadata_extraction")
     )
+
+
+def test_the_package_root_is_refused_not_trained(tmp_path, capsys):
+    """`fastworkflow train <the package>` wrote ___command_info and ___workflow_contexts into the package
+    itself; the package holds workflows but is none (fix-bl97.2), so it is refused before any work."""
+    import argparse
+
+    args = argparse.Namespace(
+        workflow_folderpath=fastworkflow.get_fastworkflow_package_path(),
+        env_file_path=str(tmp_path / "absent.env"),
+        passwords_file_path=str(tmp_path / "absent_passwords.env"),
+    )
+    with pytest.raises(SystemExit) as raised:
+        train_orchestration.train_main(args)
+    assert raised.value.code == 1
+    assert "the fastworkflow package is not a workflow" in capsys.readouterr().err
 
 
 def test_regeneration_flag_is_forwarded_only_inside_existing_cme_condition():
@@ -394,9 +412,9 @@ def test_regeneration_flag_is_forwarded_only_inside_existing_cme_condition():
     )
     condition = ast.unparse(cme_if.test)
     # Phase 9 step 4 (fix-3rsq.9.6): the old substring test ("'fastworkflow' not in
-    # workflow_path") is replaced by _trains_the_fastworkflow_package, which compares
-    # resolved paths and the internal CME folder. See test below for the behaviour.
-    assert "not _trains_the_fastworkflow_package(workflow_path)" in condition
+    # workflow_path") is replaced by a resolved-path test of the two framework workflows
+    # (fix-bl97.2: the package root is no workflow and is never trained). See test above.
+    assert "not intent_model_layout.is_framework_workflow(workflow_path)" in condition
     assert "not is_fast_workflow_trained(fastworkflow_folderpath)" in condition
 
     calls = [
@@ -406,7 +424,8 @@ def test_regeneration_flag_is_forwarded_only_inside_existing_cme_condition():
     ]
     assert len(calls) == 1
     call = calls[0]
-    assert ast.unparse(call.args[0]) == "fastworkflow_folderpath"
+    # each framework workflow is trained directly, never the package root that holds them
+    assert ast.unparse(call.args[0]) == "fastworkflow.get_internal_workflow_path(name)"
     keywords = {keyword.arg: ast.unparse(keyword.value) for keyword in call.keywords}
     assert keywords["regenerate_utterances"] == "regenerate_utterances"
     assert "does not force" in inspect.getsource(train_orchestration.train_main)

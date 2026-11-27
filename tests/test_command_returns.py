@@ -35,9 +35,9 @@ from pydantic import BaseModel
 
 import fastworkflow
 from fastworkflow import Action, CommandOutput, CommandResponse
-from fastworkflow.command_executor import CommandExecutor, frame_command_result
+from fastworkflow.engine.command_executor import CommandExecutor, frame_command_result
 from fastworkflow import ModuleType
-from fastworkflow.command_routing import RoutingRegistry
+from fastworkflow.core.command_routing import RoutingRegistry
 from fastworkflow.examples.library.application.library import Library
 from tests.example_workflow.application.todo_manager import TodoListManager as ExampleTodoListManager
 from tests.todo_list_workflow.application.todo_manager import TodoListManager

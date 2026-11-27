@@ -45,7 +45,7 @@ This is not an implementation; it is a blueprint for developers to build the eva
 
 3. **Agent Integration (Option A: agent-internal stepping via runtime bridge)**:
    - Implement a thin adapter inside the Tau Bench fork (e.g., `tau_bench/agents/fastworkflow_adapter.py`) that conforms to Tau Bench's agent interface and is selectable via the existing harness (no test edits).
-   - At adapter initialization, install a runtime bridge (monkey patch) that overrides FastWorkflow's internal tool execution entrypoint used by the agent (e.g., patch `fastworkflow.workflow_agent._execute_workflow_query`). The bridge must:
+   - At adapter initialization, install a runtime bridge (monkey patch) that overrides FastWorkflow's internal tool execution entrypoint used by the agent (e.g., patch `fastworkflow.agent.workflow_agent._execute_workflow_query`). The bridge must:
      - Plan-only: Resolve the exact command name and validated parameters without executing tools by invoking the CME “wildcard” route (extract `command_name`, `cmd_parameters`) and serializing parameters.
      - Translate the plan into Tau Bench `Action` ({`name`, `arguments`}).
      - Call `env.step(action)` directly (agent-internal stepping), obtain observation/reward/done.
@@ -137,7 +137,7 @@ This section specifies the concrete design and implementation plan for the runti
 - `tau_bench/agents/fastworkflow_tool_map.py` (optional): Stable mapping of Tau Bench tool names to FastWorkflow tool identifiers.
 
 #### 3.5.2 Runtime bridge (monkey-patch)
-- Intercept the agent’s synchronous tool execution entrypoint (preferred target: `fastworkflow.workflow_agent._execute_workflow_query`).
+- Intercept the agent’s synchronous tool execution entrypoint (preferred target: `fastworkflow.agent.workflow_agent._execute_workflow_query`).
 - For each call:
   1) Plan-only using the CME wildcard to resolve the final command name and validated parameters (no tool side effects).
   2) Build a Tau Bench `Action` dict: `{ "name": <command_name>, "arguments": <validated params dict> }`.
@@ -152,7 +152,7 @@ Example (pseudocode):
 import json
 import fastworkflow
 from fastworkflow import Action
-from fastworkflow.command_executor import CommandExecutor
+from fastworkflow.engine.command_executor import CommandExecutor
 
 _SESSION_ENV: dict[int, any] = {}
 _STEP_CB = None  # optional callback(dict)
@@ -166,7 +166,7 @@ def render_obs_for_agent(obs, info) -> str:
     return json.dumps({"observation": obs, "info": info}, ensure_ascii=False)
 
 def install_bridge(env) -> None:
-    import fastworkflow.workflow_agent as wa
+    import fastworkflow.agent.workflow_agent as wa
 
     def _execute_workflow_query_bridge(command: str,
                                        chat_session_obj: fastworkflow.ChatSession) -> str:
@@ -273,7 +273,7 @@ class FastWorkflowAgentAdapter:
 - If `_execute_workflow_query` becomes unavailable, patch `CommandExecutor.invoke_command` with an equivalent bridge:
 
 ```python
-from fastworkflow.command_executor import CommandExecutor as CE
+from fastworkflow.engine.command_executor import CommandExecutor as CE
 _orig_invoke = CE.invoke_command
 
 def invoke_command_bridge(chat_session, command):

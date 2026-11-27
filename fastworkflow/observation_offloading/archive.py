@@ -84,7 +84,9 @@ def redaction_mode(override: Optional[str] = None) -> str:
     while the cost in the other direction is a credential written verbatim to
     disk, which no later configuration change undoes.
     """
-    raw = override if override is not None else os.environ.get(REDACTION_ENV, "")
+    import fastworkflow
+
+    raw = override if override is not None else fastworkflow.raw_env_var(REDACTION_ENV)
     value = str(raw or "").strip().lower()
     if not value:
         return REDACTION_ON

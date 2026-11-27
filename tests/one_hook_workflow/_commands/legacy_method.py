@@ -1,7 +1,7 @@
 """A retired Signature.db_lookup method: a load error."""
 
 import fastworkflow
-from fastworkflow.workflow import Workflow
+from fastworkflow.core.workflow import Workflow
 from pydantic import BaseModel, Field
 
 

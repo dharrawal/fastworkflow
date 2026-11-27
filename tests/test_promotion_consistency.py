@@ -51,8 +51,8 @@ import pytest
 from dotenv import dotenv_values
 
 import fastworkflow
-from fastworkflow.command_context_model import CommandContextModel
-from fastworkflow.command_routing import RoutingDefinition, RoutingRegistry
+from fastworkflow.core.command_context_model import CommandContextModel
+from fastworkflow.core.command_routing import RoutingDefinition, RoutingRegistry
 from fastworkflow.train import __main__ as train_orchestration
 from fastworkflow.train import artifact_versioning as av
 from fastworkflow.train import selective_training as st

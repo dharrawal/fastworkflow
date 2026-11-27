@@ -1,5 +1,5 @@
 import fastworkflow
-from fastworkflow.command_directory import CommandDirectory
+from fastworkflow.core.command_directory import CommandDirectory
 import pytest
 
 

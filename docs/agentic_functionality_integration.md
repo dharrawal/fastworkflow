@@ -3,7 +3,7 @@
 ## 1. Overview
 
 ### 1.1 Purpose
-This specification outlines the integration of agentic (AI-driven, autonomous decision-making) capabilities directly into the core fastWorkflow runtime, eliminating the need for separate `run` and `run_agent` programs. The goal is to unify the execution model under a single entry point (`run/__main__.py`) while allowing users to switch between assistant mode (direct command processing) and agent mode (autonomous planning and execution using DSPy-based agents).
+This specification outlines the integration of agentic (AI-driven, autonomous decision-making) capabilities directly into the core fastWorkflow runtime, eliminating the need for separate `run` and `run_agent` programs. The goal is to unify the execution model under a single entry point (`run_cli/__main__.py`) while allowing users to switch between assistant mode (direct command processing) and agent mode (autonomous planning and execution using DSPy-based agents).
 
 The integration introduces a new `run_as` parameter to `fastworkflow.ChatSession`, with values `"RUN_AS_ASSISTANT"` (default, for traditional imperative command execution) and `"RUN_AS_AGENT"` (for agentic, goal-oriented processing). In agent mode, the system treats the entire workflow as a "single complex tool" with a dynamic description that evolves based on context changes, leveraging GenAI-generated metadata, command details, and runtime introspection.
 
@@ -35,7 +35,7 @@ This enhances usability by enabling natural language interactions that autonomou
   - GenAI post-processing phase (from build_postprocessing_using_dspy.md) generates artifacts like `workflow_description.json`, command docstrings, and field metadata.
   - Existing fastWorkflow components: `ChatSession`, `CommandExecutor`, core commands (e.g., "what_can_i_do", "go_up", "reset_context", "current_context").
 - **Assumptions**:
-  - Workflows are built with `_commands` directory structure, Pydantic-based Signatures, and context hierarchies defined in `context_inheritance_model.json` and `context_containment_model.json` (if available).
+  - Workflows are built with `_commands` directory structure, Pydantic-based Signatures, and context hierarchies declared on each context's `class Context` (`inherits`, `parents`; the older `context_inheritance_model.json` is a removed spelling).
   - Environment variables (e.g., `LLM_AGENT`, API keys) are set for DSPy in agent mode.
   - Agent mode requires a trained workflow (checked via `tiny_ambiguous_threshold.json` as in run_agent).
   - Semantic matching uses embeddings (e.g., Sentence Transformers) for dynamic descriptions.
@@ -67,7 +67,7 @@ This enhances usability by enabling natural language interactions that autonomou
 
 - **Startup** (`ChatSession.start()`):
   - Common: Load workflow, execute startup command/action.
-  - Assistant Mode: Enter imperative command loop (as in current `run/__main__.py`).
+  - Assistant Mode: Enter imperative command loop (as in current `run_cli/__main__.py`).
   - Agent Mode: Enter agentic loop (natural language input → agent processing → output).
 
 - **Agent Mode Loop**:
@@ -111,7 +111,7 @@ This enhances usability by enabling natural language interactions that autonomou
 - **Usage**: Called automatically by agent on context changes; available in both modes.
 
 ### 3.2 Main Agent Implementation
-- **Location**: New module `fastworkflow/workflow_agent.py`.
+- **Location**: New module `fastworkflow/agent/workflow_agent.py`.
 - **Initialization**:
   - Load static data: `workflow_description.json`, context lists/hierarchies.
   - Query runtime: Initial "what_can_i_do" for core commands/current context.
@@ -139,9 +139,9 @@ This enhances usability by enabling natural language interactions that autonomou
 - Included in dynamic description with refined details.
 
 ## 4. Implementation Details
-- **ChatSession Changes** (`fastworkflow/chat_session.py`):
+- **ChatSession Changes** (`fastworkflow/engine/chat_session.py`):
   - Add `run_as` param; mode-specific loops in `start()`.
-- **Agent Module** (`fastworkflow/workflow_agent.py`):
+- **Agent Module** (`fastworkflow/agent/workflow_agent.py`):
   - Similar to run_agent/agent_module.py, but integrated.
 - **Build Enhancements** (`build/__main__.py`):
   - Ensure GenAI post-processing generates required JSON artifacts.

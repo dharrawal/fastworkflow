@@ -6,15 +6,15 @@ import fastworkflow
 from pydantic import BaseModel, Field
 
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
-from fastworkflow.workflow import Workflow
+from fastworkflow.core.workflow import Workflow
 
 
 class Signature:
     """Create a new user account in the directory."""
 
     class Input(BaseModel):
-        email: str = Field(default="NOT_FOUND", description="Email of the new user")
-        display_name: str = Field(default="NOT_FOUND", description="Display name")
+        email: str = Field(description="Email of the new user")
+        display_name: str = Field(description="Display name")
 
     class Output(BaseModel):
         status: str = Field(description="Whether the account was created.")

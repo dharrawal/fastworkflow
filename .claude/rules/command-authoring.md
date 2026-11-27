@@ -1,7 +1,6 @@
 ---
 paths:
   - "**/_commands/**"
-  - "**/context_inheritance_model.json"
 ---
 
 # Authoring fastWorkflow Commands
@@ -12,8 +11,15 @@ paths:
 my_workflow/
 ├── application/                     # Your app code (untouched)
 ├── _commands/                       # Command implementations (generated + edited)
-│   ├── context_inheritance_model.json  # Context/command hierarchy
-│   └── <command_name>.py            # Single-file command (preferred)
+│   ├── startup.py                   # Global command that builds the root object
+│   ├── <command_name>.py            # Global command: single file (preferred)
+│   ├── _workflow.py                 # Optional: the workflow's settings (class Context)
+│   ├── _shared/                     # Optional: helper modules (__init__.py + modules), never read as commands;
+│   │                                #   import with from ._shared.x (root) or from .._shared.x (context folder).
+│   │                                #   Any other _name.py or _folder in _commands/ is a load error.
+│   └── <Context>/                   # One folder per kind of object, named after its class
+│       ├── _<Context>.py            # Optional: class Context (inherits, parents, get_parent, get_displayname, ...)
+│       └── <command_name>.py        # A command of that context
 ├── ___command_info/                 # Generated at train-time (gitignore)
 ├── ___workflow_contexts/            # Session state at run-time (gitignore)
 └── ___convo_info/                   # Conversation logs (gitignore)
@@ -54,7 +60,7 @@ class ResponseGenerator:
         ...
 ```
 
-A two-argument `__call__` is a load error. `CommandOutput` is not a return value.
+A two-argument `__call__` (or one whose third argument has a default) is refused with "must take three arguments", but the error is raised only when the command's class is first used: `load_problems` does not list it. `CommandOutput` is not a return value.
 
 ## `plain_utterances` — the seed list is the highest-leverage thing you write
 
@@ -134,7 +140,7 @@ class Signature:
             return self                        # else: accept
 ```
 
-`DatabaseValidator` is `fastworkflow.utils.signatures.DatabaseValidator`. `workflow.record` is the record this command acts on. The three outcomes:
+`DatabaseValidator` is `fastworkflow.parameters.signatures.DatabaseValidator`. `workflow.record` is the record this command acts on. The three outcomes:
 
 | `fuzzy_match` result | what the validator does | what the framework records |
 |---|---|---|
@@ -175,7 +181,9 @@ short-circuits. Because the validator is your code, you tune it by passing argum
 ## `command_text_after_command_name`: binding `command value` without the LLM
 
 In agent mode, parameters are parsed in code before the LLM is asked: XML tags, then
-`name=value` pairs, then the form `command_name value`. That last form binds the text after the command
+`name=value` pairs, then the form `command_name value`. In assistant mode ("/" commands) the
+`name=value` form is also parsed in code before the LLM, while the XML and `command_name value` forms
+remain agent-mode only. The `command_name value` form binds the text after the command
 name to one target field:
 
 - the field marked `json_schema_extra={"command_text_after_command_name": True}`, or, with no mark,
@@ -206,8 +214,172 @@ is refused with a message naming the parameters that could take it, instead of r
 the command with its defaults.
 
 
-## Context Model (`context_inheritance_model.json`)
+## How run_chatbot renders commands (zero hints + optional `ui`)
 
-Each context entry has exactly one key, `base` (required): the list of parent context names whose commands are inherited. A `/` key is rejected; a context's own commands come from the filesystem (`_commands/<Context>/<command_name>.py`, or `_commands/<command_name>.py` for the global context `*`).
+`fastworkflow run_chatbot` draws a command's result and its parameter form from the schemas that
+`GET /command_schemas` serves (each command's `Input` and `Output` JSON Schema). With no hints at all the chat is
+already presentable; write these, which you write anyway, to improve it:
 
-To add a new command: create its `.py` file in the context's folder; add the context to the JSON only to give it a `base`.
+- `Field(title=..., description=..., examples=[...])`. A `title` is the label; without one the field name is made
+  readable (`order_uid` becomes "Order UID"). `description` is the tooltip on a result label and the help line under a
+  form field. For a text `Input` field `examples[0]` is the placeholder.
+- `from_command_output`. When a later command of the same turn reads a field from an earlier command's `Output`, the
+  earlier result is folded under "Supporting lookups" and the later one is the card.
+- `classifier_confirms={"meanings": {value: meaning}}` on a `Literal`. The "/" parameter form shows each choice as
+  `value - meaning`.
+- **A field's name never decides how it is drawn.** Type and shape give the plain default (a stat strip of short
+  scalars, a table for lists of records); everything else is a hint you declare. An `Output` field named `status` or
+  `state` is plain text unless it carries `format="badge"`. In the results panel several same-length lists form a table only
+  by a `table` group you declare (an int `total` beside equal lists no longer makes one there; the answer card still
+  infers a table from that until the next step, fix-sush step 4). When a field the user is asked for has a type the parameter form cannot draw (an object),
+  that prompt stays plain text.
+
+Optional presentation hints go in `json_schema_extra` under one key, `ui`, with an optional TypedDict
+(`FieldOptions(ui=UiOptions(...))`, both exported from `fastworkflow` and `fastworkflow.planning`). A hint changes
+presentation only: no check, extraction or plan reads it.
+
+| `ui` option | On | Value | Effect |
+|---|---|---|---|
+| `title` | any field (a `Field(title=...)` argument, not a `ui` option) | text | the label; without it the field name is made readable |
+| `hidden` | `Signature.Output` field | `True` | left out of the result card (still in the JSON) |
+| `hero` | `Signature.Output` scalar field | `True` | pinned to the stat strip |
+| `format` | `Signature.Output` field | `"currency"`, `"percent"`, `"code"` or `"badge"` | `currency` shows a number with grouping and two decimals in the browser's locale, with no currency symbol (`1,234.50`), `percent` adds `%`, `code` uses monospace, `badge` a status chip (toned only for generic words such as ok, done, pending, failed, rejected; any other value is neutral) |
+| `tones` | `Signature.Output` `str`, `Literal` or `Enum` field (or a list of one) with `format="badge"` | a dict of value to `"good"`, `"warning"`, `"bad"` or `"neutral"` | the badge takes the author's tone; any value not in the map keeps the generic vocabulary |
+| `currency` | `Signature.Output` `int` or `float` field (or a list of one) with `format="currency"` | a three-letter ISO 4217 code, `"USD"` | the number is shown with that currency (symbol, digits) by the browser's `Intl.NumberFormat`; a code the browser rejects, or none, shows the plain grouped number |
+| `table` | `Signature.Output` list-of-scalars field | a group name, a simple identifier (`"rows"`) | the list fields of one output with the same group name are the columns of one table, in field order |
+| `widget` | `Signature.Input` field | `"textarea"` on a `str`, `"radio"` on a `Literal` | a multi-line box; radio buttons even for more than five choices |
+
+```python
+class Output(BaseModel):
+    total: float = Field(description="Order total",
+                         json_schema_extra=FieldOptions(ui=UiOptions(hero=True, format="currency")))
+    raw_payload: str = Field(default="", json_schema_extra={"ui": {"hidden": True}})
+```
+
+`ui` is checked when the workflow loads. A mistake on an `Input` or an `Output` field makes that command fail to load (the rest of the workflow loads), and `fastworkflow run_cli`, `train`, the server and `command preview --check` list it (`docs/design_idioms/removed.html#load-rule`). A `ui` value that is not a dict, is empty, or is `False`; an unknown option (the
+error suggests the closest: `did you mean 'widget'?`); `hidden` or `hero` that is not `True`; a `format` or `widget`
+outside the lists above; an `Output` option on an `Input` (`hero`, `hidden`, `format`) or `widget` on an `Output`;
+`"textarea"` on a field that is not a `str` (`Optional[str]` is fine); and `"radio"` on a field that is not a `Literal` all fail
+with a message naming the field and what is accepted. `table` is refused when the name is not a simple identifier, on a field that
+is not a list of `str`, `int`, `float`, `bool` or `Literal` values (`Optional` of such a list is fine; a list of objects is
+refused, those already draw their own table), together with `hero`, on an `Input`, or when its group has fewer than two
+fields or fewer than two that are not `hidden` (a `hidden` member still counts for alignment and is not drawn).
+
+`tones` keys are the value as text, matched case-insensitively after trimming (an `Enum` member by its value, so `Level.LOW = 1`
+is keyed `"1"`); on a `Literal` or `Enum` a key that is not a declared value fails the load, so a typo is caught; an empty map,
+a tone other than the four, a key that is empty, two keys that differ only by case or spaces, a `bool` or `int` field (drawn as
+yes/no or a number, never a text badge) and a missing `format="badge"` are refused. `currency` is stored as written and
+upper-cased by the page; it is refused unless the field is an `int` or `float` with `format="currency"` and the code is exactly
+three letters (no list of currencies is kept, so an unknown but well-formed code is accepted and the browser decides). Both are
+refused on an `Input`. A workflow that declares neither renders as before.
+
+`table` is how parallel lists become one table in the results panel; nothing infers it from a field name or from equal
+lengths. (The answer card still infers one from an int `total` beside lists of one length, until the next step.) At render time a group draws a table only when every member is present and the members
+share one length of at least 1; with unequal lengths, a missing or null member, or no rows the members render as bullet lists,
+never trimmed or padded. Lists outside any group are drawn as plain lists. The panel never infers columns from equal lengths alone: two undeclared
+lists of equal length, or two declared groups of equal length, are not merged.
+
+To find the outputs that need the hint, `fastworkflow command preview <workflow> --check` prints a `notice:` (not a
+warning or an error, and it never changes the exit status) for each command whose `Output` has two or more visible
+list-of-scalar fields in no `table` group: those lists are drawn as separate lists unless you declare them as one table
+with the `table` hint. Declare the group where the lists are index-aligned by construction; where they are not, nothing
+needs to change (there is no hint that says "separate on purpose", so the notice stays).
+
+```python
+branches: list[str] = Field(json_schema_extra={"ui": {"table": "hours"}})
+hours: list[str] = Field(json_schema_extra={"ui": {"table": "hours"}})
+``` A mistake on an `Input` fails the command's load. A mistake on an
+`Output` is reported as a field-source error by `fastworkflow command preview <workflow> --check` and skips the command at
+load.
+
+A "/" parameter form also needs your cooperation in two places. A `str` field with `format="password"` (or `writeOnly`)
+is drawn masked; its value is sent as ordinary chat text when the user clicks Run, so it is recorded in the
+transcript. Do not put a real secret in a "/" command's `Input`. An `Optional[bool]` field is a three-way choice
+(unset, yes, no), so leaving it unset is not the same as `False`.
+
+## Declare what a value looks like (checklist; full text in the `author-planning-commands` skill, "Declare what a value looks like")
+
+- `Field(examples=[...])` on every text and id `Input` field: 2 to 5 realistic values with the length and shape real values
+  have, never customer data, valid for the field's pattern and validators. Not shown to the extraction model; used for
+  the question hint, the chat placeholder, the preview sample, generated few-shot examples, and the listing the agent
+  reads (so keep them few: the full listing is whole only up to `FULL_LISTING_MAX_CHARS`).
+- `examples` on an `Output` field that an `Input` points at with `from_command_output`; not rendered in the listing.
+- Declare `ge`/`le`/`gt`/`lt` and `pattern` rather than prose, but only what the command already refuses: a declared bound
+  makes validation refuse an out-of-range value. `pattern` is also told to the extraction model.
+- A fixed set known in code is a `Literal`; a set from data is a `str` with a validator plus examples; "One of: a, b" is prose.
+- Descriptions say what a value looks like; an `Input` description is part of the extraction prompt, so editing it changes
+  that command's prompt.
+- `plain_utterances` stay generic (they train which command); values go in `examples`. `words` and `examples_by` below are
+  the training-only declarations.
+- `personas.json` changes a global training input and every utterance-cache key: the next train regenerates all generated
+  utterances (model spend).
+- Any command file edit changes the training signature (retrain at the next `fastworkflow train`) and may stale the
+  planning-command previews (`fastworkflow command preview <workflow> --check`).
+
+## Training-only declarations: `words` and `examples_by`
+
+Two declarations tell the synthetic utterance generator what only you know. They are **training data only**: no
+check, extractor, planner, listing or preview reads them, and the extraction prompt, the command listing, the
+classifier check and the preview are byte-identical with or without them (`tests/test_training_only_field_options.py`).
+They do appear in the field's JSON Schema, so `GET /command_schemas` carries them. Both are checked when the workflow
+loads, on planning and execution commands alike, and a mistake fails that command's load with a message naming the
+field and the rule (misspellings too: `example_by` suggests `examples_by`, `word` suggests `words`).
+
+- `words`, inside `classifier_confirms` on a `Literal` field: the words or short phrases users write for a value
+  (users rarely write the value itself). Each key is a declared value, each list is non-empty text, a word is listed
+  once per value (ignoring case) and under one value only; a value may have none. `{"words": {...}}` without
+  `meanings` is the same check as `classifier_confirms: True`.
+- `examples_by`, on the field whose example values depend on a choice field of the same `Input`: the one key names
+  that `Literal` field (not this field; one choice field only), each inner key is one of its values, and each list
+  holds values valid for THIS field by its type, `pattern` and bounds (field validators are not run on them).
+
+```python
+kind: Literal["identity", "group"] = Field(..., json_schema_extra={"classifier_confirms": {
+    "meanings": {"identity": "one person", "group": "a set of people"},
+    "words": {"identity": ["person", "employee"], "group": ["team", "role"]}}})
+name: str = Field(..., examples=["Maria Okafor", "Payroll Approvers EMEA"], json_schema_extra={
+    "examples_by": {"kind": {"identity": ["Maria Okafor", "Tom Reyes"], "group": ["Payroll Approvers EMEA"]}}})
+```
+
+Like any edit of a command file, adding them changes that workflow's training signature, so the next
+`fastworkflow train` retrains it.
+
+## Context declarations (`inherits` and `parents` on `class Context`)
+
+A context is a folder of `_commands/`. Its `class Context`, in `_commands/<Context>/_<Context>.py`, declares two
+lists of context names, written as string literals in the class body and read without importing the file:
+
+- `inherits = ["Record"]`: the contexts whose commands this context also has (transitively, in list order; its own
+  command of the same file name wins). `inherits = ["*"]` adds the global commands to its own set.
+- `parents = ["Library"]`: every context a record of this context can sit in, i.e. the contexts whose records its
+  `get_parent` returns; the context itself when records nest (`TodoList` declares `parents = ["TodoList",
+  "TodoListManager"]`). No `parents` means a top-level context, enclosed only by the global commands; the root record
+  needs neither.
+
+From `fastworkflow/examples/library/_commands/Book/_Book.py`:
+
+```python
+class Context:
+    inherits = ["Record"]
+    parents = ["Library"]
+
+    @classmethod
+    def get_parent(cls, record: Book) -> Library:
+        return record.library
+```
+
+Load checks (each stops the workflow with one line naming the file): a name that is no context (with a did-you-mean),
+a name given twice, `[]`, a value that is not a list of string literals, a declaration assigned twice or inherited
+from a Python base class, a context that inherits itself, an inheritance cycle, a folder with no command file that
+inherits none, `parents` without `get_parent` or `get_parent` without `parents`, and `parents` on an
+`occupiable = False` context. A command's `@descends_to("X")` target must list the command's context (or one it
+inherits, or one inheriting it) among its `parents`, or that command does not load. At run time a `get_parent` that
+returns a record of a context its `parents` do not name raises `MissingGetParentError`.
+
+`_commands/context_inheritance_model.json` is a removed spelling and stops the workflow: run
+`fastworkflow migrate-contexts <workflow>` (writes `inherits`, deletes the file, lists the contexts with a
+`get_parent`) and write their `parents` by hand from what each `get_parent` can return. `fastworkflow build` prints the
+`inherits` line it derives for each context and writes it only into a `_<Context>.py` it creates.
+`fastworkflow command preview` writes the generated object model to `_object_models/<workflow>.md`.
+
+To add a new command: create its `.py` file in the context's folder; declare `inherits` only to give the context a base.

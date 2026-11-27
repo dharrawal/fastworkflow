@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow.command_routing import RoutingRegistry
+from fastworkflow.core.command_routing import RoutingRegistry
 from fastworkflow.train import generate_synthetic as gs
 from fastworkflow.train import not_here_pilot as pilot
 from fastworkflow.train import utterance_cache as uc
@@ -79,9 +79,9 @@ def test_a_stored_variant_with_other_inputs_is_reported_by_field(copy_of_messagi
     first = pilot.cache_report(copy_of_messaging)["utterance_cache"]["misses"][0]["command"]
     cmd_dir = pilot.prepare_registry(copy_of_messaging)
     seeds = list(cmd_dir.get_utterance_metadata(first).plain_utterances)
-    current = gs.utterance_fingerprint(seeds, first, PERSONAS, PER_PERSONA, PER_BATCH, ENV["LLM_SYNDATA_GEN"])
+    current = gs.utterance_fingerprint(seeds, first, PERSONAS, PER_PERSONA, PER_BATCH)
     # the same inputs in every field but one: the report must name exactly that field
-    older_inputs = {**current.inputs, "model": "some/older-model"}
+    older_inputs = {**current.inputs, "num_personas": 99}
     cache_dir = Path(copy_of_messaging) / "___command_info" / "utterance_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
     old_key = "0" * uc.VARIANT_KEY_LENGTH  # stored variants are filed under a hex key of that length
@@ -94,15 +94,14 @@ def test_a_stored_variant_with_other_inputs_is_reported_by_field(copy_of_messagi
     misses = {m["command"]: m for m in pilot.cache_report(copy_of_messaging)["utterance_cache"]["misses"]}
 
     assert misses[first]["differs"] == (
-        f'differs from {uc.slugify(first)}.{old_key}.json in model: "some/older-model" -> '
-        f'"{ENV["LLM_SYNDATA_GEN"]}"')
+        f'differs from {uc.slugify(first)}.{old_key}.json in num_personas: 99 -> {PERSONAS}')
 
 
 def test_a_stored_entry_written_by_the_cache_itself_is_a_hit(copy_of_messaging):
     first = pilot.cache_report(copy_of_messaging)["utterance_cache"]["misses"][0]["command"]
     cmd_dir = pilot.prepare_registry(copy_of_messaging)
     seeds = list(cmd_dir.get_utterance_metadata(first).plain_utterances)
-    fingerprint = gs.utterance_fingerprint(seeds, first, PERSONAS, PER_PERSONA, PER_BATCH, ENV["LLM_SYNDATA_GEN"])
+    fingerprint = gs.utterance_fingerprint(seeds, first, PERSONAS, PER_PERSONA, PER_BATCH)
     cache = uc.UtteranceCache(copy_of_messaging, mode=uc.MODE_REUSE)
     seed = gs.get_training_seed()
     assert cache.store(fingerprint, seed, [f"{first} sample one", f"{first} sample two"],

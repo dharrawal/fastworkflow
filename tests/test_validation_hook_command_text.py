@@ -2,7 +2,7 @@
 import fastworkflow
 from pydantic import BaseModel, Field, model_validator
 
-from fastworkflow.utils.signatures import InputForParamExtraction
+from fastworkflow.parameters.signatures import InputForParamExtraction
 
 
 def _validate(input_model, command="list_findings ctrl_ABC"):

@@ -35,7 +35,7 @@ from fastworkflow.run_fastapi_mcp.turns import (
 )
 from fastworkflow.run_fastapi_mcp.utils import persist_pending_after_turn
 
-# Keys of the public TurnOutput projection (fastworkflow/turn.py). ``success`` is
+# Keys of the public TurnOutput projection (fastworkflow/core/turn.py). ``success`` is
 # a computed field, so it is part of the serialized shape, not something the
 # server adds on the way out.
 TURN_OUTPUT_KEYS = frozenset(
@@ -49,16 +49,6 @@ TURN_OUTPUT_KEYS = frozenset(
 COMMAND_OUTPUT_ONLY_KEYS = frozenset(
     {"workflow_name", "command_name", "command_parameters", "command_responses"}
 )
-
-
-@pytest.fixture
-def env_files():
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    env_file = os.path.join(project_root, "env", ".env")
-    passwords_file = os.path.join(project_root, "passwords", ".env")
-    if not os.path.isfile(env_file) or not os.path.isfile(passwords_file):
-        pytest.skip("env files missing for FastAPI tests")
-    return env_file, passwords_file
 
 
 def _load_app_module(workflow_path: str, env_files, speedict_dir):
@@ -279,7 +269,7 @@ def test_an_awaiting_user_turn_reports_its_question_in_the_answer():
 
 
 def test_a_deferred_turn_reports_only_its_polling_handle():
-    """Nothing to project yet, so the 202 body stays the handle plus exec_state."""
+    """Nothing to project yet, so the 202 body stays the handle plus exec_state (and, since fix-1ma8, progress)."""
     execn = TurnExecution(
         turn_key=fastworkflow.mint_turn_key(),
         channel_id=_channel("defer"),
@@ -291,7 +281,9 @@ def test_a_deferred_turn_reports_only_its_polling_handle():
     code, body = render_turn_response(execn)
 
     assert code == 202
+    progress = body.pop("progress")           # additive (fix-1ma8): elapsed time and the latest frame, from memory
     assert body == {"turn_key": execn.turn_key, "exec_state": "running"}
+    assert progress["frames"] == 0 and progress["elapsed_seconds"] >= 0 and "last_frame" not in progress
 
 
 # ---------------------------------------------------------------------------
@@ -488,6 +480,7 @@ def _parse_sse(text: str) -> list[dict]:
     return events
 
 
+@pytest.mark.requires_llm_key
 @pytest.mark.parametrize("stream_format", ["ndjson", "sse"])
 def test_the_stream_terminal_output_event_is_a_turn_output(agent_app_module, stream_format):
     """The final 'output' event carries a TurnOutput, not a CommandOutput.

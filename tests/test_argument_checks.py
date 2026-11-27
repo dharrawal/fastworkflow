@@ -13,12 +13,14 @@ import pytest
 from dspy.utils import DummyLM
 from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 
-from fastworkflow import command_preview, tracing, workflow_agent
-from fastworkflow import planning_commands as pc
-from fastworkflow.plan_frame import TURN_MAX_STEPS_ENV
-from fastworkflow.planning_commands import PlanningCommandInputError
-from fastworkflow.turn import TurnStatus
-from fastworkflow.utils.signatures import InputForParamExtraction
+from fastworkflow.planning import command_preview
+from fastworkflow.agent import workflow_agent
+from fastworkflow.observability import tracing
+from fastworkflow.planning import planning_commands as pc
+from fastworkflow.planning.plan_frame import TURN_MAX_STEPS_ENV
+from fastworkflow.planning.planning_commands import PlanningCommandInputError
+from fastworkflow.core.turn import TurnStatus
+from fastworkflow.parameters.signatures import InputForParamExtraction
 from tests.scripted_extractor import script_extractor
 from tests.test_turn_result_capture import no_review_gate  # noqa: F401 - the review gate is off for these turns
 from tests.test_text_planner_and_split import (  # noqa: F401 - workflow_env is a fixture
@@ -180,8 +182,9 @@ def test_the_typed_call_declares_the_list_float_and_bool_fields_with_their_types
     assert fields["titles"].annotation == list[str]
     assert fields["ratio"].annotation is float
     assert fields["checked"].annotation is bool
-    assert pc._field_desc(command.param("checked")) == (
-        "also report the titles checked. false only when the request explicitly asks against this; otherwise true")
+    # the sentence of the bool type, the extractor's own (bd fix-ftdl.6.5)
+    assert fields["checked"].json_schema_extra["desc"] == (
+        f"also report the titles checked. {pc.BOOL_TRUE_SENTENCE.rstrip('.')} (default true)")
 
 
 def test_the_cme_signature_of_a_list_and_a_float_field_carries_their_types(tmp_path):
@@ -248,8 +251,8 @@ def test_the_typed_call_fills_a_list_and_a_float_and_the_turn_frame_expands_them
                    "steps_before": [], "steps_after": []}])
     result = _plan_planning_command(ctx, wf, lm, request, command)
 
-    span = sink.named(tracing.SPAN_PLANNER_PLAN)[-1]
-    assert span.attributes["plan_source"] == "skill_call" and span.attributes["skill"] == ROUTE
+    span = sink.named(tracing.SPAN_PLAN)[-1]
+    assert span.attributes["plan_source"] == "skill_call" and span.attributes["command"] == ROUTE
     assert span.attributes["plan"].splitlines()[:2] == ["1. find_group query=Dune", "2. find_group query=Emma"]
     assert "Execute these next steps:\n1. find_group query=Dune" in result
     assert ("stock_check(titles: list[str], ratio: float = 0.5, checked: bool = true, tags: list[str] = [])"
@@ -294,8 +297,8 @@ def test_a_list_and_float_planning_command_is_called_at_the_turn_frame_and_its_l
     assert result.status == TurnStatus.COMPLETED
     # the list's one element is the nested book_by_title call's title (Emma, b3)
     assert _nested_book_uids(stock_env) == ["b3"]
-    [span] = [s for s in stock_env.sink.named(tracing.SPAN_PLANNING_COMMAND_PHASE)
-              if s.attributes.get("skill") == "Library/stock_check"]
+    [span] = [s for s in stock_env.sink.named(tracing.SPAN_PHASE)
+              if s.attributes.get("command") == "Library/stock_check"]
     assert span.attributes["steps"] == "1. book_by_title title=Emma"
     assert span.attributes["steps_by_code"] == 1
     assert stock_env.model.asked == [] and stock_env.nested.asked == []
@@ -394,10 +397,13 @@ def test_an_execution_command_str_with_in_request_refuses_a_value_the_request_do
     class Input(GroupInput):
         pass
 
-    is_valid, message, *_ = _exec("Show the Payroll group").validate_parameters(
+    is_valid, message, _, fields = _exec("Show the Payroll group").validate_parameters(
         None, "Library/show_group", Input(name="Billing", titles=["Dune"]))
     assert not is_valid
-    assert message == "name='Billing' is not written in the request"
+    # the guard names its argument, so it is asked like any refused value (the standard question, the guard's reason in it)
+    assert fields == ["name"]
+    # a person reads the plan path's words for the refused value (``ask.refused_clause``)
+    assert "the name 'Billing' is not in your request" in message and "Which name should I use?" in message
 
 
 def test_the_same_execution_command_str_without_the_option_accepts_the_value():
@@ -412,10 +418,11 @@ def test_the_same_execution_command_str_without_the_option_accepts_the_value():
 def test_a_planning_command_str_with_in_request_refuses_and_the_same_str_without_it_accepts(tmp_path):
     with_option = _command(tmp_path / "a", _module('name: str = Field(description="n", json_schema_extra={"copied_from_command_text": True})'),
                            name="weigh")
-    without = _command(tmp_path / "b", _module('name: str = Field(description="n")'), name="weigh")
+    # bd fix-qjne.21: a str with no option is not checked against the request; only the marked field is
+    plain = _command(tmp_path / "c", _module('name: str = Field(description="n")'), name="weigh")
     with pytest.raises(PlanningCommandInputError, match="name='Billing' is not written in the request"):
         pc.check_arguments(with_option, {"name": "Billing"}, "Show the Payroll group")
-    args, _ = pc.check_arguments(without, {"name": "Billing"}, "Show the Payroll group")
+    args, _ = pc.check_arguments(plain, {"name": "Billing"}, "Show the Payroll group")
     assert args["name"] == "Billing"
 
 
@@ -429,8 +436,8 @@ def test_subject_strip_and_in_request_on_an_int_act_on_an_execution_command_as_o
     assert args["name"] == "Payroll"
 
     count = pc.option_command(GroupInput, "Library/show_group")
-    args, notes = pc.check_arguments(count, {"count": 5, "name": "Payroll"}, "Open 3 members of Payroll")
-    assert args["count"] == 3 and notes
+    with pytest.raises(PlanningCommandInputError, match=r"count=5 is not a number the request writes \(3\)"):
+        pc.check_arguments(count, {"count": 5, "name": "Payroll"}, "Open 3 members of Payroll")
 
     # the same through the execution command's validation step
     instance = GroupStripInput(name="Payroll group")
@@ -443,7 +450,7 @@ def test_verify_checks_nothing_without_a_classifier_and_takes_the_verdict_with_o
         tmp_path, monkeypatch):
     request = "Check the titles Dune of Payroll"
     # no classifier (no JEV_API_KEY): the field's value stands
-    monkeypatch.setattr("fastworkflow.workflow_agent._jev_lm", lambda: None)
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent._jev_lm", lambda: None)
     instance = GroupInput(name="Payroll", checked=True, titles=["Dune"])
     assert _exec(request).validate_parameters(None, "Library/show_group", instance)[0]
     assert instance.checked is True
@@ -455,7 +462,7 @@ def test_verify_checks_nothing_without_a_classifier_and_takes_the_verdict_with_o
         seen.append((command.name, [p.name for p in command.params if p.verify]))
         return {"checked": (False, 0.99)}
 
-    monkeypatch.setattr("fastworkflow.workflow_agent._jev_lm", lambda: object())
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent._jev_lm", lambda: object())
     monkeypatch.setattr(pc, "check_verdicts", verdicts)
     instance = GroupInput(name="Payroll", checked=True, titles=["Dune"])
     assert _exec(request).validate_parameters(None, "Library/show_group", instance)[0]
@@ -488,7 +495,7 @@ def test_an_input_validator_runs_once_after_the_option_checks_for_an_execution_c
     is_valid, message, *_ = InputForParamExtraction(command="Show the Payroll group",
                                                     input_for_param_extraction_class=None).validate_parameters(
         None, "Library/show_group", refused)
-    assert not is_valid and "not written in the request" in message
+    assert not is_valid and "the name 'Billing' is not in your request" in message
     assert calls == []                                 # a refused value never reaches the validator
 
 
@@ -582,7 +589,7 @@ def test_the_extractor_reads_the_options_sentences_for_both_kinds_and_none_for_a
         "name": (pc.IN_REQUEST_STR_SENTENCE,),
         "count": (pc.IN_REQUEST_INT_SENTENCE,),
         "titles": (pc.IN_REQUEST_LIST_SENTENCE,),
-        "checked": (pc.VERIFY_BOOL_SENTENCE,),
+        "checked": (pc.BOOL_SENTENCE,),   # the bool type's sentence, whether or not the field carries an option
     }
     assert "plain" not in pc.option_sentences(GroupInput) and "ratio" not in pc.option_sentences(GroupInput)
 
@@ -624,9 +631,9 @@ TUTORIAL_WORKFLOW = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath
                                  "tests", "planning_tutorial_workflow")
 
 
-def test_the_tutorial_workflows_checked_field_refuses_an_unwritten_value_and_an_unchecked_one_accepts_it():
+def test_the_tutorial_workflows_marked_fields_refuse_an_unwritten_value():
     # book_by_title's title carries in_request (tutorial pages 4 and 12): a title the request does not write is refused.
-    # member_loans' member carries no option (the tutorial's member_loans has none), so the same kind of value passes.
+    # member_loans' member carries copied_from_command_text too (the strict check; an unmarked str is not checked).
     commands = workflow_agent.load_planning_command_map(TUTORIAL_WORKFLOW)
 
     with pytest.raises(PlanningCommandInputError, match="title='Emma' is not written in the request"):
@@ -634,8 +641,10 @@ def test_the_tutorial_workflows_checked_field_refuses_an_unwritten_value_and_an_
     args, _ = pc.check_arguments(commands["book_by_title"], {"title": "Dune"}, "Who wrote Dune?")
     assert args["title"] == "Dune"
 
-    args, _ = pc.check_arguments(commands["member_loans"], {"member": "Ann Lee"}, "What has Raj Patel borrowed?")
-    assert args["member"] == "Ann Lee"
+    with pytest.raises(PlanningCommandInputError, match="member='Ann Lee' is not written in the request"):
+        pc.check_arguments(commands["member_loans"], {"member": "Ann Lee"}, "What has Raj Patel borrowed?")
+    args, _ = pc.check_arguments(commands["member_loans"], {"member": "Raj Patel"}, "What has Raj Patel borrowed?")
+    assert args["member"] == "Raj Patel"
 
 
 # ---------------------------------------------------------------- the two-option form (fix-3rsq.two-options)
@@ -704,7 +713,7 @@ def test_in_request_subject_on_a_non_str_is_a_load_error_and_on_a_str_is_the_sub
 def test_in_request_on_a_planning_command_read_as_true_or_false_or_subject_only(tmp_path):
     error = _load_error(_write(tmp_path, {"bad": _module(
         'name: str = Field(description="n", json_schema_extra={"in_request": "yes"})')}))
-    assert 'in_request: "yes" is removed: write' in error
+    assert 'in_request: "yes" is removed: leave the key out' in error
 
 
 def test_a_verify_dict_is_the_check_and_its_meanings_are_the_sentences_the_check_reads(tmp_path):
@@ -809,7 +818,7 @@ def test_ignore_keeps_the_strip_outcomes_of_head_on_the_payroll_group_cases():
 
 def test_a_field_validator_that_cleans_a_value_changes_the_argument_of_a_planning_command(tmp_path):
     text = ('from pydantic import BaseModel, Field, field_validator\n'
-            'from fastworkflow.planning_commands import strip_words\n\n\n'
+            'from fastworkflow.planning.planning_commands import strip_words\n\n\n'
             'class Signature:\n    """Weigh one group."""\n\n'
             '    class Input(BaseModel):\n'
             '        name: str = Field(description="the group", json_schema_extra={"copied_from_command_text": True})\n\n'
@@ -866,11 +875,48 @@ def test_a_refusing_validator_still_refuses_on_either_kind_and_a_model_validator
     refused = Rewrites.model_construct(name="refuse")
     is_valid, message, *_ = InputForParamExtraction(command="Show refuse", input_for_param_extraction_class=None
                                                     ).validate_parameters(None, "Library/show_group", refused)
-    assert not is_valid and message == "validate_extracted_parameters: refused by the validator"
+    assert not is_valid and message == "refused by the validator"
 
     # a planning command: the same validator writes back into the arguments, and a refusal refuses
     option = pc.option_command(Rewrites, "Library/show_group")
     assert pc.check_input(option, {"name": "Payroll"}, "Show the Payroll group") == {"name": "PAYROLL"}
-    with pytest.raises(PlanningCommandInputError, match="^validate_extracted_parameters: "
+    with pytest.raises(PlanningCommandInputError, match="^"
                                                         "refused by the validator$"):
         pc.check_input(option, {"name": "refuse"}, "Show the Payroll group")
+
+
+def test_a_pattern_mismatch_lists_the_field_once_and_an_empty_example_is_not_printed():
+    class Coded(BaseModel):
+        code: str = Field(description="a code", pattern=r"^#S[0-9]+$")
+        shelf: str = Field(description="a shelf", pattern=r"^#S[0-9]+$", examples=["#S1"])
+
+    asker = InputForParamExtraction(command="Show #bad and #worse", input_for_param_extraction_class=None)
+    diagnostics: dict = {}
+    instance = Coded.model_construct(code="#bad", shelf="#worse")
+    is_valid, message, suggestions, *_ = asker.validate_parameters(None, "Library/show_code", instance,
+                                                                   diagnostics=diagnostics)
+    assert not is_valid
+    invalid = diagnostics.get("invalid_fields") or []
+    assert len(invalid) == len(set(invalid)) == 2, invalid
+    # the one pattern refusal (``rules.pattern_refusal``, bd fix-ftdl.6.4) is the question's own words
+    assert "code '#bad' does not match the pattern ^#S[0-9]+$;" in message
+    assert "shelf '#worse' does not match the pattern ^#S[0-9]+$ (e.g., #S1)" in message
+    assert "(e.g., )" not in message and suggestions == {}
+
+
+# ---------------------------------------------------------------- a value that is the default is not given
+
+class _Count(BaseModel):
+    owner: str = Field(description="the owner", json_schema_extra={"copied_from_command_text": True})
+    count: int = Field(default=0, description="how many", json_schema_extra={"copied_from_command_text": True})
+    note: str = Field(default="", description="a note")
+
+
+def test_a_marked_int_at_its_default_is_neither_kept_nor_refused_when_another_argument_is_refused():
+    """A request that gives no number: the count's default written as text (how a review input holds every value) is
+    not a value the strict check refuses, so a later check of the inputs does not ask for it."""
+    command = pc.option_command(_Count, "count_line", ())
+    request = "write a line for Ann Lee"
+    assert pc.argument_gaps(command, {"owner": "Bob", "count": 0, "note": ""}, request).names == ("owner",)
+    assert not pc.argument_gaps(command, {"owner": "Ann Lee", "count": "0", "note": ""}, request).names
+    assert pc.check_arguments(command, {"owner": "Ann Lee", "count": "0"}, request)[0]["count"] == 0

@@ -30,7 +30,7 @@ def seed(store):
             conn.execute(
                 'INSERT INTO spans(span_id,trace_id,name,kind,start_ns,status,attributes) '
                 'VALUES(?,?,?,?,?,?,?)',
-                ('span-' + key, key, 'fw.planner.plan', 'internal', 1, 'ok', '{}'),
+                ('span-' + key, key, 'fw.plan', 'internal', 1, 'ok', '{}'),
             )
 
 

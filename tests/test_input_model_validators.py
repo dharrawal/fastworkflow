@@ -4,8 +4,8 @@ import pytest
 import fastworkflow
 from pydantic import BaseModel, Field, model_validator
 
-from fastworkflow import planning_commands as pc
-from fastworkflow.utils.signatures import InputForParamExtraction, removed_validate_hook_message
+from fastworkflow.planning import planning_commands as pc
+from fastworkflow.parameters.signatures import InputForParamExtraction, removed_validate_hook_message
 from tests.test_planning_command_files import _write as write_files
 
 
@@ -15,7 +15,7 @@ def _extraction(command="show Ann"):
 
 def _command(tmp_path, name, text):
     folder = write_files(tmp_path, {name: text})
-    from fastworkflow import workflow_agent
+    from fastworkflow.agent import workflow_agent
     return workflow_agent.load_planning_command_map(folder)[name]
 
 
@@ -51,7 +51,7 @@ def test_a_planning_command_with_the_removed_hook_fails_the_load_naming_the_vali
     def validate_extracted_parameters(workflow, command, cmd_parameters, command_text=None):
         return None''')
     folder = write_files(tmp_path, {"old": text})
-    from fastworkflow import command_preview
+    from fastworkflow.planning import command_preview
     problems = command_preview.load_problems(str(folder))
     assert problems and "validate_extracted_parameters is removed" in problems[0]
     assert '@model_validator(mode="after") on Input' in problems[0]
@@ -119,7 +119,7 @@ def test_refused_without_a_field_refuses_the_call_with_no_field(tmp_path):
         pc.check_input(command, {"name": "x", "note": ""}, "x", None)
     except pc.PlanningCommandInputError as refusal:
         assert refusal.fields == ()
-        assert str(refusal) == "validate_extracted_parameters: this command does not fit the request"
+        assert str(refusal) == "this command does not fit the request"
     else:
         raise AssertionError("expected a refusal")
 
@@ -135,7 +135,7 @@ def test_a_plain_value_error_is_a_refusal_with_no_field(tmp_path):
         pc.check_input(command, {"name": "x", "note": ""}, "x", None)
     except pc.PlanningCommandInputError as refusal:
         assert refusal.fields == ()
-        assert str(refusal) == "validate_extracted_parameters: name and note are one record"
+        assert str(refusal) == "name and note are one record"
     else:
         raise AssertionError("expected a refusal")
 
@@ -150,7 +150,7 @@ def test_a_correction_is_written_back_with_a_note_attributed_to_the_validator(tm
     notes: list[str] = []
     args = pc._validate_arguments(command, {"name": "ann", "note": ""}, "show ann", None, notes)
     assert args["name"] == "ANN"
-    assert notes == ["name='ann' -> 'ANN' (validate_extracted_parameters)"]
+    assert notes == ["name='ann' -> 'ANN' (validator)"]
 
 
 def test_a_placeholder_combination_a_validator_refuses_is_left_out_of_the_template_and_preview(tmp_path):
@@ -163,7 +163,7 @@ def test_a_placeholder_combination_a_validator_refuses_is_left_out_of_the_templa
 '''
     command = _command(tmp_path, "grid", PLANNING.format(name="grid", body=body).replace(
         'template = ["say the record"]', ''))
-    from fastworkflow import command_preview
+    from fastworkflow.planning import command_preview
     grid = pc._template_grid(command)
     assert all(env["name"] != "x" for env in grid)
     assert command_preview._validated(command, {"name": "x", "note": ""})[0] is False
@@ -194,7 +194,7 @@ def test_an_execution_command_with_the_removed_hook_fails_load_problems_naming_t
     import shutil
     from pathlib import Path
 
-    from fastworkflow import command_preview
+    from fastworkflow.planning import command_preview
 
     source = Path(__file__).resolve().parent.parent / "fastworkflow" / "examples" / "hello_world"
     folder = tmp_path / "hello_world"
@@ -217,8 +217,8 @@ def test_an_input_validator_that_reads_the_context_names_it_when_built_without_o
     a message naming the validator and the fix (not 'NoneType' object is not subscriptable); with a context
     the validator runs unchanged, and the guard is applied once however often the command is loaded."""
     import os
-    from fastworkflow.command_routing import RoutingRegistry
-    from fastworkflow.utils.signatures import ModuleType
+    from fastworkflow.core.command_routing import RoutingRegistry
+    from fastworkflow.parameters.signatures import ModuleType
 
     folder = os.path.join(os.path.dirname(fastworkflow.__file__), "examples", "simple_workflow_template")
     routing = RoutingRegistry.get_definition(folder)
@@ -237,7 +237,7 @@ def test_an_input_validator_that_reads_the_context_names_it_when_built_without_o
 
     # a second load of the same command does not wrap the validator again
     again = routing.get_command_class("WorkItem/go_to_workitem", ModuleType.INPUT_FOR_PARAM_EXTRACTION_CLASS).Input
-    from fastworkflow.utils.input_validation import _CONTEXT_GUARD
+    from fastworkflow.parameters.input_validation import _CONTEXT_GUARD
     dec = again.__pydantic_decorators__.model_validators["path_from_workitem_type"]
     assert getattr(dec.func, _CONTEXT_GUARD, False)
     assert not getattr(dec.func.__wrapped__, _CONTEXT_GUARD, False)
@@ -262,7 +262,7 @@ def test_a_validator_reading_the_removed_request_key_fails_through_check_input_n
     with pytest.raises(pc.PlanningCommandCallError) as raised:
         pc.check_input(command, {"name": "Ann", "note": ""}, "show Ann", None)
     assert raised.value.raised == "KeyError"
-    assert str(raised.value) == f"validate_extracted_parameters raised KeyError: \"{REMOVED}\""
+    assert str(raised.value) == f"a validator raised KeyError: \"{REMOVED}\""
 
 
 def test_a_validator_calling_get_on_the_removed_request_key_fails_the_same_way(tmp_path):
@@ -288,11 +288,11 @@ def test_a_different_missing_key_is_a_plain_key_error(tmp_path):
     with pytest.raises(pc.PlanningCommandCallError) as raised:
         pc.check_input(command, {"name": "Ann", "note": ""}, "show Ann", None)
     assert raised.value.raised == "KeyError"
-    assert str(raised.value) == "validate_extracted_parameters raised KeyError: 'nope'"
+    assert str(raised.value) == "a validator raised KeyError: 'nope'"
 
 
 def test_validation_context_is_a_dict_except_for_the_removed_key():
-    from fastworkflow.utils.input_validation import ValidationContext
+    from fastworkflow.parameters.input_validation import ValidationContext
     import copy
     import pickle
 
@@ -312,9 +312,9 @@ def test_validation_context_is_a_dict_except_for_the_removed_key():
         context.get("request")
 
 
-def test_a_refusal_with_no_field_is_put_in_the_hook_words_and_does_not_ask_the_user(tmp_path):
-    """The replan case: a validator's Refused naming no input is "validate_extracted_parameters: <message>"
-    (HEAD's hook words), so it is not read as an argument refusal ("name=... is ...") and no question names an
+def test_a_refusal_with_no_field_is_its_bare_message_and_does_not_ask_the_user(tmp_path):
+    """The replan case: a validator's Refused naming no input is its bare
+    message, so it is not read as an argument refusal ("name=... is ...") and no question names an
     argument; the planner plans the call instead (refusal_names_an_input is False)."""
     command = _command(tmp_path, "record_fact", PLANNING.format(name="record_fact", body='''
         @model_validator(mode="after")
@@ -326,7 +326,7 @@ def test_a_refusal_with_no_field_is_put_in_the_hook_words_and_does_not_ask_the_u
     with pytest.raises(pc.PlanningCommandInputError) as refused:
         pc.check_input(command, {"name": "GitLab", "note": ""}, "record owner of GitLab", None)
     text = str(refused.value)
-    assert text == ("validate_extracted_parameters: fact='owner' does not fit kind='person': "
+    assert text == ("fact='owner' does not fit kind='person': "
                     "owner is read only with kind='application'")
     assert refused.value.fields == ()
     assert pc.refusal_names_an_input(command, refused.value) is False
@@ -335,9 +335,9 @@ def test_a_refusal_with_no_field_is_put_in_the_hook_words_and_does_not_ask_the_u
         "owner is read only with kind='application'. What should I change?")
 
 
-def test_a_write_a_validator_makes_before_refusing_is_kept_on_the_execution_path():
-    """HEAD's hook changed the caller's parameters in place, so a write before a refusal stayed, and the
-    diagnostics named it in changed_fields."""
+def test_a_write_a_validator_makes_before_refusing_is_dropped_on_the_execution_path():
+    """One rule for both kinds (bd fix-qoyz step 6, decision F): a rewrite is kept when the validation passes and
+    dropped when it refuses. (HEAD's hook kept a write made before a refusal; the typed planning call dropped it.)"""
     class Rewrites(BaseModel):
         name: str = Field(description="the group", json_schema_extra={"copied_from_command_text": True})
 
@@ -354,8 +354,8 @@ def test_a_write_a_validator_makes_before_refusing_is_kept_on_the_execution_path
         None, "Library/show_group", instance, diagnostics=diagnostics)
     assert not is_valid
     assert message == "refused after the rewrite"
-    assert instance.name == "REFUSE"
-    assert diagnostics["validation_hook"]["changed_fields"] == ["name"]
+    assert instance.name == "refuse"
+    assert diagnostics["validation_hook"]["changed_fields"] == []
 
 
 class Signature:
@@ -381,7 +381,7 @@ class StoredFacts(BaseModel):
 def test_a_stored_phase_output_holding_a_command_input_is_rebuilt_without_its_validators():
     """Regression (pass 8 benchmark): a phase's stored output was re-validated with no context, so the
     Input's validator read info.context["command_text"] on None and the whole turn failed."""
-    from fastworkflow.typed_phase_facts import validate_phase_output_value
+    from fastworkflow.planning.typed_phase_facts import validate_phase_output_value
 
     stored = {"called_with": {"uid": "u1", "size": "2"}, "count": "3", "earlier": [{"uid": "u0"}]}
     facts = validate_phase_output_value(StoredFacts, stored)
@@ -393,7 +393,7 @@ def test_a_stored_phase_output_holding_a_command_input_is_rebuilt_without_its_va
 def test_a_stored_command_input_still_has_its_fields_checked():
     from pydantic import ValidationError
 
-    from fastworkflow.utils.input_validation import stored_value
+    from fastworkflow.parameters.input_validation import stored_value
 
     with pytest.raises(ValidationError):
         stored_value(StoredFacts, {"called_with": {"uid": "u1", "size": "big"}, "count": 1})
@@ -402,7 +402,7 @@ def test_a_stored_command_input_still_has_its_fields_checked():
 
 
 def test_a_stored_model_holding_no_command_input_is_validated_as_before():
-    from fastworkflow.utils.input_validation import stored_value
+    from fastworkflow.parameters.input_validation import stored_value
 
     class Plain(BaseModel):
         n: int

@@ -3,7 +3,7 @@ from pydantic import BaseModel, Field, model_validator
 
 import fastworkflow
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
-from fastworkflow.utils.signatures import DatabaseValidator
+from fastworkflow.parameters.signatures import DatabaseValidator
 
 from ...application.chatroom import ChatRoom
 
@@ -46,6 +46,7 @@ class Signature:
         ] + generate_diverse_utterances(Signature.plain_utterances, command_name)
 
 
+@fastworkflow.descends_to("User")
 class ResponseGenerator:
     """Call the User.send_message instance method."""
 

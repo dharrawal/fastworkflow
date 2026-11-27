@@ -275,7 +275,7 @@ def test_full_retrain_plan_renders_distinctly():
 @pytest.mark.parametrize(
     ("source_path", "signature_field"),
     [
-        ("fastworkflow/model_pipeline_training.py", "trainer_source_digest"),
+        ("fastworkflow/train/model_pipeline_training.py", "trainer_source_digest"),
         ("fastworkflow/train/generate_synthetic.py", "generator_source_digest"),
     ],
 )

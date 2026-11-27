@@ -15,10 +15,12 @@ import pytest
 from pydantic import BaseModel, Field
 
 import fastworkflow
-from fastworkflow import command_preview, planning_commands, planning_phases, tracing, workflow_agent
-from fastworkflow.planning import phase, run
-from fastworkflow.planning_commands import PlanningCommandFormatError
-from fastworkflow.turn import TurnStatus
+from fastworkflow.planning import command_preview, planning_commands, planning_phases
+from fastworkflow.agent import workflow_agent
+from fastworkflow.observability import tracing
+from fastworkflow.planning import ANSWER_BY_MODEL, phase, run, when
+from fastworkflow.planning.planning_commands import PlanningCommandFormatError
+from fastworkflow.core.turn import TurnStatus
 from tests.test_turn_result_capture import no_review_gate  # noqa: F401 - the review gate is off for these turns
 from tests.test_step_helpers import FoundBooks, OpenedBook, _build_planning_command, library_env  # noqa: F401
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401 - shared fixture
@@ -62,7 +64,7 @@ def answered(monkeypatch):
         queries.append(query)
         return "written"
 
-    monkeypatch.setattr("fastworkflow.planning_phases.write_answer", write)
+    monkeypatch.setattr("fastworkflow.planning.planning_phases.write_answer", write)
     return queries
 
 
@@ -92,6 +94,11 @@ def _command_with_declared_output(plan_cls):
 # __result__ is the answer, and no phase writes one
 # ----------------------------------------------------------------------
 
+
+def _answer_steps(env) -> list:
+    """The answer steps of the turn's planning command calls (``fw.step`` with ``kind`` answer)."""
+    return [span for span in env.sink.named(tracing.SPAN_STEP) if span.attributes.get("kind") == "answer"]
+
 def test_a_result_text_is_the_answer_exactly_and_no_phase_writes_one(library_env, answered):
     class Plan:
         def find(self, input) -> FoundBooks:
@@ -107,10 +114,9 @@ def test_a_result_text_is_the_answer_exactly_and_no_phase_writes_one(library_env
     assert result.answer == "Dune: 2 found"
     assert answered == []
     assert library_env.model.asked == []
-    # The last phase is framed to run its steps and finish, not to answer the request (3.16):
-    # code ran its steps, and the agent is asked only to finish; its own final answer is
-    # discarded, so no answer call is made on the request either.
-    assert "Do only these steps, then finish" in library_env.model.closings[-1]["query"]
+    # Code ran every step of the result-driven last phase, so the agent is given no closing
+    # step at all (fix-s70h); no answer call is made on the request either.
+    assert library_env.model.closings == []
     assert all("Answer the request" not in query for query in library_env.model.answers)
     out = _outputs(library_env, command)
     assert len(out) == 1 and out[0].command_response.output is None and out[0].success is True
@@ -231,7 +237,9 @@ def test_without_result_a_last_phase_naming_no_command_is_one_model_call_with_no
     assert library_env.model.asked == []
 
 
-def test_the_fallback_model_call_is_given_the_facts_the_phases_filled(library_env, answered):
+def test_a_failing_result_makes_no_model_call_from_the_facts(library_env, answered):
+    """Was ``test_the_fallback_model_call_is_given_the_facts_the_phases_filled``: a failing ``__result__`` no longer
+    has a model write the answer from the facts (fix-qjne.12), so nothing is asked."""
     class Plan:
         def find(self, input) -> FoundBooks:
             return [run("find_book", query=input.title)]
@@ -241,13 +249,12 @@ def test_the_fallback_model_call_is_given_the_facts_the_phases_filled(library_en
 
     _run(library_env, _build_planning_command(Plan))
 
-    assert len(answered) == 1
-    # Facts are shown readably: a uid column is left out where the labels name the rows.
-    assert "Dune" in answered[0] and "Dune Messiah" in answered[0]
+    assert answered == []
 
 
 # ----------------------------------------------------------------------
-# A __result__ that fails or returns another form: one warning, the answer model-written
+# A __result__ that fails or returns another form fails the call (fix-qjne.12); the full set is in
+# tests/test_result_failure.py
 # ----------------------------------------------------------------------
 
 def _raises(input, find):
@@ -268,7 +275,7 @@ def _an_int(input, find):
 
 @pytest.mark.parametrize("result_fn", [_raises, _empty_text, _other_output, _an_int],
                          ids=["raises", "empty-str", "other-output-class", "int"])
-def test_a_bad_result_logs_one_warning_and_the_model_writes_the_answer(
+def test_a_bad_result_fails_the_call_with_one_error_and_no_model_call(
         library_env, answered, caplog, result_fn):
     class Plan:
         def find(self, input) -> FoundBooks:
@@ -282,13 +289,15 @@ def test_a_bad_result_logs_one_warning_and_the_model_writes_the_answer(
         result = _run(library_env, command)
 
     assert result.status == TurnStatus.COMPLETED
-    assert result.answer == "written"
-    assert len(answered) == 1
+    assert result.answer != "written"
+    assert answered == []
     assert sum(1 for r in caplog.records if "__result__ failed" in r.message) == 1
+    assert [r.levelno for r in caplog.records if "__result__ failed" in r.message] == [logging.ERROR]
     out = _outputs(library_env, command)
     assert len(out) == 1
     assert out[0].command_response.output is None
-    assert out[0].success is True
+    assert out[0].success is False
+    assert result.answer == out[0].command_response.response
 
 
 # ----------------------------------------------------------------------
@@ -415,8 +424,50 @@ def test_the_preview_says_decided_at_run_time_for_an_output_return():
     text = _preview(_command_with_declared_output(Plan))
 
     assert _answer_lines(text)[1] == (
-        "Written by `__result__`: decided at run time (it returns an Output, which the agent "
-        "words at run time).")
+        "Written by `__result__`: decided at run time (it returns an Output, and the answer is that "
+        "Output as JSON, written by code).")
+
+
+def test_the_preview_says_a_none_return_fails_the_call():
+    class Plan:
+        def find(self, input) -> FoundBooks:
+            return [run("find_book", query=input.title)]
+
+        def __result__(self, input, find):
+            return None
+
+    line = _answer_lines(_preview(_build_planning_command(Plan)))[1]
+
+    # judged by the runtime's own rule (planning_phases.judge_result), so the preview quotes the runtime's message
+    assert "it fails the call at run time" in line and "__result__ returned None" in line
+    assert "ANSWER_BY_MODEL" in line
+
+
+def test_the_preview_says_answer_by_model_fails_a_command_that_declares_an_output():
+    class Plan:
+        def find(self, input) -> FoundBooks:
+            return [run("find_book", query=input.title)]
+
+        def __result__(self, input, find):
+            return ANSWER_BY_MODEL
+
+    line = _answer_lines(_preview(_command_with_declared_output(Plan)))[1]
+
+    assert "it fails the call at run time" in line
+    assert "declares an Output but its __result__ returned ANSWER_BY_MODEL" in line
+
+
+def test_the_preview_says_answer_by_model_means_a_model_writes_it():
+    class Plan:
+        def find(self, input) -> FoundBooks:
+            return [run("find_book", query=input.title)]
+
+        def __result__(self, input, find):
+            return ANSWER_BY_MODEL
+
+    line = _answer_lines(_preview(_build_planning_command(Plan)))[1]
+
+    assert "it returns ANSWER_BY_MODEL, so a model writes the answer" in line
 
 
 def test_a_command_without_result_has_no_answer_section():
@@ -430,17 +481,17 @@ def test_a_command_without_result_has_no_answer_section():
 
 
 # ----------------------------------------------------------------------
-# A None from __result__ hands the answer back, as with no __result__ (3.16)
+# ANSWER_BY_MODEL from __result__ hands the answer back, as with no __result__ (3.16)
 # ----------------------------------------------------------------------
 
-def test_none_from_result_gives_a_flat_call_the_agents_answer(library_env, answered, caplog):
+def test_answer_by_model_gives_a_flat_call_the_agents_answer(library_env, answered, caplog):
     class Plan:
         # One phase that fills no facts and reads none: the call runs flat (planning.runs_flat).
         def find(self, input):
             return [run("find_book", query=input.title)]
 
         def __result__(self, input):
-            return None
+            return ANSWER_BY_MODEL
 
     command = _build_planning_command(Plan)
     with caplog.at_level(logging.WARNING):
@@ -453,13 +504,13 @@ def test_none_from_result_gives_a_flat_call_the_agents_answer(library_env, answe
     assert _outputs(library_env, command) == []
 
 
-def test_none_from_result_gives_a_phased_call_one_deferred_answer_from_its_facts(library_env, answered, caplog):
+def test_answer_by_model_gives_a_phased_call_one_deferred_answer_from_its_facts(library_env, answered, caplog):
     class Plan:
         def find(self, input) -> FoundBooks:
             return [run("find_book", query=input.title)]
 
         def __result__(self, input, find):
-            return None
+            return ANSWER_BY_MODEL
 
     command = _build_planning_command(Plan)
     with caplog.at_level(logging.WARNING):
@@ -474,9 +525,10 @@ def test_none_from_result_gives_a_phased_call_one_deferred_answer_from_its_facts
     assert "Dune" in answered[0] and "Dune Messiah" in answered[0]
     assert not any("__result__" in r.message for r in caplog.records)
     assert _outputs(library_env, command) == []
-    spans = library_env.sink.named(tracing.SPAN_PLANNING_COMMAND_ANSWER)
+    # The deferred answer is the call's answer step, written by the model (``fw.step`` kind answer, bd fix-qjne.34).
+    spans = _answer_steps(library_env)
     assert len(spans) == 1
-    assert spans[0].attributes["skill"] == command.name
+    assert spans[0].attributes["command"] == command.name and spans[0].attributes["run_by"] == "model"
     assert spans[0].attributes["phase"] == "find"
     assert spans[0].attributes["phase_index"] == 0
     assert spans[0].attributes["phase_count"] == 1
@@ -494,14 +546,82 @@ def test_a_text_result_means_the_last_phases_agent_is_not_asked_for_an_answer(li
 
     assert result.answer == "the result text"
     assert answered == []
-    # The last phase is framed to run its steps and finish, not to answer the request (3.16).
-    last_phase_query = library_env.model.closings[-1]["query"]
-    assert "Do only these steps, then finish" in last_phase_query
-    assert "Answer the request" not in last_phase_query
-    assert library_env.sink.named(tracing.SPAN_PLANNING_COMMAND_ANSWER) == []
+    # Code ran every step, so the last phase's agent is given no step at all (fix-s70h).
+    assert library_env.model.closings == []
+    assert all("Answer the request" not in query for query in library_env.model.answers)
+    assert _answer_steps(library_env) == []
 
 
-def test_none_from_result_lets_the_model_write_a_last_answer_phase(library_env, answered):
+def test_a_phased_answer_by_model_gives_the_agent_no_step_and_the_deferred_call_writes_the_answer(
+        library_env, answered):
+    # fix-s70h (b): code ran the only step, __result__ gave no text; no model step is asked for.
+    class Plan:
+        def find(self, input) -> FoundBooks:
+            return [run("find_book", query=input.title)]
+
+        def __result__(self, input, find):
+            return ANSWER_BY_MODEL
+
+    result = _run(library_env, _build_planning_command(Plan))
+
+    assert result.answer == "written"
+    assert len(answered) == 1
+    assert library_env.model.closings == []
+    assert library_env.model.asked == []
+
+
+def test_a_result_driven_last_phase_with_an_open_step_still_gets_the_agent(library_env, answered):
+    # fix-s70h (c): a step code cannot run is the agent's, so the phase is not skipped.
+    class Plan:
+        def find(self, input) -> FoundBooks:
+            return [run("find_book", query=input.title),
+                    when("the member asked for the first book", run("open_book", named=input.title))]
+
+        def __result__(self, input, find):
+            return "the result text"
+
+    library_env.model.run("open_book named=Dune")
+    library_env.model.finish()
+    result = _run(library_env, _build_planning_command(Plan))
+
+    assert result.answer == "the result text"
+    assert len(library_env.model.asked) == 2
+    assert library_env.model.steps == []
+
+
+def test_a_flat_call_with_result_keeps_its_closing_step_and_the_agents_answer(library_env, answered):
+    # fix-s70h (d): a flat call is not result-driven; its answer is the agent's.
+    class Plan:
+        def find(self, input):
+            return [run("find_book", query=input.title)]
+
+        def __result__(self, input):
+            return ANSWER_BY_MODEL
+
+    result = _run(library_env, _build_planning_command(Plan))
+
+    assert len(library_env.model.closings) == 1
+    assert result.answer == "the answer"
+    assert answered == []
+
+
+def test_code_reads_a_listing_step_once_and_the_facts_come_from_that_read(library_env, answered):
+    # fix-s70h (e): no later read of the step after code ran it, so the facts are code's read.
+    class Plan:
+        def find(self, input) -> FoundBooks:
+            return [run("find_book", query=input.title)]
+
+        def __result__(self, input, find):
+            return f"{len(find.book_uids)} found"
+
+    result = _run(library_env, _build_planning_command(Plan))
+
+    assert result.answer == "2 found"
+    assert len([c for c in library_env.runner.sent if c.startswith("find_book")]) == 1
+    assert library_env.model.closings == [] and library_env.model.asked == []
+
+
+def test_answer_by_model_lets_the_model_write_a_last_answer_phase(library_env, answered):
     class Plan:
         def find(self, input) -> FoundBooks:
             return [run("find_book", query=input.title)]
@@ -510,7 +630,7 @@ def test_none_from_result_lets_the_model_write_a_last_answer_phase(library_env, 
             return ["list the books that match the title"]
 
         def __result__(self, input, find, answer):
-            return None
+            return ANSWER_BY_MODEL
 
     result = _run(library_env, _build_planning_command(Plan))
 

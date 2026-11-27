@@ -4,10 +4,11 @@ import json
 from pathlib import Path
 import pytest
 
-from fastworkflow.command_context_model import (
+from fastworkflow.core.command_context_model import (
     CommandContextModel,
     CommandContextModelValidationError,
 )
+from tests.context_declarations import declare_inherits
 
 
 @pytest.fixture
@@ -126,9 +127,7 @@ def test_ordered_base_contexts_diamond_and_two_level_chain(tmp_path: Path):
         "ChainTop": {"base": ["ChainMid"]},
         "ChainMid": {"base": ["ChainBase"]},
     }
-    (commands_dir / "context_inheritance_model.json").write_text(
-        json.dumps(inheritance, indent=2) + "\n", encoding="utf-8"
-    )
+    declare_inherits(tmp_path, {name: entry["base"] for name, entry in inheritance.items()})
 
     model = CommandContextModel.load(str(tmp_path))
     assert model.ordered_base_contexts("Leaf") == ["MidA", "RootBase", "MidB", "Extra"]
@@ -168,7 +167,7 @@ def test_a_star_base_is_valid_when_the_star_context_is_not_in_the_model():
         "User": {"base": ["*"], "/": ["User/send_message"]},
     })
     assert model.commands("User") == ["User/send_message"]
-    with pytest.raises(CommandContextModelValidationError, match="Context 'NoSuchBase' not found"):
+    with pytest.raises(CommandContextModelValidationError, match="context 'User' declares the base 'NoSuchBase', which is no context"):
         CommandContextModel(_workflow_path="unused", _command_contexts={
             "User": {"base": ["NoSuchBase"], "/": ["User/send_message"]},
         }).commands("User")

@@ -7,7 +7,8 @@ routing_definition.json are derived snapshots of the _commands/ tree. Each is
 stamped with `source_fingerprint` = sha256 over the sorted list of
 (absolute_path, size, mtime_ns) of every contributing source file:
   * <workflow>/_commands/**/*.py (recursively)
-  * _commands/**/context_inheritance_model.json
+  * _commands/**/context_inheritance_model.json (a removed spelling that fails the load;
+    still fingerprinted so adding or deleting one rebuilds the snapshots)
   * the same for every base workflow named in workflow_inheritance_model.json
 At load time fastworkflow trusts a snapshot ONLY if its stamp matches the
 recomputed fingerprint; otherwise it silently rebuilds the JSON (cheap).
@@ -59,7 +60,7 @@ def stamped_fingerprint(path: Path):
 def contributing_sources(workflow_dir: str):
     """Re-derive the file set the fingerprint covers, using the same package
     helpers the runtime uses (no reimplementation of the selection logic)."""
-    from fastworkflow.command_directory import (
+    from fastworkflow.core.command_directory import (
         _CONTEXT_MODEL_BASENAMES,
         _command_source_roots,
     )
@@ -88,7 +89,7 @@ def main() -> int:
         return 1
 
     # Import late: `import fastworkflow` takes ~5-10s.
-    from fastworkflow.command_directory import compute_commands_source_fingerprint
+    from fastworkflow.core.command_directory import compute_commands_source_fingerprint
 
     live = compute_commands_source_fingerprint(str(wf))
     sources = contributing_sources(str(wf))

@@ -83,6 +83,14 @@ function pretty(objOrText) {
   return JSON.stringify(value, null, 2);
 }
 
+/* -- the turn's stage spans [bd fix-qjne.34] ----------------------------- */
+/* The stage spans of a turn (span contract 63), in the order a turn goes
+   through them. A turn recorded before contract 63 is not read. */
+var STAGE_SPANS = ["fw.split", "fw.resolve", "fw.review", "fw.run", "fw.answer"];
+function isStageSpan(span) {
+  return !!span && STAGE_SPANS.indexOf(span.name) !== -1;
+}
+
 /* -- token-limit detection [fix-49m.6 (a)] ------------------------------ */
 /* An fw.llm.call whose completion_tokens equals the max_tokens it was called
    with stopped because it hit the cap, not because it finished. call_kwargs
@@ -283,11 +291,11 @@ var MARKER_LABEL = {
   intent_ambiguous: {text: "ambiguous intent", glyph: "?", tone: "warn",
     help: "Intent detection recorded ambiguous=true."},
   intent_error: {text: "intent detection errored", glyph: "\u2715", tone: "bad",
-    help: "An fw.nlu.intent span's status is error."},
+    help: "An fw.intent span's status is error."},
   parameter_extraction_invalid: {text: "parameters invalid", glyph: "\u2715", tone: "bad",
     help: "Extraction recorded invalid or missing fields."},
   parameter_extraction_error: {text: "extraction errored", glyph: "\u2715", tone: "bad",
-    help: "An fw.nlu.param_extraction span's status is error."},
+    help: "An fw.parameters span's status is error."},
   parameter_extraction_retry: {text: "extraction retried", glyph: "\u21ba", tone: "warn",
     help: "Extraction recorded a retry round."},
   awaiting_user: {text: "asked the user", glyph: "\u270b", tone: "warn",
@@ -493,7 +501,7 @@ function appendUsageChips(parent, usage) {
 /* -- execution ledger [fix-aou (a)] --------------------------------------- */
 /* `ledger` is the server's execution_ledger(): the turn record's
    execution_records joined on command_call_id with the trace's
-   fw.command.execute spans and the child_calls those spans file. A row's
+   fw.command spans and the child_calls those spans file. A row's
    status is the span's own status column -- ok, error, or cancelled for a
    control signal -- and a row with no span has none and says so. A resumed
    turn is one ledger: dispatches from before the suspension keep their spans

@@ -13,8 +13,8 @@ import fastworkflow
 from tests.test_turn_result_capture import no_review_gate  # noqa: F401 - the review gate is off for these turns
 from fastworkflow._workflows.command_metadata_extraction._commands.IntentDetection.what_can_i_do import (
     Signature as WhatCanIDo)
-from fastworkflow.capability_answer import is_capability_question, render_capability_answer
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.agent.capability_answer import is_capability_question, render_capability_answer
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 UTTERANCES = WhatCanIDo.plain_utterances
 
@@ -114,7 +114,7 @@ def test_a_context_left_with_no_commands_of_its_own_gets_no_line():
 
 
 def test_a_context_line_names_commands_while_it_fits_the_line_width(monkeypatch):
-    monkeypatch.setattr("fastworkflow.capability_answer.LINE_WIDTH", 42)
+    monkeypatch.setattr("fastworkflow.agent.capability_answer.LINE_WIDTH", 42)
     answer = render_capability_answer(
         {}, [],
         {"Directory": ["find_a", "find_b", "find_c", "find_d", "find_e", "find_f"],
@@ -139,7 +139,7 @@ def test_of_equally_short_examples_the_first_is_shown():
 
 
 def test_a_line_never_leaves_out_just_one_command(monkeypatch):
-    monkeypatch.setattr("fastworkflow.capability_answer.LINE_WIDTH", 50)
+    monkeypatch.setattr("fastworkflow.agent.capability_answer.LINE_WIDTH", 50)
     answer = render_capability_answer(
         {}, [],
         {"Account": ["find_a", "find_b", "find_c", "show_account_manager"],
@@ -155,7 +155,7 @@ def test_a_line_never_leaves_out_just_one_command(monkeypatch):
 
 
 def test_the_shared_line_may_fill_two_line_widths(monkeypatch):
-    monkeypatch.setattr("fastworkflow.capability_answer.LINE_WIDTH", 30)
+    monkeypatch.setattr("fastworkflow.agent.capability_answer.LINE_WIDTH", 30)
     shared = ["cmd_a", "cmd_b", "cmd_c", "cmd_d", "cmd_e", "cmd_f", "cmd_g", "cmd_h"]
     answer = render_capability_answer({}, [], {"One": shared, "Two": shared, "Three": shared})
     line = answer.splitlines()[-1]
@@ -166,7 +166,7 @@ def test_the_shared_line_may_fill_two_line_widths(monkeypatch):
 @pytest.fixture
 def agent_ctx(monkeypatch):
     fastworkflow.init({})
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     RoutingRegistry.clear_registry()
     ctx = WorkflowExecutionContext(run_as_agent=True)
@@ -181,9 +181,9 @@ def agent_ctx(monkeypatch):
     monkeypatch.setattr(ctx, "_ensure_agent_initialized", lambda: None)
     monkeypatch.setattr(WorkflowExecutionContext, "_agent_dspy_context",
                         lambda self: (SimpleNamespace(model="test-model"), None))
-    monkeypatch.setattr("fastworkflow.workflow_agent.split_into_subtasks",
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.split_into_subtasks",
                         lambda query, **kwargs: planned.append(query) or [query])
-    monkeypatch.setattr("fastworkflow.workflow_agent.build_query_with_next_steps",
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.build_query_with_next_steps",
                         lambda user_query, session, **kwargs: user_query)
     yield ctx, agent, planned
     RoutingRegistry.clear_registry()
@@ -191,7 +191,7 @@ def agent_ctx(monkeypatch):
 
 def test_with_planning_commands_the_turn_is_answered_in_code_without_the_planner_or_agent(agent_ctx, monkeypatch):
     ctx, agent, planned = agent_ctx
-    monkeypatch.setattr("fastworkflow.workflow_agent.planning_command_utterances",
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.planning_command_utterances",
                         lambda folder: {"close_out": ("close this record",)})
 
     turn = ctx.process_turn("Hey, what else can you do?")
@@ -212,3 +212,95 @@ def test_without_planning_commands_the_turn_goes_the_normal_way(agent_ctx):
 
     assert planned == ["what can you do?"] and agent.called
     assert turn.answer == "Agent answer"
+
+
+# ----------------------------------------------------------------------
+# The answer as data (fix-szfq): the same listing, from the same arguments, agreeing with the text
+# ----------------------------------------------------------------------
+
+def _text_and_data(planning, commands, others=None):
+    from fastworkflow.agent.capability_answer import capability_data
+    return render_capability_answer(planning, commands, others), capability_data(planning, commands, others)
+
+
+def test_the_capability_data_agrees_with_the_text_name_for_name(monkeypatch):
+    monkeypatch.setattr("fastworkflow.agent.capability_answer.LINE_WIDTH", 60)
+    planning = {"close_out": ("close this record", "wrap up the record now"), "no_example": ("  ",)}
+    commands = ["find_book", "list_loans"]
+    others = {"Account": ["find_a", "find_b", "find_c", "show_account_manager", "shared_one"],
+              "Group": ["find_a1", "find_b1", "find_c1", "find_d1", "find_e1", "find_f1", "find_g1", "shared_one"],
+              "Member": ["shared_one", "m_only"]}
+    text, data = _text_and_data(planning, commands, others)
+
+    lines = text.splitlines()
+    bold = [line for line in lines if line.startswith("- **")]
+    assert [(p["title"], p["example"]) for p in data["planning_commands"]] == [("Close out", "close this record"),
+                                                                              ("No example", None)]
+    assert bold == ['- **Close out**: "close this record"', "- **No example**"]
+    single = lines[lines.index("Or ask for a single action:") + 2:lines.index("Or ask for a single action:") + 2 + len(commands)]
+    assert single == [f"- {c['title']}" for c in data["commands"]] and len(single) == len(commands)
+    assert [c["name"] for c in data["commands"]] == commands
+
+    context_lines = [line for line in lines if line.startswith("- In ")]
+    assert len(context_lines) == len(data["other_contexts"]) >= 3
+    for line, group in zip(context_lines, data["other_contexts"]):
+        assert line.startswith(f"- {group['title']}: ")
+        named = line.split(": ", 1)[1]
+        more = f" and {group['more']} more" if group["more"] else ""
+        assert named == ", ".join(c["title"] for c in group["commands"]) + more
+        assert group["commands"], "a line always names at least one command"
+    assert [g["context"] for g in data["other_contexts"]] == [None, "Account", "Group"] + (
+        ["Member"] if len(context_lines) == 4 else [])
+    assert data["other_contexts"][0]["title"] == "In several places"
+
+
+@pytest.mark.parametrize("width", [20, 42, 90])
+def test_the_capability_data_counts_the_rest_as_the_text_does(monkeypatch, width):
+    monkeypatch.setattr("fastworkflow.agent.capability_answer.LINE_WIDTH", width)
+    others = {"Group": [f"find_thing_{n}" for n in range(9)], "Other": ["x_one", "x_two"]}
+    text, data = _text_and_data({}, [], others)
+    for line, group in zip([l for l in text.splitlines() if l.startswith("- In ")], data["other_contexts"]):
+        assert group["more"] != 1, "never 'and 1 more'"
+        assert line.count(",") + 1 == len(group["commands"]) if not group["more"] else True
+        assert (f"and {group['more']} more" in line) == bool(group["more"])
+
+
+def test_a_capability_turn_carries_the_data_in_the_answers_artifacts_and_the_text_is_unchanged(agent_ctx, monkeypatch):
+    ctx, agent, planned = agent_ctx
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.planning_command_utterances",
+                        lambda folder: {"close_out": ("close this record",)})
+    finalized = []
+    real = ctx._finalize_agent_output
+
+    def spy(message, result):
+        out = real(message, result)
+        finalized.append(out)
+        return out
+
+    monkeypatch.setattr(ctx, "_finalize_agent_output", spy)
+
+    turn = ctx.process_turn("Hey, what else can you do?")
+
+    response = finalized[0].command_response
+    data = response.artifacts["capabilities"]
+    assert response.response == turn.answer
+    assert [p["name"] for p in data["planning_commands"]] == ["close_out"]
+    assert f'- **{data["planning_commands"][0]["title"]}**: "{data["planning_commands"][0]["example"]}"' in turn.answer
+    listed = turn.answer.split("Or ask for a single action:\n\n", 1)[1].splitlines()
+    assert listed[:len(data["commands"])] == [f"- {c['title']}" for c in data["commands"]]
+    assert data["other_contexts"], "the todo workflow has other contexts"
+    assert len(data["other_contexts"]) == len([l for l in listed if l.startswith("- In ")])
+    import json
+    json.dumps(data)
+    # HTTP and MCP clients read TurnOutput.command_outputs: the capability turn carries its data there, on one
+    # framework output (not drawn as a result), equal to the data on the final answer's output
+    assert len(turn.command_outputs) == 1
+    carried = turn.command_outputs[0]
+    assert carried.framework is True and carried.command_response.artifacts == {"capabilities": data}
+
+
+def test_a_turn_that_is_not_a_capability_question_carries_no_capabilities_artifact(agent_ctx):
+    ctx, agent, planned = agent_ctx
+    turn = ctx.process_turn("what can you do?")      # no planning commands: the turn goes the normal way
+    assert turn.answer == "Agent answer"
+    assert "capabilities" not in {k for o in turn.command_outputs for k in o.command_response.artifacts}

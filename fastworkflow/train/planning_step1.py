@@ -42,7 +42,7 @@ import sys
 import time
 from typing import Any, Optional, Sequence
 
-from fastworkflow.nlu_labels import label_of
+from fastworkflow.intent.nlu_labels import label_of
 from fastworkflow.train import planning_test_set as pts
 from fastworkflow.train import score_planning_match as spm
 from fastworkflow.train.not_here_pilot import PilotFailure
@@ -387,7 +387,7 @@ def format_markdown(report: dict) -> str:
 def worker(args: argparse.Namespace) -> int:
     """Copy, block, train, check for fallbacks, score on the test set, record, optionally prune."""
     import fastworkflow
-    from fastworkflow.model_pipeline_training import (
+    from fastworkflow.train.model_pipeline_training import (
         experiment_head_scope,
         experiment_planning_heads,
         experiment_reserved_class_arm,
@@ -403,7 +403,7 @@ def worker(args: argparse.Namespace) -> int:
     pilot.copy_caches(args.cache_from, workflow_copy)
     passwords = args.passwords_file or pilot.default_passwords(args.cache_from)
     env = pilot.read_env(workflow_copy, args.env_file, passwords)
-    fastworkflow.init(env_vars=pilot.blocked_env(env))
+    pilot.init_blocked(env)
 
     planning_heads = spm.REQUIRED_PLANNING_HEADS[args.arm]
     determinism.set_train_seed(args.train_seed)

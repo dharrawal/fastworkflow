@@ -160,7 +160,7 @@ Anything that shrinks the escalation class buys routing accuracy with escalation
 Measure both or you will "improve" the workflow by breaking hierarchy navigation.
 
 **3. `wildcard` no longer means "catch-all" — check which reserved label you are reasoning about.**
-`fastworkflow/nlu_labels.py` now defines two reserved labels, and conflating them will
+`fastworkflow/intent/nlu_labels.py` now defines two reserved labels, and conflating them will
 make you misread every number here.
 
 | Label | Stage it belongs to | What it means | Trained where |
@@ -440,7 +440,7 @@ Re-verify volatile claims:
 
 ```bash
 # Held-out evaluation is wired into the trainer, and where the report is written
-grep -n "heldout_evaluation\." fastworkflow/model_pipeline_training.py
+grep -n "heldout_evaluation\." fastworkflow/train/model_pipeline_training.py
 
 # Training uses a fixed seed, and personas are no longer an unseeded random.sample
 grep -n "def seed_everything\|def get_training_seed" fastworkflow/train/determinism.py
@@ -450,10 +450,10 @@ grep -n "select_persona_indices\|random.sample" fastworkflow/train/generate_synt
 grep -n "fell_back\|fallback_reason" fastworkflow/train/generate_synthetic.py
 
 # The two reserved labels and which one escalates
-sed -n '46,77p' fastworkflow/nlu_labels.py
+sed -n '46,77p' fastworkflow/intent/nlu_labels.py
 
 # The escalation class is dropped where there are no ancestors
-grep -n "if net_ancestor_utterances" -B 12 fastworkflow/model_pipeline_training.py
+grep -n "if net_ancestor_utterances" -B 12 fastworkflow/train/model_pipeline_training.py
 
 # A mixed top-k escalation label follows fixed conservative behaviour
 grep -n "Top-k escalation signal discarded" \
@@ -463,7 +463,7 @@ grep -n "Top-k escalation signal discarded" \
 fastworkflow train --help
 
 # The reported F1 is still a split over the training distribution
-grep -n "train_test_split" fastworkflow/model_pipeline_training.py
+grep -n "train_test_split" fastworkflow/train/model_pipeline_training.py
 
 # Which modules are actually wired in (empty output = present but inert).
 # Everything below should print a production call site.

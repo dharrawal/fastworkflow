@@ -149,15 +149,17 @@ virtualConsole.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push
   /* ---- navigating between levels drops the open panel ----------------- */
   link.click();
   assert.equal(w.tmOpenArtifacts.msg, turnCard);
-  row('Execution').click();
-  await until(() => row('Step 1'), 'the execution level');
+  row('Run').click();
+  await until(() => row('Part 1'), 'the run stage');
+  row('Part 1').click();
+  await until(() => row('Step 1'), 'the run part');
   assert.equal(w.tmOpenArtifacts, null, 'clearing the pane closes its panel');
   assert.equal(link.getAttribute('aria-expanded'), 'false');
-  assert.ok(!cardTitled('Artifacts'), 'the stage page has no Artifacts card');
+  assert.ok(!cardTitled('Artifacts'), 'the part page has no Artifacts card');
 
   /* ---- step pages: only the step's own dispatches --------------------- */
   async function openStep(n) {
-    w.state.path = w.state.path.slice(0, 2);
+    w.state.path = w.state.path.slice(0, 3);
     w.renderLevel();
     await until(() => row('Step ' + n), 'step row ' + n);
     row('Step ' + n).click();

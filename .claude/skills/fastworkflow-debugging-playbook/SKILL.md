@@ -43,7 +43,7 @@ Every file:line below was verified against that tree; re-verification one-liners
 
 - **Workflow**: a directory with `_commands/*.py` command files; fastWorkflow wraps your app with it.
 - **CME**: the internal `command_metadata_extraction` workflow (in `fastworkflow/_workflows/`) that runs intent detection + parameter extraction as a pseudo-command named `wildcard`. Every session owns a private CME workflow instance.
-- **WEC**: `WorkflowExecutionContext` (`fastworkflow/workflow_execution_context.py`) — the transport-free execution core. One user message in, one turn out.
+- **WEC**: `WorkflowExecutionContext` (`fastworkflow/engine/workflow_execution_context.py`) — the transport-free execution core. One user message in, one turn out.
 - **Topology A / B**: A = CLI `ChatSession` with queues + a worker thread (blocking `ask_user`); B = bare WEC embedded by FastAPI (`ask_user` suspends and resumes on the next message).
 - **`___command_info/`**: per-workflow trained artifacts — `command_directory.json`, `routing_definition.json`, `<cmd>_param_labeled.json`, and per-context model folders (`tinymodel.pth/`, `largemodel.pth/`, `label_encoder.pkl`, `threshold.json`).
 - **`___convo_info/`**: per-workflow runtime NLU caches (learned utterance→command mappings, suggested commands) in RocksDB (`speedict.Rdict`) files.
@@ -62,13 +62,13 @@ Every file:line below was verified against that tree; re-verification one-liners
 
 | # | Symptom | Most likely cause | Discriminating experiment | Fix / workaround |
 |---|---|---|---|---|
-| T1 | Wrong command matched, or import error naming a command file that no longer exists | (a) stale persisted JSON snapshots (pre-v2.22.1 artifacts), (b) in-process `lru_cache` staleness in a long-running process, (c) a learned bad mapping in `___convo_info`, (d) genuine misclassification | Compare `compute_commands_source_fingerprint()` output vs the `source_fingerprint` field inside both JSONs; check process uptime vs file edit time; grep the utterance in the `___convo_info` cache | (a) auto-fixed on next load in ≥2.22.1; (b) restart the process or call `RoutingRegistry.clear_registry()`; (c) delete `___convo_info/`; (d) retrain / add plain_utterances |
+| T1 | Wrong command matched, or import error naming a command file that no longer exists | (a) stale persisted JSON snapshots (pre-v2.22.1 artifacts), (b) in-process `lru_cache` staleness in a long-running process, (c) removed (a learned similarity-cache mapping; the cache is gone), (d) genuine misclassification | Compare `compute_commands_source_fingerprint()` output vs the `source_fingerprint` field inside both JSONs; check process uptime vs file edit time| (a) auto-fixed on next load in ≥2.22.1; (b) restart the process or call `RoutingRegistry.clear_registry()`; (c) n/a; (d) retrain / add plain_utterances |
 | T2 | Crash or FileNotFoundError on `___command_info/<ctx>/threshold.json`; first message fails | Untrained workflow (or a test/experiment wiped the trained model — fix-0hb) | `python -c` call to `is_workflow_trained()` (below) | `fastworkflow train <wf> <env> <passwords>`; for the bundled hello_world: `fastworkflow train ./fastworkflow/examples/hello_world ./env/.env ./passwords/.env` |
 | T3 | `fastworkflow train <your-workflow>` also retrains fastWorkflow's internal CME workflow, every single time | `is_fast_workflow_trained` checks `___command_info/ErrorCorrection/largemodel.pth`, but training has excluded the `ErrorCorrection` context since v2.7.0 — the file is never produced, so the check can never pass | `ls fastworkflow/_workflows/command_metadata_extraction/___command_info/` → only `IntentDetection` and `global` model folders exist | Known mismatch; verified in code 2026-07-09 (see T3 detail). No fix on main. Workaround: none safe; do NOT hand-create the folder. Budget the extra CME train time |
 | T4 | Parameter extraction loops: keeps replying "missing information" with fields stuck at NOT_FOUND | Field metadata too weak for the LLM extractor, agent parroting `examples` values (deliberately rejected), or the sentinel env vars changed | Try the same command with explicit `<param>value</param>` XML (agent mode parses this by regex before any LLM call); check `MISSING_INFORMATION_ERRMSG`/`NOT_FOUND` env values are the template defaults | Improve `Field(description=, examples=, pattern=)` in the command's `Signature.Input`; in deterministic mode type `abort` to escape the state |
 | T5 | CLI spinner hangs forever in agent mode when the agent asks the user a question | **OPEN, NEEDS RUNTIME VERIFICATION** — fix-5fv hypothesis: blocking `ask_user` enqueues the question on the output queue with **no trace sentinel**, and the CLI drains the trace queue for a sentinel before reading output | Run any agent-mode CLI session and force a clarification (omit a required param). If it hangs: hypothesis confirmed — update bd fix-5fv | No shipped fix. Workaround: `--assistant` mode, or `/`-prefix the command (deterministic path emits its sentinel at turn end) |
 | T6 | FastAPI returns 409 on a retry; or 202 with a `turn_key` and docs say "poll /turns" but GET /turns 404s | 409 = a *different* turn is already active on the channel (by design). 202 = deferred execution; **GET /turns does not exist — fix-85g Step 2 is unbuilt** | `grep -n "@app.get" fastworkflow/run_fastapi_mcp/__main__.py` — routes are `/`, `/probes/*`, `/conversations` only | Recover a 202 by **re-sending the byte-identical request** — the idempotency key rejoins the same execution. Never treat `runtime.lock.locked()` as the busy signal (see T6 detail) |
-| T7 | `DeprecationWarning: WorkflowExecutionContext.process_message() is deprecated` in CLI runs | Expected: `ChatSession` itself still calls `process_message` internally | `grep -n "process_message" fastworkflow/chat_session.py` → lines 361, 374, 452, 456 | Harmless; not your bug. New embedder code should call `process_turn()` |
+| T7 | `DeprecationWarning: WorkflowExecutionContext.process_message() is deprecated` in CLI runs | Expected: `ChatSession` itself still calls `process_message` internally | `grep -n "process_message" fastworkflow/engine/chat_session.py` → lines 361, 374, 452, 456 | Harmless; not your bug. New embedder code should call `process_turn()` |
 | T8 | An intent model is weak for one specific command; that command has almost no training utterances | `generate_diverse_utterances` returns `[]` on litellm `RateLimitError` — **dropping even the seed utterances** for that command, silently (one `logger.error` line) | grep the train log for `LiteLLM Rate limiting error!`; inspect utterance counts per command in `___command_info/command_directory.json` | Re-run `fastworkflow train` when not rate-limited; consider a slower model/key. No retry logic exists on main |
 | T9 | LLM outputs look frozen — refine/agent/param-extraction returns identical answers despite prompt/code changes | DSPy disk/memory cache serving stale completions | Delete or disable the cache and re-run; if output changes, it was the cache | `rm -rf ~/.dspy_cache` (dspy 3.2.1 location) or `dspy.configure_cache(enable_disk_cache=False, enable_memory_cache=False)`. WARNING: `docs/DSPY_CACHE_GUIDE.md` is partly rotten (see T9 detail) |
 | T10 | RocksDB errors ("IO error ... LOCK", "Resource temporarily unavailable") or mysterious `LOG`/`.sst` files appearing | Two processes/threads opened the same `Rdict` (RocksDB is single-writer), or you are looking at normal RocksDB internals | `fuser`/`lsof` on the `.db` dir; check for a second server/test process on the same workflow | Ensure one writer per channel/workflow; kill the other process. `LOG`/`.sst`/`MANIFEST` files inside `___convo_info` and `___workflow_contexts` are normal RocksDB internals, all gitignored — never commit, safe to delete only with the owning process stopped |
@@ -81,37 +81,33 @@ Every file:line below was verified against that tree; re-verification one-liners
 ### T1 — Wrong command matched / stale command caches
 
 Intent detection tries, in order (`fastworkflow/_workflows/command_metadata_extraction/intent_detection.py:99-133`):
-exact first-token match → Levenshtein fuzzy match (threshold 0.3) → embedding cache match at 0.85 cosine
-(`cache_match`, `fastworkflow/cache_matching.py:131`) → transformer `CommandRouter.predict`. Distinguish four causes:
+exact first-token match → Levenshtein fuzzy match (threshold 0.3) → local model `CommandRouter.predict` → remote decision model → question. Distinguish four causes:
 
 1. **Stale persisted snapshots** (fixed in v2.22.1, commit b5747df): before the fix, `routing_definition.json`
    had *no* staleness check and `command_directory.json` used newest-mtime (blind to deletions/renames);
    add/remove/rename of a command caused import errors until artifacts were hand-deleted.
-   Now `compute_commands_source_fingerprint` (`fastworkflow/command_directory.py:627`) stamps both JSONs and
-   `RoutingRegistry._persisted_definition_is_fresh` (`fastworkflow/command_routing.py:385`) forces rebuild on mismatch.
+   Now `compute_commands_source_fingerprint` (`fastworkflow/core/command_directory.py:627`) stamps both JSONs and
+   `RoutingRegistry._persisted_definition_is_fresh` (`fastworkflow/core/command_routing.py:385`) forces rebuild on mismatch.
    *Experiment:* check the `source_fingerprint` field in both JSONs matches a fresh
    `compute_commands_source_fingerprint(<wf>)` call. A missing field = pre-2.22.1 artifact → rebuilt on next load.
 2. **In-process cache staleness** (still open): `get_cached_command_directory` is `@lru_cache(maxsize=32)`
-   (`fastworkflow/command_directory.py:657-658`) and `RoutingRegistry.get_definition` returns
-   `cls._definitions[path]` when present (`fastworkflow/command_routing.py:357-360`) — **the fingerprint is only
+   (`fastworkflow/core/command_directory.py:657-658`) and `RoutingRegistry.get_definition` returns
+   `cls._definitions[path]` when present (`fastworkflow/core/command_routing.py:357-360`) — **the fingerprint is only
    checked on cache miss**. Editing commands while a server/CLI process is running is never picked up.
    *Experiment:* restart the process; if behavior changes, this was it.
    *Fix:* restart, or `fastworkflow.RoutingRegistry.clear_registry()` (clears definitions, the global command-class
    cache, the command-directory lru_cache, and the module import cache — `command_routing.py:410-425`).
    Note the fingerprint embeds absolute paths + `mtime_ns`, so moving a workflow dir or a fresh checkout triggers a
    harmless JSON rebuild (not a retrain).
-3. **Learned clarification cache**: a successful "you misunderstood"-style clarification stores the ORIGINAL
-   utterance → resolved command with its embedding (`intent_detection.py:151-163` calling `store_utterance_cache`),
-   so future messages ≥0.85 similar skip the classifier. One bad learned mapping = persistently wrong command.
-   *Experiment/fix:* delete the workflow's `___convo_info/` directory (regenerated empty; you lose learned mappings).
+3. **(removed)** The learned clarification (similarity) cache no longer exists (fix-o5wi.8); an old `___convo_info/cache.sqlite3` is not read for it.
 4. **Genuine misclassification**: only after 1–3 are excluded. Then it is an NLU-quality problem —
    see `fastworkflow-nlu-pipeline-reference` (thresholds, wildcard negative class, utterance economics).
 
 ### T2 — Missing threshold.json / untrained-workflow late failures
 
 `threshold.json` per context folder is the marker of a trained intent model. Guards exist at two entry points
-(`fastworkflow/run/__main__.py:156-172` and `fastworkflow/mcp_server.py:249-250` — both call
-`is_workflow_trained`, `fastworkflow/model_pipeline_training.py:624`), added in v2.19.0 (commit d7853a1) after
+(`fastworkflow/run_cli/__main__.py:156-172` and `fastworkflow/run_fastapi_mcp/mcp_server.py:249-250` — both call
+`is_workflow_trained`, `fastworkflow/train/model_pipeline_training.py:624`), added in v2.19.0 (commit d7853a1) after
 untrained workflows crashed on the *first message* instead of at startup. If you still see a *late* failure, you
 came in through a path without the guard (e.g. embedding WEC directly, or a test).
 *Story:* the fix-0hb incident (commit fa97b48) — a training test's teardown `rmtree`'d the real
@@ -122,7 +118,7 @@ came in through a path without the guard (e.g. embedding WEC directly, or a test
 Quick check:
 ```bash
 source .venv/bin/activate && python -c "
-from fastworkflow.model_pipeline_training import is_workflow_trained
+from fastworkflow.intent.router import is_workflow_trained
 print(is_workflow_trained('<workflow_path>'))"
 ```
 
@@ -131,7 +127,7 @@ print(is_workflow_trained('<workflow_path>'))"
 Verified state on c33b9a5 (2026-07-09):
 - `is_fast_workflow_trained` (`fastworkflow/train/__main__.py:225-256`) requires
   `_workflows/command_metadata_extraction/___command_info/ErrorCorrection/largemodel.pth`.
-- `train()` excludes `ErrorCorrection` from CME training (`fastworkflow/model_pipeline_training.py:821`,
+- `train()` excludes `ErrorCorrection` from CME training (`fastworkflow/train/model_pipeline_training.py:821`,
   literally `- {'ErrorCorrection', 'ErrorCorrection'}` — note the duplicate literal), so that folder is never produced;
   the repo's CME `___command_info/` contains only `IntentDetection/` and `global/`.
 - Therefore the check returns False and `train_main` (`train/__main__.py:283-287`) retrains the internal CME
@@ -147,7 +143,7 @@ time, verify `.beads/issues.jsonl` after — bd's `close --reason` silently fail
 
 Mechanics: partial params are stored with NOT_FOUND sentinels via `model_construct` (no validation)
 (`fastworkflow/_workflows/command_metadata_extraction/parameter_extraction.py:93-104`); validation error messages
-embed the `MISSING_INFORMATION_ERRMSG` / `INVALID_INFORMATION_ERRMSG` env-var text (`fastworkflow/utils/signatures.py:634`),
+embed the `MISSING_INFORMATION_ERRMSG` / `INVALID_INFORMATION_ERRMSG` env-var text (`fastworkflow/parameters/signatures.py:634`),
 so changing those env values changes user-facing errors AND any code that matches on them.
 Landmine: the string-splitting recovery helper `_extract_missing_fields` (`parameter_extraction.py:140-160`) is
 **dead code with an arity bug** (3-tuple unpack of `validate_parameters`' 4-tuple return) — it raises ValueError
@@ -155,26 +151,26 @@ if revived; do not call it.
 Agent mode first tries XML-regex extraction (`_extract_parameters_from_xml`, `parameter_extraction.py:296+`) and
 **deliberately rejects** the result when a value equals one of the field's `examples` (anti-parroting,
 `parameter_extraction.py:330-337`); rejected → falls back to DSPy LLM extraction, whose `BestOfN(N=3)` reward
-also scores 0.0 for echoed example values (`fastworkflow/utils/signatures.py`). So an example value that is also a
+also scores 0.0 for echoed example values (`fastworkflow/parameters/signatures.py`). So an example value that is also a
 *legitimate* input can never be extracted in agent mode — pick example values that are not real data.
 Loop-breaker in deterministic mode: type `abort` (or `you misunderstood`) — these escape hatches are matched by
 exact/fuzzy utterance only, never by the classifier. Agent exhaustion caps at `max_iters=25`
-(`fastworkflow/workflow_agent.py:387`) → `failure_reason="max_iters_exhausted"`.
+(`fastworkflow/agent/workflow_agent.py:387`) → `failure_reason="max_iters_exhausted"`.
 
 ### T5 — ask_user suspension oddities (incl. the OPEN fix-5fv CLI hang)
 
 Two topologies, two behaviors:
-- **Topology B (FastAPI/WEC):** `ask_user` raises `AskUserSuspend` (`fastworkflow/utils/react.py:18`) — a
+- **Topology B (FastAPI/WEC):** `ask_user` raises `AskUserSuspend` (`fastworkflow/agent/react.py:18`) — a
   **BaseException** subclass so the ReAct loop's `except Exception` cannot swallow it; WEC returns an
   `awaiting_user` output and the *next* message resumes the same logical turn. A message during suspension is the
   answer — it never starts a new turn. `CommandCancelledError` (`workflow_execution_context.py:42`) is BaseException
   for the same reason. **Never convert these to Exception subclasses or add broad `except BaseException`.**
-- **Topology A (CLI):** `_ask_user_tool` (`fastworkflow/workflow_agent.py:354-385`) puts the question on
+- **Topology A (CLI):** `_ask_user_tool` (`fastworkflow/agent/workflow_agent.py:354-385`) puts the question on
   `command_output_queue` and blocks on `user_message_queue.get()`.
 
 **fix-5fv (P2, OPEN, code-reading evidence only — NEEDS RUNTIME VERIFICATION, never runtime-reproduced):**
 the blocking path emits **no trace sentinel**; the only sentinel emitter is `_maybe_enqueue_trace_sentinel`
-(`workflow_execution_context.py:656`), called only at turn-END sites. The CLI (`fastworkflow/run/__main__.py:231-260`)
+(`workflow_execution_context.py:656`), called only at turn-END sites. The CLI (`fastworkflow/run_cli/__main__.py:231-260`)
 drains the trace queue until a `None` sentinel BEFORE reading the output queue → predicted deadlock: spinner spins,
 question never prints. Filed 2026-06-11 during the R43 design review. If you hit T5, you are the runtime
 verification — record the result in bd fix-5fv. (The bead cites pre-refactor line numbers; current ones are above.)
@@ -234,8 +230,7 @@ cache-sensitive.
 ### T10 — speedict/RocksDB notes
 
 Where Rdict still lives (post v2.21.4 hot-path removal, commit 6880b0a): the `enablecache` decorator
-(`fastworkflow/workflow.py:57`), NLU caches (`fastworkflow/cache_matching.py:67,148`,
-`intent_detection.py:200-274`), the conversation store (`run_fastapi_mcp/conversation_store.py:45`).
+(`fastworkflow/core/workflow.py:57`), the NLU suggested-commands state (`intent_detection.py`), the conversation store (`run_fastapi_mcp/conversation_store.py:45`).
 All open/close per operation because **RocksDB is single-writer** — two concurrent writers on one DB error out
 (hence the "one writer per channel / sticky routing" rule; enforcement is open issue fix-5ka).
 `LOG`, `*.sst`, `MANIFEST-*`, `CURRENT`, `LOCK` files inside `___convo_info/`, `___workflow_contexts/` are normal
@@ -254,7 +249,7 @@ was supplied, returns the default without consulting `os.environ`**. Consequence
   exports, unlike train/run.
 - Never read env vars at import time in new code: the v2.21.3 regression (commit 79e6986) crashed the server when
   `SPEEDDICT_FOLDERNAME` lived only in the env file, and was *masked in dev* by litellm's `load_dotenv` of the cwd `.env`.
-- `run` hard-fails if `LITELLM_API_KEY_SYNDATA_GEN` is missing (`run/__main__.py:131-132`) — it is used as a
+- `run_cli` hard-fails if `LITELLM_API_KEY_SYNDATA_GEN` is missing (`run_cli/__main__.py:131-132`) — it is used as a
   file-presence probe, so Bedrock/proxy users hit it even though run does no synthetic generation.
 
 ### T13 — test-suite gotchas (debugging context only; authoring → `fastworkflow-validation-and-qa`)
@@ -278,7 +273,7 @@ was supplied, returns the default without consulting `os.environ`**. Consequence
 |---|---|---|---|
 | `RoutingRegistry._definitions` + `_GLOBAL_COMMAND_CLASS_CACHE` + `get_cached_command_directory` lru | process | `RoutingRegistry.clear_registry()` or restart | edits to `_commands/` invisible in a live process (T1b). Note: command-class cache is keyed `command_name:module_type` with NO workflow path — command names must be unique per process |
 | `command_directory.json` / `routing_definition.json` | disk, fingerprint-guarded | delete files (auto-rebuilt) — safe | stale routing pre-2.22.1 (T1a) |
-| `___convo_info/` Rdict caches | disk, per workflow | delete directory | learned wrong intent mapping (T1c), stale suggested-commands |
+| `___convo_info/` Rdict caches | disk, per workflow | delete directory | stale suggested-commands |
 | `___command_info/` model folders | disk, per workflow | **re-run `fastworkflow train`** (never hand-delete parts; deleting the whole folder forces full retrain) | wrong-era models; NOTE: failed retrain deliberately keeps prior artifacts runnable (prune happens only after success) |
 | DSPy disk/memory cache | user-global | `rm -rf ~/.dspy_cache` / `dspy.configure_cache(...)` | frozen LLM outputs (T9) |
 | `_WORKFLOW_REGISTRY` weakref session registry | process | drop references / restart; holding a reference IS the session | "session survived longer/shorter than expected"; CLI has NO cross-restart resume since v2.21.4 |
@@ -306,22 +301,22 @@ owner ruling (T3). Re-verify volatile facts before relying on them:
 
 ```bash
 # T1: fingerprint + lru cache + freshness check still where cited
-grep -n "def compute_commands_source_fingerprint\|@lru_cache" fastworkflow/command_directory.py   # expect 627, 657
-grep -n "_persisted_definition_is_fresh\|def clear_registry" fastworkflow/command_routing.py       # expect 368/385, 410
+grep -n "def compute_commands_source_fingerprint\|@lru_cache" fastworkflow/core/command_directory.py   # expect 627, 657
+grep -n "_persisted_definition_is_fresh\|def clear_registry" fastworkflow/core/command_routing.py       # expect 368/385, 410
 # T2: fail-fast guard
-grep -n "is_workflow_trained" fastworkflow/run/__main__.py fastworkflow/model_pipeline_training.py
+grep -n "is_workflow_trained" fastworkflow/run_cli/__main__.py fastworkflow/train/model_pipeline_training.py
 # T3: ErrorCorrection mismatch still present?
-grep -n "ErrorCorrection" fastworkflow/train/__main__.py fastworkflow/model_pipeline_training.py
+grep -n "ErrorCorrection" fastworkflow/train/__main__.py fastworkflow/train/model_pipeline_training.py
 ls fastworkflow/_workflows/command_metadata_extraction/___command_info/                            # ErrorCorrection absent?
 # T4: sentinel parsing + anti-parroting
 grep -n "MISSING_INFORMATION_ERRMSG\|examples and extracted_value" fastworkflow/_workflows/command_metadata_extraction/parameter_extraction.py
 # T5: fix-5fv still open? sentinel emitter unchanged?
 bd show fix-5fv | head -5
-grep -n "_maybe_enqueue_trace_sentinel\|def _ask_user_tool" fastworkflow/workflow_execution_context.py fastworkflow/workflow_agent.py
+grep -n "_maybe_enqueue_trace_sentinel\|def _ask_user_tool" fastworkflow/engine/workflow_execution_context.py fastworkflow/agent/workflow_agent.py
 # T6: GET /turns still missing? stream endpoint still on lock.locked()?
 grep -n "@app.get\|lock.locked()" fastworkflow/run_fastapi_mcp/__main__.py
 # T7: ChatSession still on process_message?
-grep -n "self._core.process_message" fastworkflow/chat_session.py
+grep -n "self._core.process_message" fastworkflow/engine/chat_session.py
 # T8: RateLimitError still drops seeds?
 grep -n -A2 "RateLimitError" fastworkflow/train/generate_synthetic.py
 # T9: dspy cache dir for the installed version; cache utility still where cited

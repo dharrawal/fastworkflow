@@ -18,17 +18,17 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow import review_engine, review_proposals
-from fastworkflow.review_engine import CONFIRMED
-from fastworkflow.turn import TurnStatus
-from fastworkflow.typed_phase_facts import _command_qname_from_class
+from fastworkflow.review import review_engine, review_proposals
+from fastworkflow.review.review_engine import CONFIRMED, REVISED
+from fastworkflow.core.turn import TurnStatus
+from fastworkflow.planning.typed_phase_facts import _command_qname_from_class
 from fastworkflow.utils.python_utils import get_module
-from fastworkflow._framework_commands.review_proposal import Signature as ReviewProposal
-from fastworkflow._framework_commands.review_subtasks import Signature as ReviewSubtasks
+from fastworkflow.review.commands.review_proposal import Signature as ReviewProposal
+from fastworkflow.review.commands.review_subtasks import Signature as ReviewSubtasks
 from tests.test_approval_binding import (  # noqa: F401 - the real agent on the annotated library copy, and the guards
     annotated_library, no_live_model, no_model_call_for_parameters, todo)
 from tests.test_round1_gate import (  # noqa: F401 - the gate fixture and the draft's two sub-tasks
-    EMMA, JOKE, _open_review, _split_into, gated)
+    EMMA, JOKE, _open_review, _split_into, gated, remote_decides_emma_and_joke)
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401
 
 pytestmark = pytest.mark.usefixtures("initialized_fastworkflow")
@@ -59,7 +59,7 @@ def test_an_app_command_class_keeps_its_qualified_name():
 # ----------------------------------------------------------------------
 
 
-def test_an_attended_accept_completes_the_review_and_runs_its_sub_tasks(gated, monkeypatch):
+def test_an_attended_accept_completes_the_review_and_runs_its_sub_tasks(gated, monkeypatch, remote_decides_emma_and_joke):
     _split_into(monkeypatch, [EMMA, JOKE])
     opened = gated.ctx.process_turn(f"{EMMA} and {JOKE}")
     assert opened.status is TurnStatus.AWAITING_USER
@@ -79,7 +79,7 @@ def test_an_attended_accept_completes_the_review_and_runs_its_sub_tasks(gated, m
     assert accepted is not None and [item.goal for item in accepted.items] == [EMMA, JOKE]
 
 
-def test_an_accepted_review_takes_no_model_step_after_its_code_steps_and_is_not_issued_again(gated, monkeypatch):
+def test_an_accepted_review_takes_no_model_step_after_its_code_steps_and_is_not_issued_again(gated, monkeypatch, remote_decides_emma_and_joke):
     issued: list = []
     original = review_engine.approved_review_proposal
 
@@ -98,3 +98,32 @@ def test_an_accepted_review_takes_no_model_step_after_its_code_steps_and_is_not_
 
     assert gated.script.steps == []                                 # every scripted step was used, none left over
     assert issued == ["review_subtasks"]                            # the accept runs review_proposal once, not again
+
+
+# ----------------------------------------------------------------------
+# (c) fix-4da9: the ask_user span of a review that took several replies carries every one of them
+# ----------------------------------------------------------------------
+
+
+def test_the_ask_user_span_of_a_review_carries_every_reply_in_order(gated, monkeypatch, remote_decides_emma_and_joke):
+    from fastworkflow.observability import tracing
+
+    _split_into(monkeypatch, [EMMA, JOKE])
+    assert gated.ctx.process_turn(f"{EMMA} and {JOKE}").status is TurnStatus.AWAITING_USER
+    record = _open_review(gated)
+    edit = "change 2: inputs=Ann Lee"
+    again = gated.ctx.process_turn(edit)                     # an edit: the review stays open for another reply
+    assert again.status is TurnStatus.AWAITING_USER
+    assert record.state == REVISED
+    gated.script.steps = [("finish", {})] * 2
+    assert gated.ctx.process_turn("accept").status is TurnStatus.COMPLETED
+    assert record.state == CONFIRMED
+
+    closed = [span for span in gated.sink.spans
+              if span.name == tracing.SPAN_QUESTION and span.end_ns is not None]
+    assert len(closed) == 1
+    attributes = closed[0].attributes
+    assert attributes["user_responses"] == [edit, "accept"]
+    assert attributes["user_response"] == "accept"           # the existing attribute keeps the final reply
+    assert closed[0].attributes[tracing.ATTR_SPAN_CONTRACT_VERSION] == tracing.SPAN_CONTRACTS[
+        tracing.SPAN_QUESTION].version

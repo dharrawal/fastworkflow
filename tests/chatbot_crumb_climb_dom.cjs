@@ -43,17 +43,19 @@ virtualConsole.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push
   d.getElementById('recordNavDown').click();
   await until(() => heading().includes('climb the crumbs') && detail.querySelector('.wfRow'));
 
-  // turn -> Execution -> Step 1, walked through the waterfall rows.
-  row('Execution').click();
-  await until(() => heading().startsWith('Execution'));
+  // turn -> Run -> Part 1 -> Step 1, walked through the waterfall rows.
+  row('Run').click();
+  await until(() => heading().startsWith('Run'));
+  row('Part 1').click();
+  await until(() => heading().startsWith('Part 1'));
   row('Step 1').click();
   await until(() => heading().startsWith('Step 1'));
-  assert.ok(crumbButtons().some(b => b.textContent === 'Execution'));
+  assert.ok(crumbButtons().some(b => b.textContent === 'Part 1'));
 
-  crumb('Execution').click();
-  await until(() => heading().startsWith('Execution'));
-  assert.ok(detail.querySelector('.wfRow'), 'Execution level lists its steps');
-  assert.equal(crumbButtons()[crumbButtons().length - 1].textContent, 'Execution');
+  crumb('Part 1').click();
+  await until(() => heading().startsWith('Part 1'));
+  assert.ok(detail.querySelector('.wfRow'), 'the part lists its steps');
+  assert.equal(crumbButtons()[crumbButtons().length - 1].textContent, 'Part 1');
 
   // The turn crumb climbs from a step as well, and the stage below it is
   // reachable again afterwards.
@@ -61,16 +63,18 @@ virtualConsole.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push
   await until(() => heading().startsWith('Step 2'));
   crumb('climb the crumbs').click();
   await until(() => heading().includes('climb the crumbs'));
-  row('Planning').click();
-  await until(() => heading().startsWith('Planning'));
+  row('Split').click();
+  await until(() => heading().startsWith('Split'));
   crumb('climb the crumbs').click();
   await until(() => heading().includes('climb the crumbs'));
-  row('Execution').click();
-  await until(() => heading().startsWith('Execution'));
+  row('Run').click();
+  await until(() => heading().startsWith('Run'));
+  row('Part 1').click();
+  await until(() => heading().startsWith('Part 1'));
   row('Step 2').click();
   await until(() => heading().startsWith('Step 2'));
-  crumb('Execution').click();
-  await until(() => heading().startsWith('Execution'));
+  crumb('Part 1').click();
+  await until(() => heading().startsWith('Part 1'));
 
   await new Promise(r => setTimeout(r, 300));
   assert.deepEqual(errors, []);

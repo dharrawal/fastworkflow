@@ -392,7 +392,7 @@ Verified `command_responses` emission/construction/mutation sites **not** in sec
   `command_output.command_responses[0].artifacts["command_handled"] = True` at lines 86 and 123.
   (Verified all internal sites are single-element constructions — the design's "provably
   unused" claim in section 4.1 does hold for `_workflows/` as well.)
-- `fastworkflow/run/__main__.py` (CLI output printer)
+- `fastworkflow/run_cli/__main__.py` (CLI output printer)
 - `fastworkflow/run_fastapi_mcp/utils.py:355-357`
 
 If the build templates are missed, `fastworkflow build` generates broken commands the day the
@@ -764,7 +764,7 @@ Recorded in `docs/turn_result_design.md`, Amendments A18.
 its own contract the design never updates: `_finalize_agent_output`, `_process_message`, and
 `_process_action` all call `_maybe_enqueue_output(command_output)` (e.g.
 `workflow_execution_context.py:563`), Topology A's `_ask_user_tool` enqueues mid-turn
-clarification `CommandOutput`s directly, and the CLI (`run/__main__.py`) consumes the queue and
+clarification `CommandOutput`s directly, and the CLI (`run_cli/__main__.py`) consumes the queue and
 iterates `command_responses`. Define: does the queue carry per-event `CommandOutput`s plus a
 terminal `TurnResult` (recommended — mirrors the live-then-final shape), or `TurnResult` only?
 `ChatSession.keep_alive` and the CLI renderer change either way; neither appears in section 11.
@@ -785,7 +785,7 @@ terminal `TurnResult` (recommended — mirrors the live-then-final shape), or `T
    screens was reviewed before deciding.
 4. **Defect discovered and filed (`fix-5fv`):** today's Topology A ask_user enqueues the
    clarification *without* a trace sentinel (`workflow_agent.py:279`), while the CLI reads
-   the output queue only *after* a sentinel (`run/__main__.py:236-262`) — apparent mid-turn
+   the output queue only *after* a sentinel (`run_cli/__main__.py:236-262`) — apparent mid-turn
    hang in agent mode (needs runtime verification). The contract therefore includes the
    pairing rule: **every mid-turn awaiting_user enqueue is paired with a trace sentinel** so
    the consumer wakes, renders the question, and returns to the prompt. This is a bug fix,

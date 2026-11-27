@@ -4,7 +4,7 @@
 
 Companion to SKILL.md entries 1–3. Facts verified 2026-07-09 against v2.22.2 (commit c33b9a5).
 This is the deepest design effort in repo history and the house model for how large changes are
-made. Read it before touching `fastworkflow/turn.py`, `workflow_execution_context.py`,
+made. Read it before touching `fastworkflow/core/turn.py`, `workflow_execution_context.py`,
 `workflow_agent.py`, or `run_fastapi_mcp/turns.py`.
 
 ## Timeline at a glance
@@ -92,7 +92,7 @@ the team owns fastWorkflow (design.md §"Why this is architectural, not a mappin
 
 ## What shipped, precisely
 
-- **v2.21.0 (afcbe01):** `fastworkflow/turn.py` (TurnResult/TurnOutput/TurnStatus,
+- **v2.21.0 (afcbe01):** `fastworkflow/core/turn.py` (TurnResult/TurnOutput/TurnStatus,
   `mint_turn_key` with injectable now/uuid seams, `collect_artifact_responses`,
   `merge_artifact_responses_into`, `FW_ARTIFACT_REF_KEY`, warn-only eager artifact
   validation); WEC accumulator (`_begin_turn`, `append_turn_output`); artifact-agnostic
@@ -164,7 +164,7 @@ genuinely-unfinished part is the endpoint-level TurnOutput wire cutover (fix-qtq
 ## Re-verification
 
 - `git log --oneline --no-decorate -1 afcbe01 aa20c1b 5a63790 cf3eeae 9031942 42e9b3a 920d0de` (one hash at a time)
-- `grep -n "def process_turn\|def process_action_turn\|merge_artifact_responses_into" fastworkflow/workflow_execution_context.py`
+- `grep -n "def process_turn\|def process_action_turn\|merge_artifact_responses_into" fastworkflow/engine/workflow_execution_context.py`
 - `sed -n '1,30p' fastworkflow/run_fastapi_mcp/turns.py` (invariant docstring)
 - `grep -n "locked()" fastworkflow/run_fastapi_mcp/__main__.py` (surviving old-pattern check)
 - `head -20 docs/turn_result_design.md` (supersession banner); `ls docs/turn_result_*.md`

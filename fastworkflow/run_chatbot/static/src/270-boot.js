@@ -74,7 +74,12 @@ function resetSourceScopedState() {
      until applySession binds the new server (or leaves this a viewer). The
      epoch stops a turn that is still in flight from repainting or polling. */
   tm.epoch++;
+  tmApprovalTokenClear();
   tm.connected = false;
+  tm.commandSchemas = null;
+  tm.commandSchemasPromise = null;
+  tm.cardCache = {};
+  tm.composeUnavailable = false;
   tm.managed = false;
   tm.busy = false;
   tm.baseUrl = "";

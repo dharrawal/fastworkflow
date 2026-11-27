@@ -6,7 +6,7 @@ from fastworkflow.build.pydantic_model_generator import generate_input_model_cod
 from fastworkflow.build.utterance_generator import generate_utterances
 from fastworkflow.build.command_import_utils import generate_import_statements
 from fastworkflow.build.class_analysis_structures import PropertyInfo, FunctionInfo
-from fastworkflow.command_directory import _command_kind_from_ast
+from fastworkflow.core.command_directory import _command_kind_from_ast
 from fastworkflow.utils.logging import logger
 from typing import Optional, List, Dict
 from pydantic import BaseModel, Field
@@ -50,7 +50,7 @@ def get_import_block(body: str = "") -> str:
     lines = []
     if used("fastworkflow"):
         lines.append("import fastworkflow")
-    lines.append("from fastworkflow.workflow import Workflow")
+    lines.append("from fastworkflow.core.workflow import Workflow")
     typing_used = [name for name in _TYPING_NAMES if used(name)]
     if typing_used:
         lines.append(f"from typing import {', '.join(typing_used)}")

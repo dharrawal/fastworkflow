@@ -3,10 +3,11 @@
 The developer writes no sentinel. The framework fills a missing required field with its
 not-given marker (``NOT_FOUND`` for a str, ``INVALID_INT_VALUE`` / ``INVALID_FLOAT_VALUE`` for a
 number, ``[]`` for a list) and asks the user for it, as it does for ``default="NOT_FOUND"``.
-``default="NOT_FOUND"`` still works, and logs one WARNING at load.
+A declared ``default="NOT_FOUND"`` is a load error of that command: the marker is the framework's, so
+such a default could never be told from a missing value.
 
 Integration throughout: a real fixture workflow (``tests/plain_required_workflow``) with an
-execution command, a planning command and a deprecated command, the real routing, the real
+execution command, a planning command and a command migrated from the old spelling, the real routing, the real
 ``CommandExecutor.perform_action``, the real ``ParameterExtraction``, the real validator. The only
 double is the LLM extractor, and that is patched at the seam a live model would answer.
 """
@@ -14,6 +15,7 @@ double is the LLM extractor, and that is patched at the seam a live model would 
 from __future__ import annotations
 
 import contextlib
+import shutil
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,15 +26,18 @@ import pytest
 from pydantic import BaseModel, Field
 
 import fastworkflow
-from fastworkflow import ModuleType, planning_commands
+from fastworkflow import ModuleType
+from fastworkflow.planning import command_preview, planning_commands
+from fastworkflow.parameters import parameter_clarification
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import (
     ParameterExtraction,
 )
-from fastworkflow.command_executor import CommandExecutor
-from fastworkflow.command_metadata_api import CommandMetadataAPI
-from fastworkflow.command_routing import RoutingDefinition
-from fastworkflow.utils import signatures
-from fastworkflow.utils.signatures import (
+from fastworkflow.core.command_directory import CommandLoadError
+from fastworkflow.engine.command_executor import CommandExecutor
+from fastworkflow.core.command_metadata_api import CommandMetadataAPI
+from fastworkflow.core.command_routing import RoutingDefinition
+from fastworkflow.parameters import signatures
+from fastworkflow.parameters.signatures import (
     INVALID_FLOAT_VALUE,
     INVALID_INT_VALUE,
     NOT_FOUND,
@@ -127,8 +132,8 @@ def test_direct_action_missing_plain_required_field_is_asked_not_raised(workflow
         CommandExecutor.perform_action(workflow, action)
 
     message = str(exc_info.value)
-    assert "Missing parameter values" in message
-    assert missing in message
+    assert "your request does not give" in message
+    assert missing.replace("_", " ") in message
 
 
 def test_direct_action_with_no_parameters_asks_for_every_plain_required_field(workflow):
@@ -178,11 +183,10 @@ def test_llm_leaving_plain_required_fields_out_asks_for_them(llm_answers):
     assert output.parameters_are_valid is False
     for name in ("count", "ratio", "ids"):
         assert name in output.error_msg
-    stored = cme.context["stored_parameters"]
-    assert stored.name == "Bob"
+    loop = parameter_clarification.pending(cme.context)
+    assert loop.values["name"] == "Bob"
     for name in ("count", "ratio", "ids"):
-        field = _params_class(RECORD).model_fields[name]
-        assert ParameterExtraction._is_asked_field(field, getattr(stored, name)), name
+        assert name in loop.open, name
 
 
 def test_llm_answering_every_plain_required_field_is_valid(llm_answers):
@@ -278,16 +282,30 @@ def test_metadata_marks_plain_required_fields_required(workflow):
 
 
 # ---------------------------------------------------------------------------
-# Deprecation: default="NOT_FOUND" still works and warns once at load
+# default="NOT_FOUND" is a load error of that command (it was a deprecation warning)
 # ---------------------------------------------------------------------------
+
+_PLAIN_OLD = 'name: str = Field(description="a name")'
+
+
+def _old_spelling_copy(tmp_path) -> str:
+    """A temp copy of the fixture workflow whose ``old_style_values`` declares the old spelling again."""
+    copy = tmp_path / "plain_required_old_spelling"
+    shutil.copytree(FOLDER, copy, ignore=shutil.ignore_patterns("___*", "__pycache__"))
+    command_file = copy / "_commands" / f"{OLD}.py"
+    text = command_file.read_text()
+    assert _PLAIN_OLD in text
+    command_file.write_text(text.replace(_PLAIN_OLD, 'name: str = Field(default="NOT_FOUND", description="a name")'))
+    return str(copy)
+
 
 @pytest.fixture
 def fresh_load(workflow, monkeypatch):
-    """Load command classes afresh so the load-time warning is observed."""
+    """Load command classes afresh so anything logged at load is observed."""
     monkeypatch.setattr(RoutingDefinition, "_GLOBAL_COMMAND_CLASS_CACHE", {})
     warnings: list[str] = []
     definition = fastworkflow.RoutingRegistry.get_definition(FOLDER)
-    monkeypatch.setattr(fastworkflow.command_routing.logger, "warning",
+    monkeypatch.setattr(fastworkflow.core.command_routing.logger, "warning",
                         lambda msg, *a, **k: warnings.append(str(msg)))
 
     def load(command_name: str):
@@ -296,31 +314,34 @@ def fresh_load(workflow, monkeypatch):
     yield load, warnings
 
 
-def test_default_not_found_logs_one_deprecation_warning_naming_command_and_field(fresh_load):
-    load, warnings = fresh_load
-    load(OLD)
+def test_default_not_found_is_one_load_problem_naming_command_field_and_the_fix(tmp_path):
+    problems = command_preview.load_problems(_old_spelling_copy(tmp_path))
 
-    deprecated = [w for w in warnings if "NOT_FOUND" in w]
-    assert len(deprecated) == 1, warnings
-    assert OLD in deprecated[0]
-    assert "name" in deprecated[0]
-    assert "write a plain required field (no default)" in deprecated[0]
+    assert len(problems) == 1, problems
+    assert problems[0].startswith(f"{OLD}: ") and f"{OLD}.py" in problems[0]
+    assert "Signature.Input.name: default 'NOT_FOUND' is the framework's not-given marker" in problems[0]
+    assert "Declare a required field with no default" in problems[0]
+    assert "`name: str | None = None` for an optional one" in problems[0]
 
 
-def test_plain_required_fields_do_not_warn(fresh_load):
+def test_plain_required_fields_load_with_no_problem_and_no_warning(fresh_load):
     load, warnings = fresh_load
     load(RECORD)
     load(PLAN)
+    load(OLD)
 
     assert [w for w in warnings if "NOT_FOUND" in w or "plain required" in w] == []
+    assert command_preview.load_problems(FOLDER) == []
 
 
-def test_default_not_found_still_asks_the_user_as_before(workflow):
-    action = _action(OLD, {})
+def test_default_not_found_command_does_not_load_and_the_migrated_one_asks(tmp_path, workflow):
+    old_spelling = fastworkflow.RoutingRegistry.get_definition(_old_spelling_copy(tmp_path), load_cached=False)
+    with pytest.raises(CommandLoadError, match="not-given marker"):
+        old_spelling.get_command_class(OLD, ModuleType.INPUT_FOR_PARAM_EXTRACTION_CLASS)
 
+    # the same command written as a plain required field asks the user for the missing value
     with pytest.raises(ValueError) as exc_info:
-        CommandExecutor.perform_action(workflow, action)
-
+        CommandExecutor.perform_action(workflow, _action(OLD, {}))
     assert "name" in str(exc_info.value)
 
 

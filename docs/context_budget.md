@@ -1,6 +1,6 @@
 # Context budgets: one input, every byte budget derived from it
 
-`fastworkflow/context_budget.py`.
+`fastworkflow/observation_offloading/context_budget.py`.
 
 fastWorkflow bounds several things by UTF-8 bytes: how much trajectory the ReAct
 loop carries into the next step, how much evidence the answer-time extract call
@@ -105,4 +105,4 @@ are the derived budgets".
 The per-attribute cap on span attributes written to the **observability store**
 is not one: it bounds a database row, not a model prompt, and nothing about it
 scales with a model's window. It is the constant
-`fastworkflow.tracing.MAX_ATTR_BYTES` (16,384), not a setting.
+`fastworkflow.observability.tracing.MAX_ATTR_BYTES` (16,384), not a setting.

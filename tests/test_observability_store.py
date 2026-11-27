@@ -24,10 +24,11 @@ from unittest.mock import MagicMock
 import pytest
 
 import fastworkflow
-from fastworkflow import TurnStatus, tracing
+from fastworkflow import TurnStatus
+from fastworkflow.observability import tracing
 from fastworkflow.observability import store as obs
-from fastworkflow.command_executor import CommandExecutor
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.command_executor import CommandExecutor
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 
 @pytest.fixture
@@ -38,7 +39,7 @@ def todo_workflow_path() -> str:
 @pytest.fixture
 def initialized_fastworkflow(monkeypatch):
     fastworkflow.init({})
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     monkeypatch.setattr(
         WorkflowExecutionContext,
@@ -88,11 +89,16 @@ def _make_agent_ctx(todo_workflow_path, monkeypatch, sink):
     )
     ctx.bind_app_workflow(wf)
     monkeypatch.setattr(
-        "fastworkflow.workflow_agent.build_query_with_next_steps",
+        "fastworkflow.agent.workflow_agent.build_query_with_next_steps",
         lambda user_query, session, **kwargs: user_query,
     )
     monkeypatch.setattr(
-        "fastworkflow.workflow_agent._what_can_i_do", lambda session: "commands"
+        "fastworkflow.agent.workflow_agent._what_can_i_do", lambda session: "commands"
+    )
+    # The planner's split, the model-backed seam before the parts are resolved: these requests are one part. (With
+    # no planner model here, the splitter would raise; before, the repo-root .env that litellm loaded supplied one.)
+    monkeypatch.setattr(
+        "fastworkflow.agent.workflow_agent.split_into_subtasks", lambda user_query, **kwargs: [user_query]
     )
     monkeypatch.setattr(ctx, "_ensure_agent_initialized", lambda: None)
     monkeypatch.setattr(
@@ -349,7 +355,8 @@ class TestEndToEnd:
         spans = _rows(db_path, "SELECT * FROM spans WHERE trace_id=?", (turn_output.turn_key,))
         names = {s["name"] for s in spans}
         assert tracing.SPAN_TURN in names
-        assert tracing.SPAN_AGENT_TOOL_CALL in names
+        # the direct path's stages (bd fix-qjne.34: no tool-call span; its command's own span is fw.command)
+        assert tracing.SPAN_RESOLVE in names and "fw.agent.tool_call" not in names
         root = next(s for s in spans if s["name"] == tracing.SPAN_TURN)
         assert root["end_ns"] is not None  # close upserted over the open emission
         assert root["status"] == "completed"
@@ -385,11 +392,11 @@ class TestEndToEnd:
         row = _rows(db_path, "SELECT status, success FROM turns WHERE turn_key=?", (first.turn_key,))[0]
         assert row["status"] == "completed"  # guarded transition [R2]
 
-        # fw.ask_user span closed with the human wait
+        # fw.question span (fw.ask_user before bd fix-qjne.34) closed with the human wait
         ask = _rows(
             db_path,
             "SELECT * FROM spans WHERE trace_id=? AND name=?",
-            (first.turn_key, tracing.SPAN_ASK_USER),
+            (first.turn_key, tracing.SPAN_QUESTION),
         )
         assert len(ask) == 1
         assert ask[0]["end_ns"] is not None
@@ -710,7 +717,7 @@ class TestWriterDiscipline:
             for i in range(50):
                 sink.emit_span(
                     tracing.Span(
-                        span_id=f"s{i}", trace_id="t", name="fw.agent.tool_call",
+                        span_id=f"s{i}", trace_id="t", name="fw.step",
                         start_ns=i, status="ok",
                     )
                 )
@@ -742,7 +749,7 @@ class TestWriterDiscipline:
         monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "root"))
         workflow_path = str(tmp_path / "wf")
         os.makedirs(workflow_path, exist_ok=True)
-        db = fastworkflow.state_paths.observability_db(workflow_path)
+        db = fastworkflow.session.state_paths.observability_db(workflow_path)
         obs.ObservabilityStore(db)  # create it
         os.chmod(db, 0o400)  # unwritable -> schema ensure fails
         try:
@@ -755,7 +762,7 @@ class TestWriterDiscipline:
         for i in range(20):
             sink.emit_span(
                 tracing.Span(
-                    span_id=f"c{i}", trace_id="t", name="fw.agent.tool_call",
+                    span_id=f"c{i}", trace_id="t", name="fw.step",
                     start_ns=i, status="ok",
                 )
             )
@@ -952,6 +959,21 @@ class TestMaintenance:
 
         assert "turns" not in deleted
         assert len(_rows(db_path, "SELECT turn_key FROM turns")) == 1
+
+    def test_forget_channel_and_clear_leave_no_free_pages(self, db_path):
+        """fix-slz6: the vacuum runs to completion, not one page per call."""
+        store = obs.ObservabilityStore(db_path)
+        with store._connect() as conn:
+            for i in range(400):
+                conn.execute(
+                    "INSERT INTO spans(span_id, trace_id, name, kind, start_ns, status, "
+                    "attributes, channel_id) VALUES (?,?,?,?,?,?,?,?)",
+                    (f"s-{i}", "20000101T000000-a", "fw.turn", "internal", i, "ok",
+                     "x" * 4_000, "chan-free"),
+                )
+        store.forget_channel("chan-free")
+        with store._connect() as conn:
+            assert conn.execute("PRAGMA freelist_count").fetchone()[0] == 0
 
     @staticmethod
     def _span(store, span_id, trace_id, start_ns, experiment_id=None):
@@ -1285,7 +1307,7 @@ class TestFactory:
             ))
             assert sink.flush()
 
-            db = fastworkflow.state_paths.observability_db(workflow_path)
+            db = fastworkflow.session.state_paths.observability_db(workflow_path)
             assert stat.S_IMODE(os.stat(db).st_mode) == 0o600
             assert stat.S_IMODE(os.stat(os.path.dirname(db)).st_mode) == 0o700
             turns = _rows(db, "SELECT turn_key, channel_id FROM turns")

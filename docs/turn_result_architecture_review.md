@@ -136,7 +136,7 @@ reader). (e) Docs: status×success matrix; "reading a turn record" cookbook.
 47 amendments overriding scattered originals (and each other) is a rationale archive, not an
 implementation spec — drift is guaranteed. **Fix:** a ~300-line consolidated spec (final
 types, key grammar, store ABCs, lifecycle state machine, conventions table). Proposed layout:
-`fastworkflow/turn.py` (types; solves the TurnResult↔CommandOutput circular ref),
+`fastworkflow/core/turn.py` (types; solves the TurnResult↔CommandOutput circular ref),
 `turn_accumulator.py` (A30 lifecycle, key mint, ordinal, timing — WEC delegates),
 `turn_serializer.py` (serializer + envelope + projections), `stores/` package (`pending.py`,
 `conversation_turn.py`, `payload.py`, `sanitize.py`) — built on a shared keyed-blob base

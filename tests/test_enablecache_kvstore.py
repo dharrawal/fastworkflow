@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow.workflow import enablecache
+from fastworkflow.core.workflow import enablecache
 
 
 class _Host:

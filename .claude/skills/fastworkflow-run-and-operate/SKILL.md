@@ -51,7 +51,7 @@ Jargon used below, defined once:
 ## 1. CLI anatomy
 
 Entry point: `fastworkflow = "fastworkflow.cli:main"` (pyproject.toml:31). Six subcommands
-(verified via `fastworkflow --help`): `examples`, `build`, `refine`, `train`, `run`,
+(verified via `fastworkflow --help`): `examples`, `build`, `refine`, `train`, `run_cli`,
 `run_fastapi_mcp`. Heavy imports are lazy, so `--help` is fast.
 
 | Subcommand | Arguments / flags (all verified in `fastworkflow/cli.py`) |
@@ -97,7 +97,7 @@ progression — details and per-example run commands in
 | 1 | `hello_world` | Minimal: one global command wrapping `add_two_numbers` |
 | 2 | `messaging_app_1` | Smallest hand-written workflow: one global command over a plain function |
 | 3 | `messaging_app_2` | Class-based command context (`_commands/User/`) + `startup.py` binding an instance |
-| 4 | `messaging_app_3` | Context inheritance (`PremiumUser` extends `User` via `context_inheritance_model.json`) |
+| 4 | `messaging_app_3` | Context inheritance (`PremiumUser` extends `User` via `inherits = ["User"]` on its `class Context`) |
 | 5 | `messaging_app_4` | Container context + navigation (`ChatRoom`, `set_root_context.py`, `startup_action.json`) |
 | 6 | `retail_workflow` | **tau-bench retail domain**: 15 global e-commerce commands + `retail_data/` fixtures + `tools/` |
 | 7 | `simple_workflow_template` | JSON-driven WorkItem-hierarchy template |
@@ -115,7 +115,7 @@ pip install fastworkflow                     # Python 3.11+; Windows -> WSL
 fastworkflow examples fetch hello_world      # creates ./examples/hello_world + env templates
 nano ./examples/fastworkflow.passwords.env   # paste LITELLM_API_KEY_* (one free Mistral key works for all roles)
 fastworkflow train ./examples/hello_world ./examples/fastworkflow.env ./examples/fastworkflow.passwords.env
-fastworkflow run   ./examples/hello_world ./examples/fastworkflow.env ./examples/fastworkflow.passwords.env
+fastworkflow run_cli   ./examples/hello_world ./examples/fastworkflow.env ./examples/fastworkflow.passwords.env
 ```
 
 What happens and what lands where:
@@ -128,7 +128,7 @@ What happens and what lands where:
   containing `tinymodel.pth`, `largemodel.pth`, `label_encoder.pkl`, `threshold.json`,
   `tiny_ambiguous_threshold.json`, `large_ambiguous_threshold.json`.
 - `run` fails fast if untrained ("Workflow 'X' is not trained (missing model artifacts for
-  context(s): ...)") and prints the exact train command (run/__main__.py:156-172).
+  context(s): ...)") and prints the exact train command (run_cli/__main__.py:156-172).
 - At the `User >` prompt try "what can you do?" or "add 49 + 51".
 
 Server variant: `pip install "fastworkflow[server]"` then
@@ -138,11 +138,11 @@ Server variant: `pip install "fastworkflow[server]"` then
 
 | Mechanism | Effect | Where verified |
 |---|---|---|
-| `fastworkflow run ...` (default) | Agent mode: `run_as_agent = not args.assistant` | run/__main__.py:185 |
-| `fastworkflow run ... --assistant` | Deterministic assistant mode for the whole session | cli.py run parser |
+| `fastworkflow run_cli ...` (default) | Agent mode: `run_as_agent = not args.assistant` | run_cli/__main__.py:185 |
+| `fastworkflow run_cli ... --assistant` | Deterministic assistant mode for the whole session | cli.py run parser |
 | Message starting with `/` at the prompt | Forces deterministic execution of that ONE command even in agent mode: sets `is_assistant_mode_command` during INTENT_DETECTION, which makes `_should_run_agent_for_message()` bypass the agent | workflow_execution_context.py:617-632 |
-| `//exit` | Quits the CLI loop | run/__main__.py:222-223 |
-| `//new` | Clears conversation history, starts a new conversation | run/__main__.py:224-227 |
+| `//exit` | Quits the CLI loop | run_cli/__main__.py:222-223 |
+| `//new` | Clears conversation history, starts a new conversation | run_cli/__main__.py:224-227 |
 
 The CLI loop prints `Agent >` / `Workflow >` trace lines while processing, then a pretty
 `CommandOutput` panel (context, command, parameters, responses, artifacts, next_actions,
@@ -161,8 +161,8 @@ the workflow dir unless marked "CWD" (created wherever the process was launched)
 |---|---|---|---|
 | `___command_info/` | `fastworkflow train` | Trained intent models per context, `command_directory.json`, `routing_definition.json`, param-labeled JSONs | Yes — retrain to regenerate. **NEVER let tests/experiments wipe the bundled examples' copies** (`fastworkflow/examples/*/___command_info`): the fix-0hb incident (commit fa97b48) — a test fixture rmtree'd hello_world's trained model and poisoned the next full-suite run. Train into temp copies. |
 | `___command_info/command_directory.json` | train / cache refresh | Includes `source_fingerprint` — a hash over the `_commands` source set; on mismatch the cache is rebuilt (v2.22.1 fix, commit b5747df; `compute_commands_source_fingerprint`, command_directory.py:627) | Covered above |
-| `___workflow_contexts/` (i.e. `SPEEDDICT_FOLDERNAME`, template default) | server + runtime | `channel_conversations/<channel_id>.rdb` (conversation history), `channel_session_state/` (suspended ask_user turns), `function_cache/` | Deleting loses conversation history and suspended turns. Safe only if you accept that. |
-| `___convo_info/` | CME intent pipeline at runtime | **Live** utterance-correction cache (1-shot adaptation of intent detection from user corrections; intent_detection.py:31-33, cache_matching.py) | Deleting loses learned intent corrections; otherwise safe. NOT a stale dir despite the name. |
+| `___workflow_contexts/` (legacy; state now lives under `FASTWORKFLOW_STATE_ROOT`) | server + runtime | `channel_conversations/<channel_id>.rdb` (conversation history), `channel_session_state/` (suspended ask_user turns), `function_cache/` | Deleting loses conversation history and suspended turns. Safe only if you accept that. |
+| `___convo_info/` | CME intent pipeline at runtime | Nothing is written for the CME's intent pipeline any more (the pending which-command question is the CME context's `intent_loop` record, saved with the session); an old `cache.sqlite3` (suggested commands, or the removed similarity cache's `utterance_cache` table) is dead | Safe to delete; rewritten as needed. |
 | `observability.sqlite3` (state root, per workflow) | `SQLiteTraceSink`, every topology incl. CLI | Turn records, spans, artifacts — the single source of truth for what a turn did (state_paths.py:`observability_db`) | Deleting loses all turn history/traces; the workflow still runs. Prune instead. |
 | `action.jsonl` (CWD) | **nothing — retired in Phase 7** | Was a CLI-only debug mirror of the agent action log; superseded by `observability.sqlite3` (post-mortem) and the in-process `ctx.action_log` (live) | Yes, always — any copy on disk is pre-Phase-7 residue. |
 | `___user_conversations/` (repo root) | nothing current | Legacy pre-rename conversation dir; code only writes `channel_conversations` now (utils.py:400) | Yes — stale residue. |
@@ -317,7 +317,7 @@ volatile fact:
 
 ```sh
 # CLI subcommands + flags
-fastworkflow --help && fastworkflow run --help && fastworkflow run_fastapi_mcp --help
+fastworkflow --help && fastworkflow run_cli --help && fastworkflow run_fastapi_mcp --help
 # Bundled examples list
 fastworkflow examples list
 # Default env-file resolution (workflow dir, not CWD)
@@ -341,14 +341,14 @@ grep -n -A2 "allow_origins" fastworkflow/run_fastapi_mcp/__main__.py
 # MCP tool exclusions + no-prompts note
 sed -n '40,65p' fastworkflow/run_fastapi_mcp/mcp_specific.py
 # '/' prefix + //exit //new
-grep -n "is_assistant_mode_command" fastworkflow/workflow_execution_context.py; grep -n '"//' fastworkflow/run/__main__.py
+grep -n "is_assistant_mode_command" fastworkflow/engine/workflow_execution_context.py; grep -n '"//' fastworkflow/run_cli/__main__.py
 # Artifact writers
-grep -n "def observability_db" -A 8 fastworkflow/state_paths.py
+grep -n "def observability_db" -A 8 fastworkflow/session/state_paths.py
 grep -rn "action.jsonl" fastworkflow/ --include=*.py   # expect only retirement comments
 grep -n "___convo_info" fastworkflow/_workflows/command_metadata_extraction/intent_detection.py
 grep -n "channel_conversations\|channel_session_state" fastworkflow/run_fastapi_mcp/utils.py
 # Fingerprint-based cache invalidation (v2.22.1)
-grep -n "source_fingerprint\|compute_commands_source_fingerprint" fastworkflow/command_directory.py
+grep -n "source_fingerprint\|compute_commands_source_fingerprint" fastworkflow/core/command_directory.py
 # Trained-artifact inventory for one example
 ls fastworkflow/examples/hello_world/___command_info fastworkflow/examples/hello_world/___command_info/global
 # Shipped integrate-chat-agent skill + its untested contract

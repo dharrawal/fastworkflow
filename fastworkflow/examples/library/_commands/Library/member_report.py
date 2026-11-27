@@ -32,6 +32,7 @@ class Signature:
 
     class Input(BaseModel):
         member: str = Field(description="the member's name",
+                            examples=["Raj Patel", "Ann Lee", "Mia Chen"],
                             json_schema_extra={"copied_from_command_text": True})
         loans: bool = Field(default=False,
                             description="whether to name the books the member has on loan")

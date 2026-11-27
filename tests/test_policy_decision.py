@@ -1,4 +1,4 @@
-"""The policy verifier's engine and loader (fastworkflow.policy_decision, policy_loader).
+"""The policy verifier's engine and loader (fastworkflow.policy.policy_decision, policy_loader).
 
 Pure Python: no model, no workflow run. The loop wiring is in
 tests/test_policy_loop.py and the executor guard in tests/test_policy_guard.py.
@@ -11,7 +11,7 @@ import textwrap
 
 import pytest
 
-from fastworkflow.policy_decision import (
+from fastworkflow.policy.policy_decision import (
     NO_OP_TABLE,
     AfterObservationInput,
     BeforeFinishInput,
@@ -28,7 +28,7 @@ from fastworkflow.policy_decision import (
     PolicyState,
     RequestedOperation,
 )
-from fastworkflow.policy_loader import load_policy
+from fastworkflow.policy.policy_loader import load_policy
 
 SIDE = frozenset({DecisionPhase.BEFORE_SIDE_EFFECT})
 FINISH = frozenset({DecisionPhase.BEFORE_FINISH})
@@ -171,14 +171,14 @@ def test_policy_state_round_trips_as_plain_json():
 # ----------------------------------------------------------------------
 
 TABLE_MODULE = """
-from fastworkflow.policy_decision import (
+from fastworkflow.policy.policy_decision import (
     ContractFacts, DecisionPhase, DecisionTable, PolicyOutcome, PolicyRow)
 
 TABLE = DecisionTable("tmp/1", [PolicyRow(
     "R1", frozenset({DecisionPhase.BEFORE_SIDE_EFFECT}), PolicyOutcome.REWRITE,
     "always", lambda i: True, "blocked")])
 OTHER = TABLE
-FACTS = ContractFacts(write_commands=frozenset({"close_ticket"}))
+FACTS = ContractFacts(failure_pattern="Error")
 """
 
 
@@ -200,7 +200,10 @@ def test_a_workflow_with_a_table_is_enforced(tmp_path, monkeypatch):
     point, facts = load_policy(_workflow_with_table(tmp_path))
     assert point.enabled and point.mode is PolicyMode.ENFORCE
     assert point.table.version == "tmp/1"
-    assert facts.is_write("close_ticket")
+    assert facts.reports_failure("Error: no ticket")
+    # bd fix-ftdl.7.6: the writing commands are the workflow's @writes marks, not a list in the table; this folder
+    # has no commands, so none (tests/test_command_writes.py reads them from the library's marks).
+    assert facts.write_commands == frozenset()
 
 
 def test_a_broken_workflow_table_is_an_error(tmp_path):
@@ -226,8 +229,9 @@ def test_a_named_table_that_is_missing_or_wrong_is_an_error(tmp_path):
 def test_identifier_patterns_come_from_the_workflow_when_the_table_has_none(tmp_path):
     (tmp_path / "table.py").write_text(textwrap.dedent(TABLE_MODULE))
     (tmp_path / "_commands").mkdir()
-    (tmp_path / "_commands" / "_split.py").write_text(
-        "import re\nidentifier_patterns = [re.compile(r'T-\\d+')]\n")
+    (tmp_path / "_commands" / "_workflow.py").write_text(
+        "import re\n\n\nclass Context:\n    identifier_patterns = [re.compile(r'T-\\d+')]\n")
     _, facts = load_policy(str(tmp_path), reference="table.py")
-    assert facts.id_patterns == (r"T-\d+",)
+    # the compiled patterns themselves, so their flags are kept (bd fix-ftdl.6.4)
+    assert [p.pattern for p in facts.id_patterns] == [r"T-\d+"]
     assert facts.looks_like_id("T-12") and not facts.looks_like_id("x T-12")

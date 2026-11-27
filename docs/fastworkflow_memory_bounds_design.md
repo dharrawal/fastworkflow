@@ -225,7 +225,7 @@ that keys only off the root misses it — which is why §11.2 anchors on "root i
 `messaging_app_4` has no `startup.py`, so it acquires its context only when an explicit
 `set_root_context` command runs, which is the "becomes pinned mid-session" path.
 
-`Workflow.__init__` starts with `_root_command_context = None` (`fastworkflow/workflow.py:160`), and the
+`Workflow.__init__` starts with `_root_command_context = None` (`fastworkflow/core/workflow.py:160`), and the
 root setter also populates `_current_command_context` (`workflow.py:216-217`).
 
 **What the conditional scope actually is, now that it has been built.** Release C's bound applies to any
@@ -1157,8 +1157,8 @@ unless the workflow declares it". That was reversed on 2026-08-05 after review, 
 one place where this document's earlier text described a system that was never built. The shipped model,
 specified in full in `docs/fastworkflow_serialization_hooks_design.md`:
 
-- **JSON-native `workflow.context` persists by default.** An author extends or overrides that through
-  an optional `_commands/_serialization.py`.
+- **JSON-native `workflow.context` persists by default.** (An optional `_commands/_serialization.py` to
+  extend or override that was specified, but nothing used it, and it was removed on 2026-11-22.)
 - **A command-context object is serialized by an author-supplied hook**, and that hook is what makes a
   session evictable at all — it is the larger of the hook's two jobs. `get_state`/`from_state` are
   optional classmethods on the `Context` class the author already writes at
@@ -1699,9 +1699,9 @@ Invariant 17 separately forbids holding `registry._lock` across the same I/O.
 >
 > | Concern | Module |
 > |---|---|
-> | Strict serializer | `fastworkflow/state_serialization.py` |
-> | Author serialization hooks, anchor + locators, trichotomy | `fastworkflow/serialization_hooks.py` |
-> | Checkpoint records, identity, generations, retention | `fastworkflow/checkpoint_store.py` |
+> | Strict serializer | `fastworkflow/session/state_serialization.py` |
+> | Author serialization hooks, anchor + locators, trichotomy | `fastworkflow/session/serialization_hooks.py` |
+> | Checkpoint records, identity, generations, retention | `fastworkflow/session/checkpoint_store.py` |
 > | Eligibility, retirement, restore, reconciliation, startup states | `fastworkflow/run_fastapi_mcp/checkpoint.py` |
 > | Leases, union predicate, `MAX_LIVE_SESSIONS` resolver | `fastworkflow/run_fastapi_mcp/utils.py` |
 > | Turn ownership, credential install, startup commit | `fastworkflow/run_fastapi_mcp/turns.py` |
@@ -1730,7 +1730,7 @@ Invariant 17 separately forbids holding `registry._lock` across the same I/O.
   - `save_conversation_incremental` appends above a high-water mark `[R2-11]`.
 - `fastworkflow/run_fastapi_mcp/conversation_store.py`
   - `append_conversation_turns`, replacing full-list rewrite `[R2-11 · absorption]`.
-- `fastworkflow/workflow_execution_context.py`
+- `fastworkflow/engine/workflow_execution_context.py`
   - in-memory conversation window after durable record `[R2-11]`.
 - `fastworkflow/run_fastapi_mcp/__main__.py`
   - topic/summary generation reads the durable record, not windowed memory `[R2-11]`;
@@ -1751,11 +1751,11 @@ Invariant 17 separately forbids holding `registry._lock` across the same I/O.
   - three-way launch reconciliation `[R6, R2-6]`;
   - transactional retirement over one generation `[R2-10]`;
   - credential install under the accepted turn `[R2-14]`.
-- `fastworkflow/workflow_execution_context.py`
+- `fastworkflow/engine/workflow_execution_context.py`
   - remove the `default=str` round-trip; single strict serializer at this boundary `[R2-7]`;
   - declared-projection API and enumerated restorable fields `[R2-9, R2-12]`;
   - complete logical-turn and CME continuation records, or pin `[R2-8]`.
-- `fastworkflow/session_state_store.py`
+- `fastworkflow/session/session_state_store.py`
   - `key_prefix` on the factory `[R11]`;
   - injective channel-key encoding and identity binding `[R2-13]`;
   - generation stamp and commit record `[R2-10]`;

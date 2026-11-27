@@ -219,7 +219,7 @@ time `[A38]`.
 (same object). The serializer never mutates it (selective copy `[A20]`); an A44 test asserts
 the alias `[X11]`.
 
-**Exports** from `fastworkflow/__init__` (re-exported from `fastworkflow.turn`): `TurnResult`,
+**Exports** from `fastworkflow/__init__` (re-exported from `fastworkflow.core.turn`): `TurnResult`,
 `TurnStatus`, `CommandOutput`, `CommandResponse`, `FW_ARTIFACT_REF_KEY` `[A47]`.
 
 **Artifact-agnostic boundary.** The framework treats `CommandResponse.artifacts` as an opaque
@@ -502,7 +502,7 @@ of the above (including the previously undocumented `SESSION_STATE_STORE`).
 ## 14. Release train `[A14][X4][X6]`
 
 **v2.21 (minor, non-breaking — the xray artifact-surfacing fix; ~6 files):**
-`fastworkflow/turn.py` types + exports; WEC accumulator with the A30 lifecycle;
+`fastworkflow/core/turn.py` types + exports; WEC accumulator with the A30 lifecycle;
 `process_turn()` returning `TurnResult` (built from the *existing* `command_responses[0]` —
 no model collapse); A5.1 failure capture; A7 ask_user entries; eager artifact validation;
 generators emit new-style `command_response=`; `process_message` gains a

@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from fastworkflow import tracing
+from fastworkflow.observability import tracing
 from fastworkflow.observability import store as obs
 from fastworkflow.observability.comparison import (
     ATTRIBUTION_PASS,
@@ -97,7 +97,7 @@ def _execute_span(
         span_id=span_id,
         trace_id=turn_key,
         parent_span_id=parent_span_id,
-        name=tracing.SPAN_COMMAND_EXECUTE,
+        name=tracing.SPAN_COMMAND,
         kind=tracing.KIND_INTERNAL,
         channel_id="channel-1",
         command_name=command_name,

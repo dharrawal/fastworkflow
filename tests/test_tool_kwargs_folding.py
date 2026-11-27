@@ -9,11 +9,12 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
-from fastworkflow import tracing, workflow_agent
+from fastworkflow.observability import tracing
+from fastworkflow.agent import workflow_agent
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import (
     ParameterExtraction,
 )
-from fastworkflow.workflow_agent import fold_tool_kwargs
+from fastworkflow.agent.workflow_agent import fold_tool_kwargs
 from tests.test_multi_command_refusal import initialized_fastworkflow, session  # noqa: F401
 from tests.test_repeat_block import agent, responses  # noqa: F401
 from tests.test_tracing_phase1 import todo_workflow_path  # noqa: F401
@@ -237,14 +238,14 @@ def test_the_typed_text_of_a_folded_call_is_the_same_command(session, agent, res
 
 
 def test_the_step_span_declares_folded_command():
-    assert "folded_command" in tracing.SPAN_CONTRACTS[tracing.SPAN_AGENT_STEP].attributes
+    assert "folded_command" in tracing.SPAN_CONTRACTS[tracing.SPAN_STEP].attributes
 
 
 def test_the_react_loop_records_the_folded_command_on_the_step(
         initialized_fastworkflow, todo_workflow_path, monkeypatch):  # noqa: F811
     from types import SimpleNamespace
 
-    from fastworkflow.utils.react import fastWorkflowReAct
+    from fastworkflow.agent.react import fastWorkflowReAct
     from tests.test_tracing_phase1 import RecordingTraceSink, _make_agent_ctx
 
     sink = RecordingTraceSink()
@@ -273,7 +274,7 @@ def test_the_react_loop_records_the_folded_command_on_the_step(
     with tracing.host_scope(ctx):
         agent._run_loop({}, 0, {"q": "x"}, max_iters=5, exception_count=0)
 
-    steps = sink.named(tracing.SPAN_AGENT_STEP)
+    steps = sink.named(tracing.SPAN_STEP)
     assert steps[0].attributes["folded_command"] == "find_item name=Ann"
     assert steps[0].attributes["tool_args"] == {"command": "find_item", "name": "Ann"}
     assert "folded_command" not in steps[1].attributes

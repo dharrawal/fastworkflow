@@ -19,20 +19,29 @@ from dotenv import dotenv_values
 from pydantic import BaseModel, Field
 
 import fastworkflow
-from fastworkflow import NLUPipelineStage
-from fastworkflow import workflow_agent
+from fastworkflow.intent import intent_loop
+from fastworkflow.core import waiting
+from fastworkflow.parameters import parameter_clarification
+from fastworkflow.agent import workflow_agent
+from fastworkflow._workflows.command_metadata_extraction import parameter_reply
 from fastworkflow._workflows.command_metadata_extraction._commands import wildcard
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import (
     MISSING_VALUE_REPLY_THRESHOLD,
     classify_missing_value_reply,
     missing_value_reply_enabled,
 )
-from fastworkflow.utils.signatures import NOT_FOUND
+from fastworkflow.parameters.signatures import NOT_FOUND
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PE = NLUPipelineStage.PARAMETER_EXTRACTION
 PENDING_COMMAND = "ChatRoom/set_current_user"
 QUESTION_PREFIX = "PARAMETER EXTRACTION ERROR FOR COMMAND"
+
+
+@pytest.fixture(autouse=True)
+def _framework(setup_test_environment):
+    """The reply is read by the intent loop's reader with the plain utterances of abort and you_misunderstood, which
+    come from the CME's real command definitions: the framework is initialised."""
+
 
 
 class Params(BaseModel):
@@ -68,8 +77,7 @@ class _Workflow:
 
     def end_command_processing(self) -> None:
         self.context.pop("command", None)
-        self.context.pop("stored_parameters", None)
-        self.context["NLU_Pipeline_Stage"] = NLUPipelineStage.INTENT_DETECTION
+        waiting.port_of(self.context).clear()
 
 
 def _app_workflow(run_as_agent: bool = False) -> SimpleNamespace:
@@ -79,15 +87,17 @@ def _app_workflow(run_as_agent: bool = False) -> SimpleNamespace:
                            root=None)
 
 
-def _pending(app_workflow=None, stored=None) -> _Workflow:
+def _pending(app_workflow=None) -> _Workflow:
     """A session in the PARAMETER_EXTRACTION stage with one missing field, as the prompt left it."""
+    loop = parameter_clarification.ParameterLoop(
+        command=PENDING_COMMAND, kind=parameter_clarification.KIND_EXECUTION, open=["user_name"], asks=1,
+        question=f"PARAMETER EXTRACTION ERROR FOR COMMAND '{PENDING_COMMAND}'\nMissing parameter values: user_name")
     context = {
         "app_workflow": app_workflow or _app_workflow(),
-        "NLU_Pipeline_Stage": PE,
         "command_name": PENDING_COMMAND,
         "command": f"{PENDING_COMMAND} for the team",
-        "stored_parameters": stored if stored is not None else Params.model_construct(user_name=NOT_FOUND),
     }
+    parameter_clarification.store(context, loop)
     return _Workflow(context)
 
 
@@ -173,10 +183,32 @@ def test_agent_mode_makes_no_call(monkeypatch, jev_on):
     predictor = _Predict("wait", 0.99)
     _classifier(monkeypatch, predictor)
     workflow = _pending(app_workflow=_app_workflow(run_as_agent=True))
-    intent, _ = wildcard._missing_value_reply_intent(
+    intent, _ = parameter_reply._missing_value_reply_intent(
         workflow, workflow.context["app_workflow"], PENDING_COMMAND, "hmm")
     assert intent == "answer"
     assert predictor.calls == []
+
+
+def test_a_persons_slash_reply_in_an_agent_session_is_read(monkeypatch, jev_on):
+    """The replier decides, not the session: a person's "/" message in an agent session is assistant mode, and Jev reads
+    their reply (the agent's own tool call, above, is not read)."""
+    predictor = _Predict("wait", 0.99)
+    _classifier(monkeypatch, predictor)
+    workflow = _pending(app_workflow=_app_workflow(run_as_agent=True))
+    workflow.context[waiting.ASSISTANT_KEY] = True      # the round began with a "/" message
+    assert waiting.port_of(workflow.context).assistant
+    intent, _ = parameter_reply._missing_value_reply_intent(
+        workflow, workflow.context["app_workflow"], PENDING_COMMAND, "hmm")
+    assert intent == "wait"
+    assert len(predictor.calls) == 1
+
+
+def test_the_audience_is_the_replier_not_the_session():
+    from fastworkflow.parameters import ask
+    agent_session = {"run_as_agent": True}
+    assert ask.audience_of(agent_session) == ask.AGENT
+    assert ask.audience_of(agent_session, assistant=True) == ask.HUMAN
+    assert ask.audience_of({"run_as_agent": False}) == ask.HUMAN
 
 
 def test_the_off_switch_makes_no_call(monkeypatch, jev_on):
@@ -184,7 +216,7 @@ def test_the_off_switch_makes_no_call(monkeypatch, jev_on):
     predictor = _Predict("wait", 0.99)
     _classifier(monkeypatch, predictor)
     workflow = _pending()
-    assert wildcard._missing_value_reply_intent(
+    assert parameter_reply._missing_value_reply_intent(
         workflow, workflow.context["app_workflow"], PENDING_COMMAND, "hmm")[0] == "answer"
     assert predictor.calls == []
 
@@ -192,9 +224,9 @@ def test_the_off_switch_makes_no_call(monkeypatch, jev_on):
 def test_nothing_pending_makes_no_call(monkeypatch, jev_on):
     predictor = _Predict("wait", 0.99)
     _classifier(monkeypatch, predictor)
-    workflow = _pending(stored=None)
-    del workflow.context["stored_parameters"]
-    assert wildcard._missing_value_reply_intent(
+    workflow = _pending()
+    parameter_clarification.clear(workflow.context)
+    assert parameter_reply._missing_value_reply_intent(
         workflow, workflow.context["app_workflow"], PENDING_COMMAND, "hmm")[0] == "answer"
     assert predictor.calls == []
 
@@ -202,25 +234,14 @@ def test_nothing_pending_makes_no_call(monkeypatch, jev_on):
 # ---- the dispatch in ResponseGenerator.__call__ ---------------------------------------------
 
 class _CommandNamePrediction:
-    """Stand-in for the CME intent model: the pending command is what the stage already holds."""
+    """Stand-in for the CME intent model. While a command is pending the reply is read by the extraction stage and
+    the intent model is not asked at all; asking it here is a failure."""
 
     def __init__(self, workflow):
         pass
 
-    def predict(self, context_name, command, stage):
-        return SimpleNamespace(error_msg=None, is_cme_command=False, command_name=PENDING_COMMAND,
-                               routing_hint=None, answered_bare_value=False)
-
-
-class _NoMatchPrediction(_CommandNamePrediction):
-    """Matches the pending command while it is pending, and matches nothing in intent detection,
-    where a reply that is a different request is read again."""
-
-    def predict(self, context_name, command, stage):
-        if stage == PE:
-            return super().predict(context_name, command, stage)
-        return SimpleNamespace(error_msg="no command matches", is_cme_command=False, command_name=None,
-                               routing_hint=None, answered_bare_value=False)
+    def predict(self, command):
+        raise AssertionError(f"the intent model was asked about {command!r} while a command was pending")
 
 
 def _executor(monkeypatch, recorded: list):
@@ -242,15 +263,19 @@ def test_wait_keeps_the_pending_round(monkeypatch, jev_on):
     recorded: list = []
     _executor(monkeypatch, recorded)
     workflow = _pending()
-    stored = workflow.context["stored_parameters"]
+    stored = waiting.port_of(workflow.context).get()
 
     output = _reply(monkeypatch, workflow, "hold on, checking")
 
     assert output.handled is False and output.routed is False
-    assert output.response.startswith("OK, take your time.\nMissing parameter values: ")
+    # The question comes back as it was, under one line, as on the plan path (bd fix-ftdl.7.8, D9).
+    question = parameter_clarification.ParameterLoop.from_state(stored.payload["loop"]).question
+    assert question and output.response == f"OK, take your time.\n\n{question}"
     assert "user_name" in output.response
-    assert workflow.context["NLU_Pipeline_Stage"] == PE
-    assert workflow.context["stored_parameters"] is stored
+    assert intent_loop.waiting_for(workflow.context) == intent_loop.WAITING_PARAMETERS
+    # The round is untouched; the record only notes the first wait in a row (fix-b3w2: ``waited``).
+    held = waiting.port_of(workflow.context).get()
+    assert held.payload["loop"] == stored.payload["loop"] and held.payload["waited"] == 1
     assert workflow.context["command_name"] == PENDING_COMMAND
     assert recorded == []
 
@@ -270,7 +295,8 @@ def test_the_next_real_answer_after_a_wait_completes_the_command(monkeypatch, je
 
         def extract(self):
             # The merge itself needs the extraction LLM: the stand-in ends the turn here.
-            return SimpleNamespace(parameters_are_valid=False, error_msg="stop here", cmd_parameters=None)
+            return SimpleNamespace(parameters_are_valid=False, error_msg="stop here", cmd_parameters=None,
+                                   parameter_request=None)
 
     monkeypatch.setattr(wildcard, "ParameterExtraction", _Extraction)
     workflow = _pending()
@@ -291,8 +317,8 @@ def test_abort_runs_the_abort_command_and_clears_the_round(monkeypatch, jev_on):
     assert [a.command_name for a in recorded] == ["ErrorCorrection/abort"]
     assert output.handled is True and output.routed is True
     assert output.response == "ran ErrorCorrection/abort"
-    assert "stored_parameters" not in workflow.context
-    assert workflow.context["NLU_Pipeline_Stage"] == NLUPipelineStage.INTENT_DETECTION
+    assert parameter_clarification.pending(workflow.context) is None
+    assert intent_loop.waiting_for(workflow.context) is None
 
 
 def test_misunderstood_runs_you_misunderstood_in_its_stage(monkeypatch, jev_on):
@@ -300,13 +326,15 @@ def test_misunderstood_runs_you_misunderstood_in_its_stage(monkeypatch, jev_on):
     monkeypatch.setattr(wildcard, "CommandNamePrediction", _CommandNamePrediction)
     recorded: list = []
     _executor(monkeypatch, recorded)
+    # The misunderstanding question's candidates are read from the (fake) application workflow: none here.
+    monkeypatch.setattr(wildcard.intent_loop, "command_choices", lambda app_workflow: [])
     workflow = _pending()
 
     output = _reply(monkeypatch, workflow, "that is not what I meant")
 
     assert [a.command_name for a in recorded] == ["ErrorCorrection/you_misunderstood"]
-    assert output.handled is False and output.routed is True
-    assert workflow.context["NLU_Pipeline_Stage"] == NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION
+    assert output.handled is True and output.routed is True     # a CME command's own answer (fix-6jvz)
+    assert intent_loop.waiting_for(workflow.context) == intent_loop.WAITING_INTENT
     assert workflow.context["command"] == "that is not what I meant"
 
 
@@ -315,34 +343,52 @@ class _ReachedIntentDetection(Exception):
 
 
 class _IntentStage(_CommandNamePrediction):
-    """Matches the pending command while it is pending; in intent detection it stops the turn and
-    reports the reply it was given. Routing a fresh request past this point needs the real command
-    registry, which these tests do not load."""
+    """In intent detection it stops the turn and reports the reply it was given. Routing a fresh request past this
+    point needs the real command registry, which these tests do not load."""
 
-    def predict(self, context_name, command, stage):
-        if stage == PE:
-            return super().predict(context_name, command, stage)
+    def predict(self, command):
         raise _ReachedIntentDetection(command)
 
 
-def test_different_command_leaves_the_pending_round_and_reads_the_reply_as_a_request(monkeypatch, jev_on):
+def test_a_different_request_is_not_run_and_is_asked_once_more(monkeypatch, jev_on):
+    """Decision B (bd fix-ftdl.8.10): the question says only the answer is read, so a reply read as a different request
+    is not run. It counts as a reply with no progress: the question comes back once, saying the reply was not run."""
     _classifier(monkeypatch, _Predict("different_command", 0.9))
-    monkeypatch.setattr(wildcard, "CommandNamePrediction", _IntentStage)
-    # The fresh request is read from its start: no registry lookups before the intent model is asked.
-    from fastworkflow import workflow_agent as wa
-    from fastworkflow import context_navigation
-    monkeypatch.setattr(wa, "core_command_names", lambda: [])
-    monkeypatch.setattr(context_navigation, "command_on_path", lambda app_workflow, name: None)
+    # The intent model is never asked: the reply does not reach intent detection.
+    monkeypatch.setattr(wildcard, "CommandNamePrediction", _CommandNamePrediction)
+    recorded: list = []
+    _executor(monkeypatch, recorded)
+    workflow = _pending()
+    stored = waiting.port_of(workflow.context).get()
+    question = parameter_clarification.ParameterLoop.from_state(stored.payload["loop"]).question
+
+    output = _reply(monkeypatch, workflow, "show me the users")
+
+    assert output.handled is False and output.routed is False and output.reply_intent == "different_command"
+    assert "read as a new request" in output.response and "not run" in output.response
+    assert "cancel" in output.response and output.response.endswith(question)
+    assert intent_loop.waiting_for(workflow.context) == intent_loop.WAITING_PARAMETERS
+    held = parameter_clarification.pending(workflow.context)
+    assert held.stalled == 1 and held.question == question
+    assert workflow.context["command_name"] == PENDING_COMMAND
+    assert recorded == []
+
+
+def test_a_second_different_request_in_a_row_ends_the_command_naming_what_is_missing(monkeypatch, jev_on):
+    _classifier(monkeypatch, _Predict("different_command", 0.9))
+    monkeypatch.setattr(wildcard, "CommandNamePrediction", _CommandNamePrediction)
     recorded: list = []
     _executor(monkeypatch, recorded)
     workflow = _pending()
 
-    with pytest.raises(_ReachedIntentDetection) as reached:
-        _reply(monkeypatch, workflow, "show me the users")
+    _reply(monkeypatch, workflow, "show me the users")
+    output = _reply(monkeypatch, workflow, "list the rooms")
 
-    assert str(reached.value.args[0]) == "show me the users"
-    assert "stored_parameters" not in workflow.context
-    assert workflow.context["NLU_Pipeline_Stage"] == NLUPipelineStage.INTENT_DETECTION
+    assert output.handled is True and output.routed is False and output.reply_intent == "different_command"
+    assert "was not run" in output.response and "user_name" in output.response
+    assert "read as a new request" in output.response and "own message" in output.response
+    assert parameter_clarification.pending(workflow.context) is None
+    assert intent_loop.waiting_for(workflow.context) is None
     assert recorded == []
 
 
@@ -386,9 +432,9 @@ def test_real_jev_reads_hesitation_and_answers(jev_env, reply, expected):
 # ---------------------------------------------------------------------------
 from pathlib import Path as _Path
 
-from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import ParameterExtraction
-from fastworkflow.utils.signatures import INVALID_FLOAT_VALUE
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import park
+from fastworkflow.parameters.signatures import INVALID_FLOAT_VALUE
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 _HELLO = str(_Path(__file__).parent.joinpath("hello_world_workflow").resolve())
 _PENDING = "add_two_numbers"
@@ -398,7 +444,7 @@ _PENDING = "add_two_numbers"
 def _assistant_session(tmp_path, monkeypatch):
     """An assistant-mode session left waiting for add_two_numbers' second number."""
     fastworkflow.init({"FASTWORKFLOW_STATE_ROOT": str(tmp_path / "workflow_contexts")})
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     RoutingRegistry.clear_registry()
     ctx = WorkflowExecutionContext(run_as_agent=False, session_key="jd9o6-e2e")
@@ -406,11 +452,10 @@ def _assistant_session(tmp_path, monkeypatch):
     params_class = fastworkflow.RoutingRegistry.get_definition(ctx.app_workflow.folderpath).get_command_class(
         _PENDING, fastworkflow.ModuleType.COMMAND_PARAMETERS_CLASS)
     cme = ctx._cme_workflow.context
-    cme["NLU_Pipeline_Stage"] = NLUPipelineStage.PARAMETER_EXTRACTION
     cme["command"] = "add 5 and something"
     cme["command_name"] = _PENDING
-    ParameterExtraction._store_parameters(
-        ctx._cme_workflow, params_class.model_construct(first_num=5.0, second_num=INVALID_FLOAT_VALUE))
+    park(ctx._cme_workflow, _PENDING, params_class.model_construct(first_num=5.0, second_num=INVALID_FLOAT_VALUE),
+         request_text="add 5 and something")
     yield ctx
     RoutingRegistry.clear_registry()
 
@@ -431,7 +476,7 @@ def _jev_says(monkeypatch, intent: str, probability: float = 0.95):
 
 def _cme_state(ctx):
     cme = ctx._cme_workflow.context
-    return cme.get("NLU_Pipeline_Stage"), ParameterExtraction._get_stored_parameters(ctx._cme_workflow)
+    return intent_loop.waiting_for(cme), parameter_clarification.pending(cme)
 
 
 def test_e2e_a_hesitation_keeps_the_pending_round(_assistant_session, monkeypatch):
@@ -440,22 +485,23 @@ def test_e2e_a_hesitation_keeps_the_pending_round(_assistant_session, monkeypatc
     text = str(out.model_dump())
     assert "OK, take your time." in text and "second_num" in text, text
     stage, stored = _cme_state(_assistant_session)
-    assert stage == NLUPipelineStage.PARAMETER_EXTRACTION
-    assert stored is not None and stored.first_num == 5.0
+    assert stage == intent_loop.WAITING_PARAMETERS
+    assert stored is not None and stored.values["first_num"] == 5.0 and stored.open == ["second_num"]
 
 
 def test_e2e_an_abort_leaves_the_pending_round(_assistant_session, monkeypatch):
     _jev_says(monkeypatch, "abort")
     _assistant_session.process_turn("never mind, forget it")
     stage, stored = _cme_state(_assistant_session)
-    assert stage == NLUPipelineStage.INTENT_DETECTION
+    assert stage is None
     assert stored is None
 
 
-def test_e2e_a_different_request_runs_as_a_fresh_request(_assistant_session, monkeypatch):
+def test_e2e_a_different_request_is_not_run_and_the_question_stays(_assistant_session, monkeypatch):
     _jev_says(monkeypatch, "different_command")
     out = _assistant_session.process_turn("what can i do?")
+    text = str(out.model_dump())
+    assert "read as a new request" in text and "second_num" in text, text
     stage, stored = _cme_state(_assistant_session)
-    assert stored is None
-    assert stage == NLUPipelineStage.INTENT_DETECTION
-    assert "PARAMETER EXTRACTION ERROR" not in str(out.model_dump())
+    assert stage == intent_loop.WAITING_PARAMETERS
+    assert stored is not None and stored.values["first_num"] == 5.0 and stored.stalled == 1

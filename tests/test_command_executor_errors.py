@@ -1,15 +1,36 @@
 import uuid
+from types import SimpleNamespace
 
 import fastworkflow
 import pytest
 
-from fastworkflow import ModuleType, tracing
-from fastworkflow.command_executor import CommandExecutor, CommandNotFoundError
+from fastworkflow import ModuleType
+from fastworkflow.observability import tracing
+from fastworkflow.engine.command_executor import CommandExecutor, CommandNotFoundError
+
+
+#: A placeholder workflow folder for these tests (they patch the routing registry, so it holds nothing). It must not be
+#: the fastworkflow package: that is not a workflow, and loading it writes artefacts into the installed package.
+_WORKFLOW_FOLDER = ""
+
+
+@pytest.fixture(autouse=True)
+def _placeholder_workflow_folder(tmp_path):
+    global _WORKFLOW_FOLDER
+    folder = tmp_path / "errs_workflow"
+    folder.mkdir()
+    _WORKFLOW_FOLDER = str(folder)
+    yield
 
 
 # ---------------------------------------------------------------------------
 # Helpers to monkeypatch registry and extractor
 # ---------------------------------------------------------------------------
+
+
+#: What the stand-in registries answer for the command directory: no command, so no approval mark. The approval gate
+#: reads it before a command runs, and a call it cannot check is not run (it fails closed, bd fix-ftdl.8.17).
+NO_COMMAND_DIRECTORY = SimpleNamespace(map_command_2_metadata={})
 
 
 class FaultyRG:  # noqa: D401
@@ -18,6 +39,7 @@ class FaultyRG:  # noqa: D401
 
 
 class DummyCRD:  # minimal stand-in for RoutingDefinition
+    command_directory = NO_COMMAND_DIRECTORY
     def get_command_class(self, name, module_type):  # noqa: D401
         # Only the response generator is faulty. Returning FaultyRG for
         # COMMAND_PARAMETERS_CLASS would make perform_action treat it as a
@@ -25,6 +47,14 @@ class DummyCRD:  # minimal stand-in for RoutingDefinition
         if name == "fail" and module_type == ModuleType.RESPONSE_GENERATION_INFERENCE:
             return FaultyRG
         return None
+
+    # perform_action finds the scope that owns the command (intent_loop.choose), which reads the
+    # command names; the stand-in registry answers for every workflow, the CME's included.
+    def get_command_names(self, context):  # noqa: D401
+        return ["fail"]
+
+    def get_planning_command_names(self, context):  # noqa: D401
+        return []
 
 
 def _monkey_registry(monkeypatch):
@@ -41,7 +71,7 @@ def test_perform_action_wraps_error(monkeypatch):
     _monkey_registry(monkeypatch)
 
     workflow = fastworkflow.Workflow.create(
-        workflow_folderpath=fastworkflow.get_fastworkflow_package_path(),
+        workflow_folderpath=_WORKFLOW_FOLDER,
         workflow_id_str="errs_pa",
     )
 
@@ -77,7 +107,7 @@ def test_invoke_command_wraps_error(monkeypatch):
     _monkey_registry(monkeypatch)
 
     from fastworkflow import CommandOutput, CommandResponse
-    from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+    from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
     # Stand in for intent detection. Everything below the CME hop is real: this
     # only names the command the way a successful extraction would, so the
@@ -107,7 +137,7 @@ def test_invoke_command_wraps_error(monkeypatch):
     monkeypatch.setattr(CommandExecutor, "perform_action", _stub_cme)
 
     app_workflow = fastworkflow.Workflow.create(
-        workflow_folderpath=fastworkflow.get_fastworkflow_package_path(),
+        workflow_folderpath=_WORKFLOW_FOLDER,
         workflow_id_str="err_ivk",
     )
     ctx = WorkflowExecutionContext(run_as_agent=False, session_key="err_ivk")
@@ -160,6 +190,7 @@ def _raising_registry(monkeypatch, exc_factory):
             raise exc_factory()
 
     class RaisingCRD:
+        command_directory = NO_COMMAND_DIRECTORY
         contexts = {"*": ["fail"]}
 
         def get_command_class(self, name, module_type):
@@ -204,7 +235,7 @@ def _stub_cme_naming(command_name: str):
 
 def _failing_ctx(monkeypatch, exc_factory):
     """A traced WEC with an open turn whose `fail` command raises."""
-    from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+    from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
     fastworkflow.init({})
     _raising_registry(monkeypatch, exc_factory)
@@ -213,7 +244,7 @@ def _failing_ctx(monkeypatch, exc_factory):
     )
 
     app_workflow = fastworkflow.Workflow.create(
-        workflow_folderpath=fastworkflow.get_fastworkflow_package_path(),
+        workflow_folderpath=_WORKFLOW_FOLDER,
         workflow_id_str=f"err_identity_{uuid.uuid4().hex}",
     )
     sink = RecordingTraceSink()
@@ -232,7 +263,7 @@ def _failing_ctx(monkeypatch, exc_factory):
 
 def test_annotate_exception_keeps_the_first_writer():
     """Nested dispatch unwinds outward; the innermost identity must survive."""
-    from fastworkflow.command_executor import _annotate_exception
+    from fastworkflow.engine.command_executor import _annotate_exception
 
     exc = RuntimeError("boom")
 
@@ -270,10 +301,36 @@ def test_error_span_names_the_command_and_context(monkeypatch):
         ctx.pop_active_workflow()
         ctx.close()
 
-    span = sink.named(tracing.SPAN_COMMAND_EXECUTE)[-1]
+    span = sink.named(tracing.SPAN_COMMAND)[-1]
     assert span.status == tracing.STATUS_ERROR
     assert span.command_name == "fail"
     assert span.context == expected_context
+
+
+def test_error_span_records_success_false_and_control_signals_do_not(monkeypatch):
+    """fix-zl5b: a failed dispatch says success=False like the normal path
+    does; a control signal is not a failure and records no success."""
+    from fastworkflow.engine.workflow_execution_context import CommandCancelledError
+
+    ctx, sink, _wf = _failing_ctx(monkeypatch, lambda: RuntimeError("boom"))
+    try:
+        with pytest.raises(RuntimeError):
+            CommandExecutor.invoke_command(ctx, "fail")
+    finally:
+        ctx.pop_active_workflow()
+        ctx.close()
+    span = sink.named(tracing.SPAN_COMMAND)[-1]
+    assert span.attributes["success"] is False
+
+    ctx, sink, _wf = _failing_ctx(monkeypatch, lambda: CommandCancelledError("cancelled"))
+    try:
+        with pytest.raises(CommandCancelledError):
+            CommandExecutor.invoke_command(ctx, "fail")
+    finally:
+        ctx.pop_active_workflow()
+        ctx.close()
+    span = sink.named(tracing.SPAN_COMMAND)[-1]
+    assert "success" not in span.attributes
 
 
 def test_failure_output_names_the_command_and_joins_its_record(monkeypatch):
@@ -282,7 +339,7 @@ def test_failure_output_names_the_command_and_joins_its_record(monkeypatch):
     outcome.command_call_id == span attribute == ExecutionRecordRef row, the
     same invariant tests/test_dispatch_path_conformance.py pins for success.
     """
-    from fastworkflow.workflow_agent import _execute_workflow_query
+    from fastworkflow.agent.workflow_agent import _execute_workflow_query
 
     ctx, sink, app_workflow = _failing_ctx(monkeypatch, lambda: RuntimeError("boom"))
     try:
@@ -301,14 +358,14 @@ def test_failure_output_names_the_command_and_joins_its_record(monkeypatch):
 
     call_id = failure_output.command_call_id
     assert call_id
-    span = sink.named(tracing.SPAN_COMMAND_EXECUTE)[-1]
+    span = sink.named(tracing.SPAN_COMMAND)[-1]
     assert span.attributes[tracing.ATTR_COMMAND_CALL_ID] == call_id
     assert [r for r in records if r.command_call_id == call_id]
 
 
 def test_control_signal_is_neither_stamped_nor_recorded(monkeypatch):
     """Cancellation is not a failed dispatch: it produces no outcome to join."""
-    from fastworkflow.workflow_execution_context import CommandCancelledError
+    from fastworkflow.engine.workflow_execution_context import CommandCancelledError
 
     ctx, _sink, _wf = _failing_ctx(
         monkeypatch, lambda: CommandCancelledError("cancelled")
@@ -355,6 +412,7 @@ def _perform_action_registry(monkeypatch, *, with_parameters_class):
     """
 
     class CRD:
+        command_directory = NO_COMMAND_DIRECTORY
         contexts = {"*": ["fail"]}
 
         def get_command_class(self, name, module_type):
@@ -366,6 +424,13 @@ def _perform_action_registry(monkeypatch, *, with_parameters_class):
                 return _NoParams if with_parameters_class else None
             return None
 
+        # read by perform_action's search for the scope that owns the command (intent_loop.choose)
+        def get_command_names(self, context):
+            return ["fail"]
+
+        def get_planning_command_names(self, context):
+            return []
+
     monkeypatch.setattr(
         fastworkflow.RoutingRegistry, "get_definition", lambda _: CRD()
     )
@@ -374,7 +439,7 @@ def _perform_action_registry(monkeypatch, *, with_parameters_class):
 def _perform_action_workflow():
     fastworkflow.init({})
     return fastworkflow.Workflow.create(
-        workflow_folderpath=fastworkflow.get_fastworkflow_package_path(),
+        workflow_folderpath=_WORKFLOW_FOLDER,
         workflow_id_str=f"pa_identity_{uuid.uuid4().hex}",
     )
 
@@ -420,7 +485,7 @@ def test_perform_action_carries_identity_out_when_the_command_takes_parameters(
             return True, "", None, None
 
     monkeypatch.setattr(
-        "fastworkflow.command_executor.InputForParamExtraction", _Extraction
+        "fastworkflow.engine.command_executor.InputForParamExtraction", _Extraction
     )
 
     with pytest.raises(RuntimeError, match="boom") as excinfo:
@@ -439,12 +504,13 @@ def test_a_cme_hop_failure_reaches_the_failure_output_and_the_error_span(monkeyp
     for what ran, and the CME workflow is the honest place it ran. Before the
     seam both were empty on the output and null on the span.
     """
-    from fastworkflow.workflow_agent import _execute_workflow_query
-    from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+    from fastworkflow.agent.workflow_agent import _execute_workflow_query
+    from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
     fastworkflow.init({})
 
     class CRD:
+        command_directory = NO_COMMAND_DIRECTORY
         contexts = {"*": ["anything"]}
 
         def get_command_class(self, name, module_type):
@@ -464,12 +530,19 @@ def test_a_cme_hop_failure_reaches_the_failure_output_and_the_error_span(monkeyp
         def get_planning_command_names(self, context):
             return []
 
+        # read with the names (context_navigation.scope_command_names): a command with no Signature runs only as an
+        # action and is in no scope's names
+        class command_directory:
+            @staticmethod
+            def runs_only_as_action(name):
+                return False
+
     monkeypatch.setattr(
         fastworkflow.RoutingRegistry, "get_definition", lambda _: CRD()
     )
 
     app_workflow = fastworkflow.Workflow.create(
-        workflow_folderpath=fastworkflow.get_fastworkflow_package_path(),
+        workflow_folderpath=_WORKFLOW_FOLDER,
         workflow_id_str=f"pa_cme_{uuid.uuid4().hex}",
     )
     sink = RecordingTraceSink()
@@ -490,7 +563,7 @@ def test_a_cme_hop_failure_reaches_the_failure_output_and_the_error_span(monkeyp
     assert failure_output.context == ctx.cme_workflow._current_command_context_displayname
     assert failure_output.command_call_id
 
-    span = sink.named(tracing.SPAN_COMMAND_EXECUTE)[-1]
+    span = sink.named(tracing.SPAN_COMMAND)[-1]
     assert span.command_name == "wildcard"
     assert span.context == failure_output.context
 
@@ -514,7 +587,7 @@ def test_a_hostile_getattr_cannot_mask_the_real_exception():
     destroyed and replaced by one about the reporting. The write was guarded
     from the start; the read was not, which is the same hole one line over.
     """
-    from fastworkflow.command_executor import _annotate_exception, _annotation
+    from fastworkflow.engine.command_executor import _annotate_exception, _annotation
 
     exc = _HostileAttrs("the real failure")
     _annotate_exception(exc, _fw_command_name="Ctx/cmd")   # must not raise
@@ -538,8 +611,8 @@ def test_a_hostile_getattr_cannot_mask_the_real_exception():
 
 
 def _control_signals():
-    from fastworkflow.utils.react import AskUserSuspend
-    from fastworkflow.workflow_execution_context import CommandCancelledError
+    from fastworkflow.engine.suspension import AskUserSuspend
+    from fastworkflow.engine.workflow_execution_context import CommandCancelledError
 
     return [
         pytest.param(lambda: CommandCancelledError("cancelled"), id="cancelled"),
@@ -557,7 +630,7 @@ def test_a_control_signal_never_closes_its_span_as_an_error(monkeypatch, exc_fac
         ctx.pop_active_workflow()
         ctx.close()
 
-    span = sink.named(tracing.SPAN_COMMAND_EXECUTE)[-1]
+    span = sink.named(tracing.SPAN_COMMAND)[-1]
     assert span.status == tracing.STATUS_CANCELLED
     assert span.status != tracing.STATUS_ERROR
 
@@ -574,7 +647,7 @@ def test_the_two_decisions_agree_for_every_control_signal(monkeypatch, exc_facto
         ctx.pop_active_workflow()
         ctx.close()
 
-    span = sink.named(tracing.SPAN_COMMAND_EXECUTE)[-1]
+    span = sink.named(tracing.SPAN_COMMAND)[-1]
     assert not records
     assert getattr(excinfo.value, "_fw_call_id", None) is None
     assert span.status != tracing.STATUS_ERROR
@@ -592,8 +665,8 @@ def test_the_status_mapping_is_a_single_shared_function():
     Pinned as a unit test on the helper so the intent survives even if a call
     site is rewritten: control signals are not failures, everything else is.
     """
-    from fastworkflow.utils.react import AskUserSuspend
-    from fastworkflow.workflow_execution_context import CommandCancelledError
+    from fastworkflow.engine.suspension import AskUserSuspend
+    from fastworkflow.engine.workflow_execution_context import CommandCancelledError
 
     assert tracing.status_for_dispatch_exception(AskUserSuspend("q")) == (
         tracing.STATUS_CANCELLED
@@ -615,7 +688,7 @@ def test_a_span_status_of_awaiting_user_is_never_produced_for_a_dispatch():
     status, and the only thing the SPA tests for (it reads `turn.status`, never
     `span.status`). A span status describes that span's own outcome.
     """
-    from fastworkflow.utils.react import AskUserSuspend
+    from fastworkflow.engine.suspension import AskUserSuspend
 
     assert tracing.status_for_dispatch_exception(AskUserSuspend("q")) != (
         tracing.STATUS_AWAITING_USER
@@ -629,11 +702,11 @@ def test_the_agent_tool_span_is_closed_even_when_a_control_signal_escapes(
     """fix-ajv.21: AskUserSuspend used to unwind past this frame uncaught.
 
     The arm named only CommandCancelledError, so the other control signal — a
-    BaseException by design — closed no span. The fw.agent.tool_call span opened
+    BaseException by design — closed no span. The fw.agent.tool_call span (until bd fix-qjne.34) opened
     for the tool leaked onto the parenting stack: every later span in the turn
     nested under it, and it never got an end time or a status.
     """
-    from fastworkflow.workflow_agent import _execute_workflow_query
+    from fastworkflow.agent.workflow_agent import _execute_workflow_query
 
     ctx, sink, _wf = _failing_ctx(monkeypatch, exc_factory)
     try:
@@ -643,7 +716,11 @@ def test_the_agent_tool_span_is_closed_even_when_a_control_signal_escapes(
         ctx.pop_active_workflow()
         ctx.close()
 
-    tool_spans = sink.named(tracing.SPAN_AGENT_TOOL_CALL)
-    assert tool_spans, "the agent tool span must be emitted at all"
+    # The tool opens no span of its own any more (bd fix-qjne.34: its dispatch is recorded on its step); the command's
+    # fw.command span it reached is closed, cancelled, and nothing is left on the parenting stack.
+    assert not sink.named("fw.agent.tool_call")
+    tool_spans = sink.named(tracing.SPAN_COMMAND)
+    assert tool_spans, "the command span must be emitted at all"
     assert tool_spans[-1].status == tracing.STATUS_CANCELLED
     assert tool_spans[-1].status != tracing.STATUS_OPEN
+    assert ctx.trace_span_stack == []

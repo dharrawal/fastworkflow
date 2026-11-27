@@ -4,10 +4,10 @@ from unittest.mock import MagicMock
 
 import dspy
 
-from fastworkflow.turn import TurnStatus
-from fastworkflow.utils.react import fastWorkflowReAct
-from fastworkflow.workflow_execution_context import MAX_HANDOFFS
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.core.turn import TurnStatus
+from fastworkflow.agent.react import fastWorkflowReAct
+from fastworkflow.engine.workflow_execution_context import MAX_HANDOFFS
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 import pytest
 from tests.test_turn_result_capture import (  # noqa: F401 - shared fixtures
     _make_agent_ctx,
@@ -61,13 +61,13 @@ def _fake_progress_check(monkeypatch, text="DONE SUMMARY"):
         triggers.append(trigger)
         return text
 
-    monkeypatch.setattr("fastworkflow.workflow_agent.run_progress_check", fake)
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.run_progress_check", fake)
     return triggers
 
 
 def _split(monkeypatch, subtasks):
     monkeypatch.setattr(
-        "fastworkflow.workflow_agent.split_into_subtasks",
+        "fastworkflow.agent.workflow_agent.split_into_subtasks",
         lambda *args, **kwargs: list(subtasks),
     )
 
@@ -195,10 +195,9 @@ def test_exhausted_subtask_hands_off_to_a_continuation_matched_on_its_original_t
     ctx, _wf = _make_agent_ctx(todo_workflow_path, monkeypatch)
     triggers = _fake_progress_check(monkeypatch)
     templates = []
-    monkeypatch.setattr(
-        "fastworkflow.workflow_agent.planner_planning_command_for",
-        lambda text, folder, **_: templates.append(text) or ("", None),
-    )
+    from tests.conftest import script_plan
+
+    script_plan(monkeypatch, lambda text: templates.append(text))
     _split(monkeypatch, ["find X", "find Y"])
     agent = _agent_with_steps(["x partial", "x rest", "Y is there"], exhaust=lambda n: n == 1)
     _set_agents(ctx, agent)
@@ -458,8 +457,55 @@ def test_an_empty_run_answer_is_skipped_and_not_counted_as_a_part(
 
 
 def test_join_parts_labels_runs_and_drops_word_for_word_repeats():
-    from fastworkflow.workflow_execution_context import _join_parts
+    from fastworkflow.engine.workflow_execution_context import _join_parts
 
     assert _join_parts(["only"]) == "only"
     assert _join_parts(["a", "a", "b"]) == "Part 1 of 2:\na\n\nPart 2 of 2:\nb"
     assert _join_parts(["same", "same", "same"]) == "same"
+
+
+# ----------------------------------------------------------------------
+# Short headings for long sub-task sentences
+# ----------------------------------------------------------------------
+
+
+def test_heading_title_cases():
+    from fastworkflow.engine.workflow_execution_context import _heading_title
+
+    assert _heading_title("find X") == "find X"
+    # a long text with a clause break: cut at the first clause that has 3 words or more
+    long_text = "list the open orders for Ann. Then, for each one, " + "name every item " * 10
+    assert _heading_title(long_text) == "list the open orders for Ann"
+    # a break that leaves fewer than 3 words is skipped
+    assert _heading_title("Hi. list the open orders for Ann: then more") == "Hi. list the open orders for Ann"
+    # no clause: cut at a word boundary with an ellipsis, within the limit
+    run_on = " ".join(["word"] * 60)
+    cut = _heading_title(run_on)
+    assert cut.endswith("…") and len(cut) <= 80
+    assert cut[:-1].split() == ["word"] * len(cut[:-1].split())
+    assert _heading_title("x" * 200) == "x" * 79 + "…"
+    # whitespace and newlines collapse; a newline is a clause break
+    assert _heading_title("find   the\t  open   orders") == "find the open orders"
+    assert _heading_title("find the open orders\nthen sort them by date") == "find the open orders"
+    # never empty
+    assert _heading_title("  . . ") != ""
+    assert _heading_title("one. two") == "one. two"
+
+
+def test_long_subtask_text_gets_a_short_heading(
+    initialized_fastworkflow, todo_workflow_path, monkeypatch
+):
+    ctx, _wf = _make_agent_ctx(todo_workflow_path, monkeypatch)
+    long_x = "find X in the archive. " + "Then name every one of the matching entries in full. " * 6
+    _split(monkeypatch, [long_x, "find Y"])
+    agent = _agent_with_steps(["X is here", "Y is there"])
+    _set_agents(ctx, agent)
+
+    result = ctx.process_turn("find X and find Y")
+
+    assert result.status == TurnStatus.COMPLETED
+    assert result.answer.startswith("### 1. find X in the archive\nX is here")
+    assert "Then name every" not in result.answer
+    assert "### 2. find Y\nY is there" in result.answer
+    # the sub-task itself still runs with its full text
+    assert agent.calls[0]["user_query"] == long_x

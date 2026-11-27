@@ -39,9 +39,9 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow import tracing
-from fastworkflow.command_executor import CommandExecutor
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.observability import tracing
+from fastworkflow.engine.command_executor import CommandExecutor
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 from tests.todo_list_workflow.application.todo_manager import TodoListManager
 
@@ -60,7 +60,7 @@ def todo_workflow_path() -> str:
 @pytest.fixture
 def initialized_fastworkflow():
     fastworkflow.init({})
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     RoutingRegistry.clear_registry()
     yield
@@ -153,7 +153,7 @@ def test_direct_action_span_and_output_share_one_call_id(ctx, sink):
     """The id on the outcome is the id on the span that produced it."""
     ctx.process_action_turn(_action())
 
-    tool_call = sink.named(tracing.SPAN_AGENT_TOOL_CALL)[0]
+    tool_call = sink.named(tracing.SPAN_COMMAND)[0]
     call_id = tool_call.attributes[tracing.ATTR_COMMAND_CALL_ID]
 
     assert call_id, "the span carries no command_call_id"
@@ -173,7 +173,7 @@ def test_the_join_survives_turn_record_serialization(ctx, sink):
     turn_row, _artifacts = obs.serialize_turn_result(sink.turn_records[-1])
     recorded = turn_row["record_json"]
 
-    span_call_id = sink.named(tracing.SPAN_AGENT_TOOL_CALL)[0].attributes[
+    span_call_id = sink.named(tracing.SPAN_COMMAND)[0].attributes[
         tracing.ATTR_COMMAND_CALL_ID
     ]
     assert f'"command_call_id": "{span_call_id}"' in recorded
@@ -182,23 +182,22 @@ def test_the_join_survives_turn_record_serialization(ctx, sink):
 def test_prose_path_stamps_the_same_id_on_both_spans(
     initialized_fastworkflow, todo_workflow_path, tmp_path, sink, monkeypatch
 ):
-    """One command execution, two spans, one id.
+    """One command execution, one span, one id.
 
-    `fw.agent.tool_call` and the `fw.command.execute` nested inside it describe
-    the same execution, so a reader must not have to decide which id is "the"
-    id for that command.
+    Until bd fix-qjne.34 a `fw.agent.tool_call` and the `fw.command.execute` nested inside it described the same
+    execution and both carried the id; the direct path now records it once, on `fw.command`, so a reader never has to
+    decide which id is "the" id for that command.
     """
     ctx = _make_ctx(todo_workflow_path, tmp_path, sink)
     try:
         _nesting_cme_hop(monkeypatch, ctx.app_workflow)
         ctx.process_turn("list my todo lists")
 
-        execute = sink.named(tracing.SPAN_COMMAND_EXECUTE)[0]
-        tool_call = sink.named(tracing.SPAN_AGENT_TOOL_CALL)[0]
+        (execute,) = {span.span_id: span for span in sink.named(tracing.SPAN_COMMAND)}.values()
+        assert not sink.named("fw.agent.tool_call")
 
         call_id = execute.attributes[tracing.ATTR_COMMAND_CALL_ID]
         assert call_id
-        assert tool_call.attributes[tracing.ATTR_COMMAND_CALL_ID] == call_id
         assert ctx._turn_outputs[-1].command_call_id == call_id
     finally:
         with suppress(Exception):
@@ -217,7 +216,7 @@ def test_each_command_execution_gets_its_own_id(ctx, sink):
 
     ids = [
         span.attributes[tracing.ATTR_COMMAND_CALL_ID]
-        for span in sink.named(tracing.SPAN_AGENT_TOOL_CALL)
+        for span in sink.named(tracing.SPAN_COMMAND)
     ]
     assert len(ids) == 2
     assert len(set(ids)) == 2
@@ -231,7 +230,7 @@ def test_the_id_is_stable_across_a_re_emission_of_the_same_span(ctx, sink):
     second write disagree with the first about which command it described.
     """
     ctx.process_action_turn(_action())
-    span = sink.named(tracing.SPAN_AGENT_TOOL_CALL)[0]
+    span = sink.named(tracing.SPAN_COMMAND)[0]
     call_id = span.attributes[tracing.ATTR_COMMAND_CALL_ID]
 
     tracing.end_span(ctx, span, attributes={"replayed": True})
@@ -299,7 +298,7 @@ def test_invoke_command_records_the_cme_hop_as_a_child(
         _nesting_cme_hop(monkeypatch, ctx.app_workflow)
         ctx.process_turn("list my todo lists")
 
-        execute = sink.named(tracing.SPAN_COMMAND_EXECUTE)[0]
+        execute = sink.named(tracing.SPAN_COMMAND)[0]
         children = execute.attributes[tracing.ATTR_CHILD_CALLS]
         parent_call_id = execute.attributes[tracing.ATTR_COMMAND_CALL_ID]
 
@@ -325,7 +324,7 @@ def test_parent_call_id_is_none_at_the_outermost_dispatch(
         _nesting_cme_hop(monkeypatch, ctx.app_workflow)
         ctx.process_turn("list my todo lists")
 
-        execute = sink.named(tracing.SPAN_COMMAND_EXECUTE)[0]
+        execute = sink.named(tracing.SPAN_COMMAND)[0]
         assert tracing.ATTR_PARENT_CALL_ID in execute.attributes
         assert execute.attributes[tracing.ATTR_PARENT_CALL_ID] is None
     finally:

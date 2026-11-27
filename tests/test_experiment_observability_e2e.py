@@ -21,9 +21,9 @@ from fastapi.testclient import TestClient
 
 import fastworkflow
 from fastworkflow.observability import store as obs
-from fastworkflow import tracing
+from fastworkflow.observability import tracing
 from fastworkflow.experiment.runner import ExperimentController
-from fastworkflow.turn import TurnOutput, TurnResult, TurnStatus
+from fastworkflow.core.turn import TurnOutput, TurnResult, TurnStatus
 
 
 def _race_claim_process(
@@ -116,7 +116,7 @@ def _turn_row(
 
 
 @pytest.fixture
-def loopback_observability(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def loopback_observability(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, env_files):
     package_path = fastworkflow.get_fastworkflow_package_path()
     workflow_path = os.path.join(package_path, "examples", "hello_world")
     if not os.path.isdir(workflow_path):
@@ -128,8 +128,12 @@ def loopback_observability(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     root_b.mkdir()
     monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(root_a))
     monkeypatch.setenv("FW_OBS_INLINE_ARTIFACT_BYTES", "1")
+    # The server's env files (``env_files``: the template's models, placeholder keys, live calls refused): its startup
+    # check needs an agent model. Before, a developer's .env that litellm loaded into the process supplied it.
+    env_file, passwords_file = env_files
     monkeypatch.setattr(
-        sys, "argv", ["pytest", "--workflow_path", workflow_path]
+        sys, "argv", ["pytest", "--workflow_path", workflow_path,
+                      "--env_file_path", env_file, "--passwords_file_path", passwords_file]
     )
 
     import fastworkflow.run_fastapi_mcp.__main__ as fastapi_main

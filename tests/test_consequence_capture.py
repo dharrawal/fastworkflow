@@ -24,9 +24,9 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow import tracing
-from fastworkflow.command_executor import CommandExecutor
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.observability import tracing
+from fastworkflow.engine.command_executor import CommandExecutor
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 from tests.todo_list_workflow.application.todo_manager import TodoListManager
 
@@ -46,7 +46,7 @@ def todo_workflow_path() -> str:
 @pytest.fixture
 def initialized_fastworkflow():
     fastworkflow.init({})
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     RoutingRegistry.clear_registry()
     yield
@@ -96,7 +96,8 @@ def _action(command_name: str, **parameters) -> fastworkflow.Action:
 
 
 def _last_tool_call(sink: RecordingTraceSink) -> tracing.Span:
-    return sink.named(tracing.SPAN_AGENT_TOOL_CALL)[-1]
+    """The direct action's dispatch record: its ``fw.command`` (bd fix-qjne.34; was ``fw.agent.tool_call``)."""
+    return sink.named(tracing.SPAN_COMMAND)[-1]
 
 
 # ----------------------------------------------------------------------
@@ -153,7 +154,7 @@ def test_the_prose_path_records_context_types_too(
     try:
         context.process_turn("make me a grocery list")
 
-        execute = sink.named(tracing.SPAN_COMMAND_EXECUTE)[0]
+        execute = sink.named(tracing.SPAN_COMMAND)[0]
         assert execute.attributes[tracing.ATTR_CONTEXT_BEFORE] == "TodoListManager"
         assert execute.attributes[tracing.ATTR_CONTEXT_AFTER] == "TodoList"
     finally:

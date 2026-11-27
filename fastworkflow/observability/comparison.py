@@ -74,8 +74,8 @@ from fastworkflow.observability.turn_derivations import execution_ledger
 
 # The span name the ledger builds its rows from, restated here (as
 # `observability/turn_derivations.py` restates it) so that reading a stored trace does not
-# import the HTTP layer.
-SPAN_COMMAND_EXECUTE = "fw.command.execute"
+# import the HTTP layer. A store written before span contract 63 is not read.
+SPAN_COMMAND = "fw.command"
 
 # The span a pass-recording producer opens for a pass, restated for the same
 # reason. Pass MEMBERSHIP is resolved from any span in a step's ancestry, so it
@@ -369,7 +369,7 @@ class PassSelector:
     at rather than an assertion this module takes on trust. Rules are ORed:
 
     - `attribute_key`/`attribute_value`: a span attribute recorded on the
-      step's own `fw.command.execute` span or on any of its ancestors. This is
+      step's own `fw.command` span or on any of its ancestors. This is
       the rule a producer that stamps its passes should use, and the one
       `discover_pass_selectors` builds.
     - `root_span_ids`: the step's span lies in the subtree of one of these. A
@@ -1279,7 +1279,7 @@ def project_execution(
                     source = "record"
             if parameters is None and span_id in by_span:
                 span = by_span[span_id]
-                if span.get("name") == SPAN_COMMAND_EXECUTE:
+                if span.get("name") == SPAN_COMMAND:
                     candidate = tree.attributes(span).get("parameters")
                     if candidate is not None:
                         parameters = candidate

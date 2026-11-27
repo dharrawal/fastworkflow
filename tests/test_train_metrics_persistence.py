@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow import state_paths
+from fastworkflow.session import state_paths
 from fastworkflow.observability.store import ObservabilityStore
 from fastworkflow.train import metrics_persistence
 

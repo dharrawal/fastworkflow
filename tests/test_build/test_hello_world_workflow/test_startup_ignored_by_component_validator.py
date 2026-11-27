@@ -28,7 +28,7 @@ class ResponseGenerator:
     valid_command_content = """
 import fastworkflow
 from fastworkflow import CommandOutput, CommandResponse
-from fastworkflow.workflow import Workflow
+from fastworkflow.core.workflow import Workflow
 from typing import Any, Dict
 from pydantic import BaseModel, Field
 

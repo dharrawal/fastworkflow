@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>An input · Design idioms · fastWorkflow</title>
+<link rel="stylesheet" href="idioms.css">
+</head>
+<body data-page="e-input">
+<aside class="rail"></aside>
+
+<main id="top">
+  <section class="group execution">
+<!-- IDIOM BODY START -->
+    <article class="idiom" id="e-input">
+      <div class="prose">
+        <p class="num">04</p>
+        <h3>An input</h3>
+        <p>An <em>input</em> is the list of values a command needs before it can run. You write it as a Pydantic model named <code>Input</code> inside the command's <code>Signature</code> class (see <a href="e-file.html">one file, two classes</a>). Each field is one value. Reach for it whenever a command needs something from the user, such as a name to search for or a page to start at. A command that needs nothing has no fields.</p>
+        <p>When a user types "find the book Dune", the framework has to turn that sentence into <code>query="Dune"</code>. That step is called <em>parameter extraction</em>. You never write it: the framework reads your <code>Input</code> and does it in this order.</p>
+        <ul>
+          <li><strong>Fill.</strong> A language model (the one named by <code>LLM_PARAM_EXTRACTION</code> in <code>fastworkflow.env</code>) reads the request together with each field's name, type, <code>description</code>, <code>pattern</code> and default, and proposes a value for each field. Everything it is told about a field comes from these declarations, the same on both kinds of command: "Copy it exactly as the request writes it" only for a <code>str</code> you marked (below; a marked <code>int</code> is told "A number the request writes." and a marked <code>list[str]</code> to copy each item), "True only when the request asks for it" for every <code>bool</code> ("False only when the request asks against it" for one that defaults to true), and the pattern.</li>
+          <li><strong>Check.</strong> Code refuses a value that is plainly not a value, such as a placeholder, and checks a field you marked against the request (the strict check, below).</li>
+          <li><strong>Validate.</strong> The field's <code>pattern</code> is checked (the whole value must match), then pydantic checks the types and the other constraints, such as <code>min_length</code>. Then your own validators run (see <a href="e-hook.html">correct or refuse</a>).</li>
+          <li><strong>Retry once.</strong> If a check or a validator refused a value the model proposed, the model reads the request one more time with the reason attached; so it does when none of its answers could be read into the fields' types. The second answer changes only the fields the first one left open (refused, reset or missing); every other field keeps its first value, and the checks' own corrections are kept. If a refusal names no field, or the first answer could not be read at all, the second answer is taken whole. A value that is simply missing gets no retry.</li>
+          <li><strong>Ask.</strong> Whatever is still missing or refused is asked for in one question.</li>
+        </ul>
+        <p>What each thing you write is used for:</p>
+        <table class="ref">
+          <thead><tr><th>You write</th><th>The framework</th></tr></thead>
+          <tbody>
+            <tr><td>the field name</td><td>shows it to the user in questions, with underscores as spaces (<code>book_uid</code> becomes "book uid"). Pick a name a user would understand.</td></tr>
+            <tr><td><code>description</code></td><td>gives it to the extraction model as the instruction for that field. Say what the value is and where it comes from. With no description the model only sees "The query".</td></tr>
+            <tr><td><code>examples</code></td><td>does not show them to the extraction model (a model copies what it is shown). The framework builds sample requests from them for the extraction model, though those samples do not reach its prompt (a known defect); they also feed the "for example" in a question after a wrong format, and the schema clients see.</td></tr>
+            <tr><td>no default (<code>query: str = Field(...)</code>)</td><td>treats the field as required. If the request does not give it, the user is asked. Do not write <code>default="NOT_FOUND"</code>: that is the framework's own marker for a value nobody gave, and declaring it as a default is a load error of the command.</td></tr>
+            <tr><td>a default, or <code>Optional[...] = None</code></td><td>uses the default when the request leaves the value out. It never asks for it. <code>Optional[int]</code> and <code>int | None</code> mean the same thing everywhere. A planning command's input is narrower than an execution command's, because its values arrive as text; the list of types is on <a href="e-words.html">field options</a>.</td></tr>
+            <tr><td><code>Literal["book", "member"]</code></td><td>accepts only those values. The model sees them as the allowed choices. A value outside them is refused for that field only (the user is asked about it, with the allowed values; the other fields keep theirs), and a member in another case or spacing takes its declared spelling.</td></tr>
+            <tr><td><code>pattern=r"..."</code></td><td>tells the model the format ("Must match the pattern ...") and refuses a value that does not match the whole pattern, on every path (the "/" path, the plan review's draft and a typed planning call alike), after a marked id has been widened to the id the request writes. A compiled pattern keeps its flags. The question names the field, the value, the pattern and your first example, so give one. A pattern only validates: it has no effect on the strict check below.</td></tr>
+            <tr><td><code>json_schema_extra={...}</code></td><td>turns on one extra behaviour per key. Every key is listed on <a href="e-words.html">field options</a>, and any other key fails the load (write <code>examples</code>, <code>description</code>, <code>default</code>, <code>title</code> and <code>deprecated</code> as <code>Field()</code> arguments: a planning command refuses them here, and an execution command's Input accepts them here only as JSON Schema annotations); <code>from_command_output</code> has its own page, <a href="e-from.html">a handle's producer</a>. The one below is taught here.</td></tr>
+          </tbody>
+        </table>
+        <p>An <code>Input</code> may subclass another model of yours (<code>class Input(TitleInput)</code>, the base in a helper module of <code>_commands/_shared/</code>): the inherited fields are extracted, asked for and checked like fields written in place (see <a href="p-share.html">shared phases</a>).</p>
+        <p><strong>The model's value is used.</strong> By default, whatever the model proposes for a <code>str</code> or <code>int</code> field is kept: it may convert the request (a date written "tomorrow" becomes <code>2026-11-22</code>), so the framework does not compare it with the request.</p>
+        <p><strong>Checks that always run, whatever you write.</strong> A few things can still refuse, change or clear a value you did not mark; no option turns them on or off. (1) Code refuses, on every <code>str</code> field, a value that is entirely one template token (a variable name in braces or brackets: <code>{name}</code>, <code>&lt;name&gt;</code>, <code>&lt;ID&gt;</code>), a value of only punctuation, and a value the request does not write that only repeats the field's own name (<code>uid</code> for a <code>book_uid</code> field). It also removes quotes around a whole value (unless the request itself writes them), turns a made-up number (such as 2147483647, or anything above 2<sup>53</sup>) into the field's default (refused when there is none), refuses a negative number in a field with no <code>ge</code> or <code>gt</code> whose name holds one of the words <code>start</code>, <code>skip</code>, <code>offset</code>, <code>limit</code>, <code>count</code>, <code>page</code> or <code>size</code> (declare <code>ge</code> to say what a number field accepts), and, on an execution command, treats a value that is a command's name in identifier form (<code>find_book</code>, <code>Library/find_book</code>) as not given. Nothing else is judged by its look: "Adam Smith" and "John Doe" are values, so is an id such as <code>SKU_42</code>, so is <code>a&lt;b</code>, so is a JSON string such as <code>{"a": 1}</code> (kept as written), and <code>&lt;Dune&gt;</code> is the value Dune in brackets (mixed case, a digit or a space makes it a value; <code>&lt;dune&gt;</code>, in one case, is a placeholder). (2) Code treats a free-text value that is only a pronoun, or only a word of your workflow's own vocabulary (the kind of record it handles, for example "book" in a library), as missing, and the question says why. On a planning command a value the request names as a record (a name it writes) is never screened, and a pronoun becomes that record when the request names exactly one, with a note on the call. A description that lists words ("One of: book, member") exempts none of them: a fixed set of values is a <code>Literal</code>, which is never screened. (3) When <code>JEV_API_KEY</code> is set, the remote decision model is asked once per filled field you did NOT mark whether the request gives the field a value at all, and a field it is at least 90 percent sure is not given is reset to its not-given value (asked for when required); <code>FW_JEV_FIELD_GIVEN=off</code> turns this one off. Measured on recorded extractions, such a reset removed an invented value 266 times in 267. A marked field is not asked about: the strict check decides it.</p>
+        <p><strong>The strict check.</strong> To require the user's own words, mark the field <code>json_schema_extra={"copied_from_command_text": True}</code>. A marked <code>str</code> must be written in the request, or it is refused, whether the field is required or optional (a marked value the model did not give is not checked); the test is that the value appears in the request as whole words (its first and last characters do not continue into a letter or digit of the request, so "dun" is not written in "dune"), case is ignored, any kind of dash counts as a plain dash, and a kept value takes the spelling the request uses. An id the model cut short inside an id the request writes is widened to the whole id (<a href="c-identifiers.html">identifier formats</a>). Two marked fields may hold the same value only when the user's request writes it as often ("stores in New York, New York" fills a city and a state). Otherwise an optional one is left empty, with a line on the review and on any question that says which field and why ("state left empty: 'Albany' is written once in your request and is the city."), and the command runs without it; when both are required, one of them is refused and asked again. Fields you did not mark are never compared with each other. A marked <code>int</code> must be a number the request writes, in digits or as number words (zero to twenty, a tens word alone such as "thirty", and tens followed by a unit such as "twenty five"); a decimal such as 3.5 and a stretch like "one hundred" are not read as a whole number. For <code>find_book</code> (the first example below):</p>
+        <ul>
+          <li>"find books by austen" and the model says <code>Austen</code>: kept, as <code>austen</code>.</li>
+          <li>The model says <code>Middlemarch</code>, which the request does not contain: refused.</li>
+          <li>A marked <code>int</code>: "find dune from row 10" with <code>start=20</code> is refused, and so is any number when the request writes no number at all.</li>
+        </ul>
+        <p>Mark a field when the user must have written the value: a name, a title, an id. Leave it unmarked when your code converts it. A value the model did not give (the default, or nothing) is never checked. A <code>Literal</code>, a <code>bool</code> or a value from an allowed list cannot be marked: the load refuses the mark, because the type already limits the value. Only a <code>str</code>, an <code>int</code> or a <code>list[str]</code> takes it, so a <code>float</code>, a date or a <code>list[int]</code> cannot be marked either. On a planning command any <code>Optional[int]</code>, marked or not, fails that command's load: give the <code>int</code> a default (<code>start: int = 0</code>). On an execution command a marked <code>Optional[int] = None</code> loads: an absent value is not checked and a given one is. To see which unmarked fields might need it, read the <code>argument_check_not_in_request</code> attribute on the extraction span: it names the fields whose value the request did not write.</p>
+        <p><strong>The question.</strong> When a required value is missing, the user sees a question built from your field names, such as "I can't run find book yet: your request does not give the query. Which query should I use?" Several open values are asked in one question, and the user replies with <code>name: value</code> lines or with the values in order separated by commas. The question repeats while each reply fills or fixes a value. After two replies in a row that make no progress, or a reply of <code>cancel</code>, it stops asking, and the command does not run with that value missing. In agent mode the question goes to the agent instead of a person.</p>
+        <p><strong>A bare value for an agent.</strong> An agent often calls a command as <code>find_book Dune</code>. In agent mode the framework reads the agent's own text in code, with no model call, in four forms tried in order: <code>&lt;query&gt;Dune&lt;/query&gt;</code>, <code>query=Dune</code>, the command name followed by one value, and the command name alone; any other text goes to the model. The one value goes to the field marked <code>json_schema_extra={"command_text_after_command_name": True}</code>, which takes the whole rest of the text, or, with no mark, to the class's only <code>str</code> field, and then only a single word (<code>find_book Ann Lee</code> goes to the model). A first word that names the target field (<code>find_book query Dune</code>), or the last part of its name (<code>open_book uid b3</code>), is dropped. Mark at most one <code>str</code> field, on an execution command; two marks fail the load. Do not mark a free-text field of a command that changes data, because prose sent by mistake would become the value.</p>
+        <p><strong>How the question form draws a field.</strong> The chat page asks for missing values with a small form. By default a <code>str</code> gets a one-line box, and a <code>Literal</code> gets radio buttons when it has five values or fewer, and a drop-down when it has more. The one display hint an <code>Input</code> field takes is <code>json_schema_extra={"ui": {"widget": "textarea"}}</code>, which gives a <code>str</code> a multi-line box for long text, or <code>{"widget": "radio"}</code>, which forces radio buttons on a <code>Literal</code> of any length. Nothing else reads it: no check or extraction changes, and a client other than the chat page may ignore it. The load refuses <code>textarea</code> on anything but a <code>str</code>, <code>radio</code> on anything but a <code>Literal</code>, any other widget name, and any output hint (such as <code>hidden</code>) on an <code>Input</code> field; the command then does not load. The hints for an <code>Output</code> are on <a href="e-return.html#ui">how a result is shown</a>.</p>
+        <p><strong>Two beginner mistakes.</strong> First, a <code>str</code> field whose value the user never writes as such, like a date written "tomorrow" that your code needs as <code>2026-11-22</code>. If you marked it <code>copied_from_command_text</code>, the strict check refuses it and the user is asked again and again: leave it unmarked (see <a href="e-words.html#e-words-text">the request's own words</a>). Second, giving a field a default when the command cannot do anything sensible without it. The user is then never asked, and the command runs with the default.</p>
+        <p class="see">See also <a href="e-words.html">field options</a>, <a href="e-hook.html">correct or refuse</a>.</p>
+      </div>
+      <figure>
+        <figcaption>fastworkflow/examples/library/_commands/Library/find_book.py (comments added for this page)</figcaption>
+        <pre><code>class Signature:
+    """Find books by title or author."""
+
+    class Input(BaseModel):
+        <span class="c"># required: no default, so a request without it is asked "Which query should I use?"</span>
+        query: str = Field(description="words of the title or the author's name",
+                           examples=["Middlemarch", "George Eliot"],
+                           json_schema_extra={"copied_from_command_text": True})
+        <span class="c"># optional: left out of the request, it stays None</span>
+        start: Optional[int] = Field(default=None, ge=0, description="the first row of the page")</code></pre>
+      </figure>
+      <figure>
+        <figcaption>fastworkflow/examples/library/_commands/Library/open_book.py (comments added for this page)</figcaption>
+        <pre><code>    class Input(BaseModel):
+        book_uid: str = Field(
+            description="the uid of the book to open",
+            examples=["b1", "b3", "b2"],
+            <span class="c"># where the value usually comes from: see "a handle's producer"</span>
+            json_schema_extra={"from_command_output": "find_book.book_uids"},
+            <span class="c"># "b" and digits only; the model is told the pattern</span>
+            pattern=r"^b[0-9]+$",
+        )</code></pre>
+      </figure>
+    </article>
+<!-- IDIOM BODY END -->
+  </section>
+
+  <nav class="pager" aria-label="Previous and next">
+    <a class="prev" href="e-purpose.html"><span>Previous</span>How a request finds your command</a>
+    <a class="next" href="e-words.html"><span>Next</span>Field options</a>
+  </nav>
+</main>
+<script src="nav.js"></script>
+<script src="idioms.js"></script>
+</body>
+</html>

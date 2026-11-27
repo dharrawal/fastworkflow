@@ -13,7 +13,8 @@ import libcst as cst
 
 
 def _fake_env_var(name, *args, **kwargs):
-    """get_env_var stub: numeric for the LLM timeout get_lm() float()s, 'test_value' otherwise."""
+    """raw_env_var stub (every setting is read through it, the role's model included): numeric for the LLM
+    timeout get_lm() float()s, 'test_value' otherwise."""
     return '120' if name == 'LLM_TIMEOUT_SECONDS' else 'test_value'
 
 
@@ -35,7 +36,7 @@ class TestGenAIPostProcessorUpdated(unittest.TestCase):
             f.write("""
 import fastworkflow
 from fastworkflow import CommandOutput, CommandResponse
-from fastworkflow.workflow import Workflow
+from fastworkflow.core.workflow import Workflow
 from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Optional
 
@@ -83,7 +84,7 @@ class ResponseGenerator:
         class_info.methods.append(method_info)
         return class_info
     
-    @patch('fastworkflow.get_env_var')
+    @patch('fastworkflow.raw_env_var')
     def test_initialization(self, mock_get_env):
         """Test that the processor initializes correctly."""
         mock_get_env.side_effect = _fake_env_var
@@ -102,7 +103,7 @@ class ResponseGenerator:
             self.assertIn('files_processed', processor.stats)
             self.assertIn('files_updated', processor.stats)
     
-    @patch('fastworkflow.get_env_var')
+    @patch('fastworkflow.raw_env_var')
     def test_extract_current_state(self, mock_get_env):
         """Test extraction of current state from a command file."""
         mock_get_env.side_effect = _fake_env_var
@@ -133,7 +134,7 @@ class ResponseGenerator:
             self.assertEqual(input_fields[1]['name'], 'param2')
             self.assertEqual(input_fields[1]['type'], 'int')
     
-    @patch('fastworkflow.get_env_var')
+    @patch('fastworkflow.raw_env_var')
     def test_generate_enhanced_content(self, mock_get_env):
         """Test generation of enhanced content for a command file."""
         mock_get_env.side_effect = _fake_env_var
@@ -189,7 +190,7 @@ class ResponseGenerator:
             self.assertIn('Input.param2', field_metadata)
             self.assertIn('Output.result', field_metadata)
     
-    @patch('fastworkflow.get_env_var')
+    @patch('fastworkflow.raw_env_var')
     def test_process_command_file_targeted(self, mock_get_env):
         """Test processing a command file with targeted updates."""
         mock_get_env.side_effect = _fake_env_var
@@ -234,7 +235,7 @@ class ResponseGenerator:
             self.assertTrue(result)
             self.assertEqual(processor.stats['files_processed'], 1)
     
-    @patch('fastworkflow.get_env_var')
+    @patch('fastworkflow.raw_env_var')
     def test_process_workflow(self, mock_get_env):
         """Test processing an entire workflow."""
         mock_get_env.side_effect = _fake_env_var
@@ -278,7 +279,7 @@ class ResponseGenerator:
             self.assertTrue(mock_context_doc.called)
             self.assertTrue(mock_workflow_doc.called)
     
-    @patch('fastworkflow.get_env_var')
+    @patch('fastworkflow.raw_env_var')
     def test_generate_context_handler_docstring(self, mock_get_env):
         """Test generating docstring for context handler file."""
         mock_get_env.side_effect = _fake_env_var
@@ -317,7 +318,7 @@ class TestContextHandler:
                 content = f.read()
                 self.assertIn("Enhanced context docstring", content)
     
-    @patch('fastworkflow.get_env_var')
+    @patch('fastworkflow.raw_env_var')
     def test_generate_workflow_description(self, mock_get_env):
         """Test generating workflow description file."""
         mock_get_env.side_effect = _fake_env_var

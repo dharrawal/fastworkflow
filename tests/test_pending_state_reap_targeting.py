@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from fastworkflow.session_state_store import (
+from fastworkflow.session.session_state_store import (
     PENDING_SUFFIX,
     SAVED_AT_KEY,
     DiskSessionStateStore,

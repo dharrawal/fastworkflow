@@ -20,7 +20,7 @@ SNYK_SEVERITY_THRESHOLD ?= medium
 gen-env:
 	chmod +x ./gen-env.sh
 	./gen-env.sh
-    include ./.env
+    -include ./.env
 
 lint:
 	py3clean .
@@ -68,12 +68,14 @@ audit-json:
 	status=$$?; rm -f .audit-requirements.txt; exit $$status
 
 publish-testpypi: gen-env
+	@test -n "$(TESTPYPI_ACCESS_TOKEN)" || { echo "TESTPYPI_ACCESS_TOKEN is not set (.env missing or incomplete)" >&2; exit 1; }
 	poetry config repositories.testpypi https://test.pypi.org/legacy/
 	poetry config pypi-token.testpypi $(TESTPYPI_ACCESS_TOKEN)
 	poetry build
 	poetry publish --repository testpypi
 
 publish: gen-env
+	@test -n "$(PYPI_ACCESS_TOKEN)" || { echo "PYPI_ACCESS_TOKEN is not set (.env missing or incomplete)" >&2; exit 1; }
 	poetry config pypi-token.pypi $(PYPI_ACCESS_TOKEN)
 	poetry build
 	poetry publish

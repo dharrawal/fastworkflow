@@ -13,7 +13,7 @@ Depth: 1 (lower bound; open steps name no command)
 
 | input | type | default | sample | classifier_confirms / classifier_decides | copied_from_command_text / record_named_in_command_text | description |
 |---|---|---|---|---|---|---|
-| `author` | str | required | `<author>` |  | yes | the author's name |
+| `author` | str | required | `Frank Herbert` |  | yes | the author's name |
 
 - `author` must be written in the command text (`copied_from_command_text`).
 
@@ -64,7 +64,7 @@ For the sample inputs; no input changes them.
 
 Reads no earlier facts. Output: `Output`.
 
-1. `find_book query=<author>`
+1. `find_book query="Frank Herbert"`
 
 Pages: step 1 reads page 1 only.
 
@@ -82,4 +82,4 @@ For each later item (shown for the second), `uid` = `<find.book_uids[1]>`:
 
 ## Answer
 
-Written by `__result__`: The books by \<author>: \<book[0].title> (\<book[0].copies> copy); \<book[1].title> (\<book[1].copies> copy).
+Written by `__result__`: The books by Frank Herbert: \<book[0].title> (\<book[0].copies> copy); \<book[1].title> (\<book[1].copies> copy).

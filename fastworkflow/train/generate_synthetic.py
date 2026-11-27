@@ -126,8 +126,18 @@ def _fallback_detail(exc: BaseException) -> str:
     return detail
 
 
+#: The generation counts when the env sets none: the values the shipped env template has always set, so a workflow
+#: that relied on them keeps its utterance-cache keys.
+GENERATION_COUNT_DEFAULTS: dict[str, int] = {
+    "SYNTHETIC_UTTERANCE_GEN_NUMOF_PERSONAS": 4,
+    "SYNTHETIC_UTTERANCE_GEN_UTTERANCES_PER_PERSONA": 5,
+    "SYNTHETIC_UTTERANCE_GEN_PERSONAS_PER_BATCH": 1,
+}
+
+
 def _resolve_generation_count(value: Optional[int], env_name: str) -> int:
-    return value if value is not None else fastworkflow.get_env_var(env_name, int)
+    return value if value is not None else fastworkflow.get_env_var(
+        env_name, int, default=GENERATION_COUNT_DEFAULTS[env_name])
 
 
 def call_with_retries(
@@ -621,13 +631,13 @@ def utterance_fingerprint(
     num_personas: int,
     utterances_per_persona: int,
     personas_per_batch: int,
-    model: Optional[str],
     completion_fn: Optional[Callable] = None,
     persona_dataset_loader: Optional[Callable] = None,
 ) -> Fingerprint:
     """Fingerprint this command's generation configuration for the utterance cache.
 
-    Everything the LLM sees is in here, including a digest of the source of
+    Everything the LLM sees except the model (bd fix-ygxo: utterances are reused under
+    any generator model) is in here, including a digest of the source of
     `generate_utterances_for_personas` — that function IS the prompt, so an edit to
     it must invalidate every entry — and of the persona-selection code, which decides
     which personas write the utterances. `_DIGESTED_GENERATION_SOURCES` is the full
@@ -653,7 +663,6 @@ def utterance_fingerprint(
         num_personas=num_personas,
         utterances_per_persona=utterances_per_persona,
         personas_per_batch=personas_per_batch,
-        model=model,
         api_base=api_base or None,
         persona_source=(
             f"{corpus_identity}+{persona_label}" if persona_label else corpus_identity
@@ -747,9 +756,11 @@ def generate_diverse_utterances_with_provenance(
     seed_utterances = list(seed_utterances)
     fallback_utterances = [command_name] + seed_utterances
 
-    # Resolved before the cache lookup: the model is part of the fingerprint, because
-    # the same seeds under a different model are different training data.
-    model = fastworkflow.get_env_var("LLM_SYNDATA_GEN")
+    # LLM_SYNDATA_GEN, else the base model it falls back to (dspy_utils.resolve_role). Recorded in the provenance;
+    # NOT a cache-key input (bd fix-ygxo), so a cache hit never depends on it.
+    from fastworkflow.utils import dspy_utils
+
+    model = dspy_utils.resolve_role("LLM_SYNDATA_GEN").model
 
     provenance = UtteranceProvenance(
         command_name=str(command_name),
@@ -781,7 +792,6 @@ def generate_diverse_utterances_with_provenance(
             num_personas,
             utterances_per_persona,
             personas_per_batch,
-            model,
             completion_fn=completion_fn,
             persona_dataset_loader=persona_dataset_loader,
         )
@@ -816,9 +826,10 @@ def generate_diverse_utterances_with_provenance(
         provenance.final_count = len(fallback_utterances)
         return fallback_utterances, provenance
 
-    # Initialize LiteLLM with API key
-    api_key = fastworkflow.get_env_var("LITELLM_API_KEY_SYNDATA_GEN")
-    litellm.api_key = api_key
+    # The key follows the model, per call (never the global litellm.api_key): the production backend is the role's own
+    # completion. Swapped in after the fingerprint was taken, which names the production backend for None.
+    if completion_fn is None:
+        completion_fn = dspy_utils.role_completion("LLM_SYNDATA_GEN")
 
     # Choose personas. `resolve_personas` takes the loader rather than a loaded dataset, so
     # an app-supplied persona set never triggers the PersonaHub download. With no

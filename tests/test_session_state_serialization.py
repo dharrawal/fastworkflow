@@ -12,13 +12,13 @@ from unittest.mock import MagicMock
 import pytest
 
 import fastworkflow
-from fastworkflow.session_state_store import (
+from fastworkflow.session.session_state_store import (
     SAVED_AT_KEY,
     SCHEMA_VERSION,
     DiskSessionStateStore,
     IncompatibleSessionState,
 )
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 from tests.test_turn_result_capture import no_review_gate  # noqa: F401 - shared fixture (autouse in this module)
 
 
@@ -30,7 +30,7 @@ def todo_workflow_path() -> str:
 @pytest.fixture
 def initialized_fastworkflow(tmp_path, monkeypatch):
     fastworkflow.init({"FASTWORKFLOW_STATE_ROOT": str(tmp_path / "workflow_contexts")})
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     monkeypatch.setattr(
         WorkflowExecutionContext,
@@ -40,6 +40,14 @@ def initialized_fastworkflow(tmp_path, monkeypatch):
     RoutingRegistry.clear_registry()
     yield tmp_path
     RoutingRegistry.clear_registry()
+
+
+def _agent_question(question, message=None) -> dict:
+    """The saved form of the agent's own question (the turn's ``agent`` waiting record)."""
+    from fastworkflow.core import waiting as waiting_module
+
+    return waiting_module.Waiting(
+        waiting_module.KIND_AGENT, question=question, payload={} if message is None else {"message": message}).to_state()
 
 
 def _suspended_react_blob() -> dict:
@@ -90,13 +98,18 @@ def test_serialize_restore_resume_across_contexts(
 
     monkeypatch.setattr(ctx_a, "_ensure_agent_initialized", lambda: None)
     monkeypatch.setattr(
-        "fastworkflow.workflow_agent.build_query_with_next_steps",
+        "fastworkflow.agent.workflow_agent.build_query_with_next_steps",
         lambda user_query, session, with_agent_inputs_and_trajectory=False,
         planner_lm=None, **kwargs: user_query,
     )
     monkeypatch.setattr(
-        "fastworkflow.workflow_agent._what_can_i_do",
+        "fastworkflow.agent.workflow_agent._what_can_i_do",
         lambda session: "commands",
+    )
+    # The planner's split (the model-backed seam before the parts are resolved): one part. With no planner model
+    # the splitter raises; before, a developer's .env that litellm loaded into the process supplied one.
+    monkeypatch.setattr(
+        "fastworkflow.agent.workflow_agent.split_into_subtasks", lambda user_query, **kwargs: [user_query]
     )
     monkeypatch.setattr(
         ctx_a,
@@ -192,9 +205,7 @@ def test_unreadable_schema_version_applies_nothing(
     # Every field here is one apply_serialized_state would have written.
     hostile = {
         "schema_version": found,
-        "awaiting_user": True,
-        "suspended_user_message": "restored from the future",
-        "pending_clarification_request": "which one?",
+        "waiting": _agent_question("which one?", "restored from the future"),
         "action_log": [{"command_name": "should_not_appear"}],
     }
 
@@ -205,8 +216,7 @@ def test_unreadable_schema_version_applies_nothing(
     assert excinfo.value.expected == SCHEMA_VERSION
 
     assert not ctx.awaiting_user
-    assert ctx._suspended_user_message is None
-    assert ctx._pending_clarification_request is None
+    assert ctx.waiting is None
     assert ctx._action_log == []
     ctx.close()
 
@@ -221,7 +231,7 @@ def test_legacy_turn_plan_keys_in_a_blob_do_not_fail_restore(
     )
     ctx.apply_serialized_state({
         "schema_version": SCHEMA_VERSION,
-        "awaiting_user": True,
+        "waiting": _agent_question("which one?"),
         "react": _suspended_react_blob(),
         "turn_plan": {"steps": "not a list of steps"},
         "turn_plan_status": "planned",
@@ -250,13 +260,12 @@ def test_readable_schema_version_still_applies(
     ctx.apply_serialized_state(
         {
             "schema_version": SCHEMA_VERSION,
-            "awaiting_user": True,
-            "suspended_user_message": "the urgent one",
+            "waiting": _agent_question("which one?", "the urgent one"),
             "action_log": [{"command_name": "list_tasks"}],
         }
     )
 
     assert ctx.awaiting_user
-    assert ctx._suspended_user_message == "the urgent one"
+    assert ctx.waiting.question == "which one?" and ctx._suspended_message() == "the urgent one"
     assert len(ctx._action_log) == 1
     ctx.close()

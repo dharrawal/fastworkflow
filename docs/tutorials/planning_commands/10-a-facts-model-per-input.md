@@ -46,6 +46,7 @@ class Signature:
 
     class Input(BaseModel):
         name: str = Field(description="the name to look for",
+                          examples=["Emma", "Lee", "Dune Messiah"],
                           json_schema_extra={"copied_from_command_text": True})
         kind: Literal["book", "member"] = Field(
             default="book", description="whether to look for a book or a member")
@@ -220,8 +221,8 @@ The preview lists the phases its facts models come from.
 
 Write the phase's return annotation when its facts type is fixed: one `Output`, a union for
 "whichever ran", or a facts model, as on this page. Use `@phase(output=lambda input: ...)` only
-when the type depends on the input. A phase with both a return annotation and `output=` does
-not load: the error names the phase.
+when the type depends on the input: `output=` takes only a function of the input. A phase with both a return
+annotation and `output=` does not load either: the error names the phase.
 
 ## What you learned
 

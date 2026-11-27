@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from fastworkflow import planning_commands as sc
-from fastworkflow import workflow_agent
+from fastworkflow.planning import planning_commands as sc
+from fastworkflow.agent import workflow_agent
 
 TUTORIAL = Path(__file__).resolve().parent / "planning_tutorial_workflow"
 
@@ -68,8 +68,8 @@ def _refused(command: sc.PlanningCommandCommand, values: dict, request: str) -> 
 
 # ---------------------------------------------------------------- a placeholder is never shown back
 
-@pytest.mark.parametrize("value", ["{AUTHOR_PLACEHOLDER}", "<entity_name>", "NAME_1", "unspecified_right",
-                                   "John Doe"], ids=["braces", "angle", "name-number", "unspecified", "invented"])
+@pytest.mark.parametrize("value", ["{AUTHOR_PLACEHOLDER}", "<entity_name>"],
+                         ids=["braces", "angle"])
 def test_a_placeholder_is_refused_and_the_question_asks_plainly(workflow, value):
     command = _planning_command(workflow, "author_books")
     refusal = _refused(command, {"author": value}, "Which books did the author write?")
@@ -77,6 +77,18 @@ def test_a_placeholder_is_refused_and_the_question_asks_plainly(workflow, value)
     question = sc.refusal_question(command, refusal)
     assert question == AUTHOR_QUESTION
     assert value not in question
+
+
+@pytest.mark.parametrize("value", ["unspecified_right", "John Doe", "NAME_1"], ids=["unspecified", "invented", "name-number"])
+def test_a_stand_in_value_is_a_value_and_a_marked_one_the_request_does_not_write_is_refused(workflow, value):
+    """There is no list of stand-in words (bd fix-ftdl.6.1): such a value is judged as any other, here by the strict
+    check of the marked ``author`` field."""
+    command = _planning_command(workflow, "author_books")
+    refusal = _refused(command, {"author": value}, "Which books did the author write?")
+
+    assert str(refusal) == f"author={value!r} is not written in the request"
+    assert sc.refusal_question(command, refusal) == (
+        f"I can't run author books yet: the author {value!r} is not in your request. Which author should I use?")
 
 
 def test_an_optional_input_given_a_placeholder_takes_its_default(workflow):
@@ -95,7 +107,10 @@ def test_a_pronoun_with_no_single_subject_is_refused(workflow, value):
     command = _planning_command(workflow, "author_books")
     refusal = _refused(command, {"author": value}, "Which books did the author of that one write?")
 
-    assert sc.refusal_question(command, refusal) == AUTHOR_QUESTION
+    assert sc.refusal_question(command, refusal) == (
+        "I can't run author books yet: your request does not say which author to use "
+        f"(author '{value}' is a pronoun the request does not tie to a single subject). "
+        "Which author should I use?")
 
 
 def test_a_pronoun_with_one_subject_takes_that_subject(workflow):
@@ -127,7 +142,8 @@ def test_a_vocabulary_word_is_refused_as_an_unwritten_value(workflow, planning_c
     refusal = _refused(command, values, asked_in)
 
     assert sc.refusal_question(command, refusal) == (
-        f"I can't run {planning_command.replace('_', ' ')} yet: your request does not say which {required} to use. "
+        f"I can't run {planning_command.replace('_', ' ')} yet: your request does not say which {required} to use "
+        f"({required} '{values[required]}' is a kind word of this workflow, not a value). "
         f"Which {required} should I use?")
 
 
@@ -171,26 +187,44 @@ def test_a_value_the_request_names_in_its_role_passes(workflow, planning_command
 
 # ---------------------------------------------------------------- the same value for two inputs
 
-def test_the_same_value_for_two_inputs_is_refused_for_the_role_the_request_does_not_write(workflow):
+def _marked_transfer_loan(workflow) -> sc.PlanningCommandCommand:
+    """``transfer_loan`` with ``member`` and ``branch`` marked ``copied_from_command_text``: the one duplicate rule reads
+    marked fields only (bd fix-qjne.20)."""
+    marked = TRANSFER_LOAN.replace('description="the member whose loan moves")',
+                                   'description="the member whose loan moves", '
+                                   'json_schema_extra={"copied_from_command_text": True})').replace(
+        'description="the branch the loan moves to")',
+        'description="the branch the loan moves to", json_schema_extra={"copied_from_command_text": True})')
+    (Path(workflow) / "_commands" / "transfer_loan_marked.py").write_text(marked, encoding="utf-8")
+    return _planning_command(workflow, "transfer_loan_marked")
+
+
+def test_two_unmarked_inputs_given_one_value_are_not_refused(workflow):
     command = _planning_command(workflow, "transfer_loan")
+    request = "Ann Lee has a loan"
+    args, _ = sc.check_arguments(command, _raw(command, member="Ann Lee", branch="Ann Lee"), request)
+    assert sc._validate_arguments(command, args, request, None)["branch"] == "Ann Lee"
+
+
+def test_the_same_value_for_two_marked_inputs_is_refused_for_the_role_the_request_does_not_write(workflow):
+    command = _marked_transfer_loan(workflow)
+    request = "Move the loan of member Ann Lee to its new branch"
+
+    refused = _refused(command, {"member": "Ann Lee", "branch": "Ann Lee"}, request)
+
+    assert str(refused) == "branch='Ann Lee' is also the value of member"
+    assert sc.refusal_question(command, refused) == (
+        "I can't run transfer loan marked yet: 'Ann Lee' is the member in your request, not the branch. "
+        "Which branch should I use?")
+    # written twice, both inputs may hold it
     args, _ = sc.check_arguments(command, _raw(command, member="Ann Lee", branch="Ann Lee"),
                                  "Move the loan of member Ann Lee to branch Ann Lee")
-
-    with pytest.raises(sc.PlanningCommandInputError) as refused:
-        sc._validate_arguments(command, args, "Move the loan of member Ann Lee to branch Ann Lee", None)
-
-    assert str(refused.value) == "branch='Ann Lee' is also the value of member"
-    assert sc.refusal_question(command, refused.value) == (
-        "I can't run transfer loan yet: 'Ann Lee' is the member in your request, not the branch. "
-        "Which branch should I use?")
+    assert args["member"] == args["branch"] == "Ann Lee"
 
 
-def test_the_same_value_for_two_inputs_refuses_the_first_when_neither_role_is_written(workflow):
-    command = _planning_command(workflow, "transfer_loan")
-    request = "Ann Lee has a loan at Ann Lee"
-    args, _ = sc.check_arguments(command, _raw(command, member="Ann Lee", branch="Ann Lee"), request)
+def test_the_same_value_for_two_marked_inputs_refuses_the_first_when_neither_role_is_written(workflow):
+    command = _marked_transfer_loan(workflow)
 
-    with pytest.raises(sc.PlanningCommandInputError) as refused:
-        sc._validate_arguments(command, args, request, None)
+    refused = _refused(command, {"member": "Ann Lee", "branch": "Ann Lee"}, "Ann Lee has a loan")
 
-    assert str(refused.value) == "member='Ann Lee' is also the value of branch"
+    assert str(refused) == "member='Ann Lee' is also the value of branch"

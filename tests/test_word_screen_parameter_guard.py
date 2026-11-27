@@ -21,8 +21,8 @@ import pytest
 from pydantic import BaseModel, Field
 
 import fastworkflow
-from fastworkflow.utils import signatures
-from fastworkflow.utils.signatures import InputForParamExtraction
+from fastworkflow.parameters import signatures
+from fastworkflow.parameters.signatures import InputForParamExtraction
 
 WORKFLOW_PATH = str(Path(__file__).parent.joinpath("planning_tutorial_workflow").resolve())
 
@@ -89,7 +89,7 @@ def test_a_kind_word_of_the_workflow_is_refused_as_a_required_value(workflow, va
         workflow, TitleParams(title=value), diagnostics=diagnostics)
 
     assert not is_valid and fields == ["title"], value
-    assert "Missing parameter values: title" in message
+    assert "your request does not give the title" in message
     assert f"title {value!r} is a kind word of this workflow, not a value" in message
     assert diagnostics["word_screen_values"] == {"title": value}
 

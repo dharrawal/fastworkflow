@@ -136,10 +136,10 @@ for bug fixes, costs, thin samples and single-event totals, and say why in the t
 
 | Change (commit) | Target tasks | Old runs → new runs | Per run | Verdict |
 |---|---|---|---|---|
-| `member_review` skill (abc123) | L2-03 L2-07 L5-04 | 10 / 8.5 / 9 → 12.5 / 13.5 / 13 | +3.8 | KEEP: every new run beats every old run |
+| `member_review` planning command (abc123) | L2-03 L2-07 L5-04 | 10 / 8.5 / 9 → 12.5 / 13.5 / 13 | +3.8 | KEEP: every new run beats every old run |
 | Finish note names the page to read (def456) | L1-07 L1-12 | 1 / 0 / 0 → 1 / 1 / 1 | +0.7 | KEEP (bug fix): within noise by the rule, but it fixes a defect the traces show in every earlier stage, and it hurts nothing elsewhere |
 | Splitter votes over 3 samples (0a1b2c) | split losses, all tiers | 11.5 → 6 lines in 3 runs | ~+1.8 | REVERT: single events drive both totals; 3× the calls |
-| Example request added to a skill (3d4e5f) | L5-02 | 9 / 10 / 9 → 9.5 / 10 / 10 | +0.5 | REVERT: within noise |
+| Example request added to a planning command (3d4e5f) | L5-02 | 9 / 10 / 9 → 9.5 / 10 / 10 | +0.5 | REVERT: within noise |
 
 ## Results page outline
 
@@ -164,7 +164,8 @@ Made-up answers: <rows per tier over the runs> (stage <n-1>: <k>). Rule notes: <
 "At stake" is the most a fix could recover, from the grades; it is not a forecast.
 
 ## What ran
-<framework and app commits; models per role; cache off; unattended; lanes and workers;
+<framework and app commits; intent head version; models per role; cache off; learning refit and
+recording off; unattended; lanes and workers;
 state restores; grading: number of graders, checklists, compared with>
 ```
 
@@ -173,7 +174,8 @@ state restores; grading: number of graders, checklists, compared with>
 ```
 - [ ] Every benchmark prompt replayed, not a sample; same component code as the coming stage
 - [ ] ≥3 repetitions per prompt; results compared as distributions (k-of-n per prompt)
-- [ ] FW_LM_CACHE=0 set where fastworkflow.get_env_var reads it (the loaded env file), and
+- [ ] FW_LM_CACHE=0 set where fastworkflow.get_env_var reads it (a loaded env file wins over the
+      process environment), and
       verified: repeats of a multi-part prompt sometimes differ (count distinct answers), and
       usage_rollup's cache counts show no hits (absent cache_hit = unknown, not a miss)
 - [ ] Checker run on deliberately broken outputs (dropped job, joined jobs, stuttered name,

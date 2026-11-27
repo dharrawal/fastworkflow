@@ -27,19 +27,6 @@ def hello_world_workflow_path():
 
 
 @pytest.fixture
-def env_files():
-    """Get paths to actual env files for testing"""
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    env_file = os.path.join(project_root, "env", ".env")
-    passwords_file = os.path.join(project_root, "passwords", ".env")
-    if not os.path.isfile(env_file):
-        pytest.skip(f"Env file not found at {env_file}. Please create ./env/.env")
-    if not os.path.isfile(passwords_file):
-        pytest.skip(f"Passwords file not found at {passwords_file}. Please create ./passwords/.env")
-    return env_file, passwords_file
-
-
-@pytest.fixture
 def unique_user_id():
     """Generate a unique user ID for each test to avoid session conflicts"""
     import uuid
@@ -111,7 +98,7 @@ def admin_enabled(app_module):
 def test_fastapi_imports(app_module):
     """Test that the main module and its conversation components import."""
     try:
-        from fastworkflow.conversation_labeling import generate_topic_and_summary
+        from fastworkflow.session.conversation_labeling import generate_topic_and_summary
         from fastworkflow.observability.store import ObservabilityStore
         from fastworkflow.run_fastapi_mcp.utils import ConversationSummary
 
@@ -256,7 +243,7 @@ def test_session_manager_basic(app_module):
 
 
 # Keys of the public TurnOutput projection every turn surface answers with
-# (fastworkflow/turn.py). ``success`` is a computed field, so it is part of the
+# (fastworkflow/core/turn.py). ``success`` is a computed field, so it is part of the
 # serialized shape rather than something the server bolts on.
 TURN_OUTPUT_KEYS = frozenset(
     {"turn_key", "status", "failure_reason", "answer", "command_outputs", "success"}

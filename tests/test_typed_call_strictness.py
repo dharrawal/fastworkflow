@@ -25,10 +25,10 @@ import pytest
 from dspy.utils import DummyLM
 
 import fastworkflow
-from fastworkflow import planning_commands as pc
-from fastworkflow import workflow_agent
-from fastworkflow.utils import signatures
-from fastworkflow.utils.signatures import NOT_FOUND
+from fastworkflow.planning import planning_commands as pc
+from fastworkflow.agent import workflow_agent
+from fastworkflow.parameters import signatures
+from fastworkflow.parameters.signatures import NOT_FOUND
 from tests.test_planning_command_argument_screens import TRANSFER_LOAN
 
 TUTORIAL = Path(__file__).resolve().parent / "planning_tutorial_workflow"
@@ -94,7 +94,6 @@ def _framework(tmp_path, monkeypatch):
     fastworkflow.init({"FASTWORKFLOW_STATE_ROOT": str(tmp_path / "workflow_contexts")})
     fastworkflow.RoutingRegistry.clear_registry()
     monkeypatch.setitem(fastworkflow._env_vars, "FW_JEV_FIELD_GIVEN", "off")
-    monkeypatch.setattr(signatures, "LLM_PARAM_EXTRACTION", "scripted/extractor")
     yield
     fastworkflow.RoutingRegistry.clear_registry()
 
@@ -156,15 +155,23 @@ def _after(command: pc.PlanningCommandCommand, values: dict, request: str, folde
 
 
 @pytest.mark.parametrize("name, request_text, values", [case[1:] for case in CORPUS], ids=[c[0] for c in CORPUS])
-def test_the_typed_call_refuses_what_the_planning_checks_refuse(folder, monkeypatch, name, request_text, values):
+def test_the_typed_call_refuses_what_the_planning_checks_refuse(folder, monkeypatch, request, name, request_text, values):
     command = _command(folder, name)
     before = _before(command, values, request_text)
     after, extractor = _after(command, values, request_text, folder, monkeypatch)
 
     if before[0] == "refused":
         assert after[0] == "refused", (before, after)
-        # refused, then read once more and refused again (a value its type cannot hold is refused at parse, retried)
-        assert extractor.calls >= 2, after
+        # a refused value is read once more and refused again (a value its type cannot hold is refused at parse,
+        # retried); a value that is simply missing is not read again
+        if after[1].startswith("missing required argument"):
+            # one extraction (its own attempts at one parse failure count), never a second pass; except an answer
+            # every attempt of which failed to parse (a value outside an enum): that is a refusal, so it gets the one
+            # second pass, 3 attempts more (bd fix-qoyz step 6, item 1)
+            parse_failure = request.node.callspec.id == "not-an-enum-value"
+            assert extractor.calls <= (6 if parse_failure else 3), after
+        else:
+            assert extractor.calls >= 2, after
     else:
         assert after == before
 
@@ -174,8 +181,10 @@ def test_the_corpus_holds_refusals_of_every_kind(folder):
     refused = {case[0] for case in CORPUS if _before(_command(folder, case[1]), case[3], case[2])[0] == "refused"}
     assert {"braces", "angle", "name-number", "unspecified", "invented-example", "that-one", "it", "own-name",
             "field-name", "command-word", "declared-choice", "kind-word", "invented-subject", "not-in-request",
-            "identifier-fragment", "role-conflict", "role-conflict-unwritten", "not-an-enum-value",
-            "not-given-text", "unknown-marker", "missing-required"} <= refused
+            "identifier-fragment", "not-an-enum-value", "not-given-text", "unknown-marker", "missing-required"} <= refused
+    # two UNMARKED inputs given one value the request writes twice are not refused: the one duplicate rule reads
+    # marked fields only (bd fix-qjne.20)
+    assert not {"role-conflict", "role-conflict-unwritten"} & refused
 
 
 # ---------------------------------------------------------------- the typed-fill fallback (fix-48np)
@@ -187,7 +196,7 @@ def test_the_fallback_fills_a_required_argument_the_extractor_missed(folder, mon
     after, extractor = _after(command, {"author": NOT_FOUND}, request, folder, monkeypatch, typed={"author": "Austen"})
 
     assert after == ("ok", {"author": "Austen"})
-    assert extractor.calls >= 2                     # the extractor was asked, and asked again, first
+    assert extractor.calls == 1                     # a missing value is not read again: the typed fill is next
 
 
 def test_the_fallback_cannot_add_a_value_the_checks_refuse(folder, monkeypatch):

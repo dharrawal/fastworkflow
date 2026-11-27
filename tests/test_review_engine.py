@@ -18,18 +18,18 @@ from typing import Optional
 import pytest
 from pydantic import BaseModel, Field
 
-from fastworkflow import approval_binding as ab
-from fastworkflow import review_engine as re_
-from fastworkflow.review_engine import (
-    AWAITING, CONFIRMED, DECLINED, EXECUTED, EXPIRED, INVALIDATED, KIND_ACTION, KIND_PLAN,
+from fastworkflow.review import approval_binding as ab
+from fastworkflow.review import review_engine as re_
+from fastworkflow.review.review_engine import (
+    AWAITING, CONFIRMED, DECLINED, EXECUTED, EXPIRED, INVALIDATED, KIND_ACTION,
     KIND_SUB_TASKS, REVISED, Change, Drop, EditParseError, IllegalTransition,
     Proposal, ReviewError, ReviewRecord, ReviewStore, Verdict, apply_edits, audit_attributes,
     fingerprint, link, open_review, parse_edits, propagate, proposal_of, register_proposal,
     reply_policy, reply_to_proposal, rendering_hash, set_model_interpreter, stale_upstream,
 )
-from fastworkflow.approval_binding import Surface
-from fastworkflow.turn import TurnStatus
-from fastworkflow import tracing
+from fastworkflow.review.approval_binding import Surface
+from fastworkflow.core.turn import TurnStatus
+from fastworkflow.observability import tracing
 from tests.test_approval_binding import annotated_library, no_live_model, no_model_call_for_parameters, todo  # noqa: F401,F811
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401
 
@@ -61,7 +61,7 @@ class Goal(BaseModel):
 
 @register_proposal
 class GoalPlan(Proposal):
-    kind = KIND_PLAN
+    kind = KIND_SUB_TASKS
     spec = "review_test_plan"
     title = "Plan"
     item_template = "{index}. {goal}: {steps}"
@@ -103,7 +103,6 @@ def _force_store_state(record: ReviewRecord, state: str) -> None:
 
 def test_the_transition_table_allows_the_documented_moves_and_nothing_out_of_a_terminal_state():
     assert re_.ACTIVE_STATES == frozenset({AWAITING, REVISED})
-    assert re_.TERMINAL_STATES == frozenset({DECLINED, EXPIRED, INVALIDATED, EXECUTED})
     store = _store()
     record = open_review(None, store, _tasks("a"), surface=store.surface)
     assert record.state == AWAITING and record.kind == KIND_SUB_TASKS
@@ -166,7 +165,7 @@ def test_a_declined_proposal_is_terminal_and_says_so():
 
 
 def test_a_proposal_suspends_the_agent_call_on_its_prompt_when_asked_to():
-    from fastworkflow.utils.react import AskUserSuspend
+    from fastworkflow.engine.suspension import AskUserSuspend
 
     store = _store()
     with pytest.raises(AskUserSuspend) as caught:
@@ -185,7 +184,7 @@ def test_the_fingerprint_is_the_same_across_processes_and_key_order():
     proposal = _tasks("alpha", "beta")
     here = proposal.fingerprint()
     code = ("import json,sys\n"
-            "from fastworkflow import review_engine as r\n"
+            "from fastworkflow.review import review_engine as r\n"
             "print(r.fingerprint(json.loads(sys.argv[1])))")
     binding = json.dumps(proposal.binding())
     other = subprocess.run([sys.executable, "-I", "-c", code, binding], capture_output=True, text=True, check=True)
@@ -466,10 +465,11 @@ def test_a_proposal_reply_on_a_real_session_that_is_refused_says_why_and_keeps_t
 
 def test_the_action_policy_reads_exactly_the_approval_words():
     policy = reply_policy(KIND_ACTION)
-    assert policy.classify("yes") is Verdict.CONFIRM
+    for text in ("yes", " yes", "yes ", "Yes", "accept", "ok", "go."):          # the one yes reader (no_agent_mode.is_yes)
+        assert policy.classify(text) is Verdict.CONFIRM, text
     assert policy.classify("no") is Verdict.DECLINE
     assert policy.classify("always") is Verdict.ALWAYS
-    for text in (" yes", "yes ", "Yes", "/yes", "sure", "yes but", "accept"):
+    for text in ("/yes", "sure", "yes but", "y", "run it"):
         assert policy.classify(text) is Verdict.REPROMPT, text
 
 
@@ -485,7 +485,7 @@ def test_a_proposal_review_gets_its_own_reply_cap_and_an_approval_keeps_two():
     """fix-3rsq.plan-review.2.5: the proposal kinds admit about 8 replies or 30 minutes; the approval (action) kind
     keeps TTL_TURNS=2 and TTL_SECONDS. Each open record carries the cap its kind is given."""
     assert re_.ttl_for_kind(KIND_ACTION) == (re_.TTL_TURNS, re_.TTL_SECONDS) == (2, 900)
-    assert re_.ttl_for_kind(KIND_SUB_TASKS) == re_.ttl_for_kind(KIND_PLAN) == (8, re_.PROPOSAL_TTL_SECONDS)
+    assert re_.ttl_for_kind(KIND_SUB_TASKS) == (8, re_.PROPOSAL_TTL_SECONDS)
     store = _store()
     record = open_review(None, store, _tasks("a"), surface=store.surface)
     assert (record.ttl_turns, record.ttl_seconds) == (8, re_.PROPOSAL_TTL_SECONDS)

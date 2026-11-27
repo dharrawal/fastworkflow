@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from fastworkflow.nlu_labels import WILDCARD_LABEL
+from fastworkflow.intent.nlu_labels import WILDCARD_LABEL
 from fastworkflow.train import determinism, training_report
 from fastworkflow.train.determinism import ContextTrainingStatus
 

@@ -10,7 +10,7 @@ import pytest
 from pydantic import BaseModel, Field, model_validator
 
 import fastworkflow
-from fastworkflow.utils import signatures
+from fastworkflow.parameters import signatures
 
 
 def _with_validator(base, check):
@@ -22,7 +22,7 @@ def _with_validator(base, check):
             check(self)
             return self
     return Checked
-from fastworkflow.utils.signatures import (
+from fastworkflow.parameters.signatures import (
     InputForParamExtraction,
     classify_bracketed_value,
 )
@@ -66,11 +66,10 @@ def _validate(params, hook_class=None, diagnostics=None):
     ("<<abc123>>", "abc123"),
     ("<Ann Lee>", "Ann Lee"),
     ("<PayHub>", "PayHub"),
-    ("<payhub>", "payhub"),
     ("<case_Ug6A17H6389PRTCiJ1MeSH>", "case_Ug6A17H6389PRTCiJ1MeSH"),
 ])
 def test_a_real_value_in_brackets_is_unwrapped(value, expected):
-    assert classify_bracketed_value(value, "item_uid") == ("unwrapped", expected)
+    assert classify_bracketed_value(value) == ("unwrapped", expected)
 
 
 @pytest.mark.parametrize("value, field", [
@@ -84,9 +83,12 @@ def test_a_real_value_in_brackets_is_unwrapped(value, expected):
     ("<>", "query"),
     ("<...>", "query"),
     ("<value>", "query"),
+    # the shape alone (bd fix-ftdl.6.1): a variable name in one case is a placeholder whatever word it is
+    ("<payhub>", "query"),
+    ("<PAYHUB>", "query"),
 ])
 def test_bracketed_text_with_no_value_is_a_placeholder(value, field):
-    assert classify_bracketed_value(value, field) == ("placeholder", value)
+    assert classify_bracketed_value(value) == ("placeholder", value)
 
 
 @pytest.mark.parametrize("value", [
@@ -99,13 +101,13 @@ def test_bracketed_text_with_no_value_is_a_placeholder(value, field):
     42,
 ])
 def test_values_not_wholly_bracketed_are_left_alone(value):
-    assert classify_bracketed_value(value, "item_uid") == ("unchanged", value)
+    assert classify_bracketed_value(value) == ("unchanged", value)
 
 
 def test_list_items_are_checked_one_by_one():
-    assert classify_bracketed_value(["<abc123>", "def456"], "item_uids") == (
+    assert classify_bracketed_value(["<abc123>", "def456"]) == (
         "unwrapped", ["abc123", "def456"])
-    assert classify_bracketed_value(["abc123", "<item_uid>"], "item_uids")[0] == "placeholder"
+    assert classify_bracketed_value(["abc123", "<item_uid>"])[0] == "placeholder"
 
 
 # --- validate_parameters -------------------------------------------------------

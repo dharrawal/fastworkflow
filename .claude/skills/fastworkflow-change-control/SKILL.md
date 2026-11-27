@@ -137,7 +137,7 @@ These epics look shipped-but-open. The code demonstrably exists on main, yet chi
 
 | Epic | Status shown | Evidence code shipped | Why it may be *intentionally* open |
 |---|---|---|---|
-| `fix-yy1` (v2.21 TurnResult capture) | open, children open | `fastworkflow/turn.py`, `process_turn` at `workflow_execution_context.py:484`, shipped `afcbe01` | Its own notes say "Tasks left open until approval+commit" — approval happened, closure forgotten? **Ask Dhar.** |
+| `fix-yy1` (v2.21 TurnResult capture) | open, children open | `fastworkflow/core/turn.py`, `process_turn` at `workflow_execution_context.py:484`, shipped `afcbe01` | Its own notes say "Tasks left open until approval+commit" — approval happened, closure forgotten? **Ask Dhar.** |
 | `fix-qtq` (TurnOutput wire cutover) | open, 9 children | `turns.py` types `WorkFn` as returning `TurnOutput` | Genuinely incomplete: `run_fastapi_mcp/utils.py:427` still serves the old shape; breaking wire change pending. Likely legitimately open. |
 | `fix-7kp` (speedict removal) | open | fix-2jo (identical title) CLOSED, shipped v2.21.4 | Duplicate from the flaky-bd era — or an intentional extension (speedict remains in `cache_matching.py`, `workflow.py`, `session_state_store.py`). **Ask Dhar.** |
 

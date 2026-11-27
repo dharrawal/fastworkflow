@@ -1,7 +1,7 @@
 """Execution command whose hook refuses without a field (the whole call is refused)."""
 
 import fastworkflow
-from fastworkflow.workflow import Workflow
+from fastworkflow.core.workflow import Workflow
 from pydantic import BaseModel, Field, model_validator
 
 

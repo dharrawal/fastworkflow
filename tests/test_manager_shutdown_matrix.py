@@ -19,6 +19,8 @@ Everything runs against real runtimes, a real `ChannelSessionManager`, a real
 single substitution anywhere in the file is a call counter bound over the
 topic-generation entry point, so that "shutdown makes no LLM call" can be
 asserted by count rather than by the absence of an error message.
+The four streaming-ownership tests also script the model boundary (`scripted_agent_turns`),
+because they run an agent turn and assert on channel ownership, not on the model's answer.
 """
 
 from __future__ import annotations
@@ -55,16 +57,6 @@ def hello_world_workflow_path():
     if not os.path.isdir(workflow_path):
         pytest.skip(f"hello_world workflow not found at {workflow_path}")
     return workflow_path
-
-
-@pytest.fixture
-def env_files():
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    env_file = os.path.join(project_root, "env", ".env")
-    passwords_file = os.path.join(project_root, "passwords", ".env")
-    if not os.path.isfile(env_file) or not os.path.isfile(passwords_file):
-        pytest.skip("env files missing for FastAPI tests")
-    return env_file, passwords_file
 
 
 @pytest.fixture
@@ -228,7 +220,10 @@ def _suspend(runtime: ChannelRuntime) -> None:
     """
     ctx = runtime.execution_context
     state = ctx.serialize_state(channel_id=runtime.channel_id)
-    ctx.apply_serialized_state({**state, "awaiting_user": True})
+    from fastworkflow.core import waiting as waiting_module
+
+    asked = waiting_module.Waiting(waiting_module.KIND_AGENT, question="which one?")
+    ctx.apply_serialized_state({**state, "waiting": asked.to_state()})
     assert ctx.awaiting_user
 
 
@@ -654,6 +649,17 @@ def test_shutdown_generates_no_topic_and_has_no_turns_left_to_persist(app_module
 # Streaming lifecycle (design §10.4, invariant 21)
 # ---------------------------------------------------------------------------
 
+@pytest.fixture
+def scripted_agent_turns(monkeypatch, app_module):
+    """The model boundary for the streaming-ownership tests below: they run a real agent turn through the real
+    ``invoke_agent_stream``, and what they assert is who owns the channel, not what the model said. The agent's
+    steps, the split, the refinement, the planner and the topic label are scripted (``tests/fastapi_turn_seam.py``),
+    so the turn ends without a model and the tests run on every machine."""
+    from tests.fastapi_turn_seam import install_turn_seam
+
+    return install_turn_seam(monkeypatch, finish_when_empty=True, app_module=app_module)
+
+
 @contextlib.asynccontextmanager
 async def asgi_client(app_module):
     """Drive the real app over ASGI from the caller's own event loop.
@@ -687,7 +693,7 @@ def _session_data(app_module, channel_id: str):
     )
 
 
-def test_a_normal_turn_is_refused_while_a_streaming_turn_owns_the_channel(app_module):
+def test_a_normal_turn_is_refused_while_a_streaming_turn_owns_the_channel(app_module, scripted_agent_turns):
     """Hazard: an unrelated query answered as somebody else's clarification.
 
     A stream used to own the channel through ``runtime.lock`` and nothing else,
@@ -707,7 +713,7 @@ def test_a_normal_turn_is_refused_while_a_streaming_turn_owns_the_channel(app_mo
         async with asgi_client(app_module) as client:
             headers = await _auth_headers(client, channel_id)
             response = await app_module.invoke_agent_stream(
-                app_module.InvokeRequest(user_query="add 2 and 3", timeout_seconds=60),
+                app_module.AgentInvokeRequest(user_query="add 2 and 3", timeout_seconds=60),
                 _session_data(app_module, channel_id),
             )
             seen["stream_owns"] = app_module.turn_registry.has_active(channel_id)
@@ -736,7 +742,7 @@ def test_a_normal_turn_is_refused_while_a_streaming_turn_owns_the_channel(app_mo
     assert "already in progress" in seen["detail"]
 
 
-def test_a_streaming_turn_is_refused_while_a_normal_turn_owns_the_channel(app_module):
+def test_a_streaming_turn_is_refused_while_a_normal_turn_owns_the_channel(app_module, scripted_agent_turns):
     """Hazard: the reverse ordering, where the stream is the one that jumps in.
 
     The occupying turn here is a real registered execution that goes on to
@@ -775,7 +781,7 @@ def test_a_streaming_turn_is_refused_while_a_normal_turn_owns_the_channel(app_mo
     assert seen["free_afterwards"]
 
 
-def test_eviction_spares_a_channel_whose_streaming_turn_is_registered(app_module):
+def test_eviction_spares_a_channel_whose_streaming_turn_is_registered(app_module, scripted_agent_turns):
     """Hazard: a runtime evicted between admission and first body iteration.
 
     A streaming turn is registered before Starlette begins consuming the body, and
@@ -831,7 +837,7 @@ def test_eviction_spares_a_channel_whose_streaming_turn_is_registered(app_module
     )
 
 
-def test_an_abandoned_response_body_does_not_end_the_streaming_turn(app_module):
+def test_an_abandoned_response_body_does_not_end_the_streaming_turn(app_module, scripted_agent_turns):
     """Hazard: client disconnect deciding when a workflow stops mutating state.
 
     Delivery and ownership are separate. If the turn's completion depended on
@@ -848,7 +854,7 @@ def test_an_abandoned_response_body_does_not_end_the_streaming_turn(app_module):
         async with asgi_client(app_module) as client:
             await _auth_headers(client, channel_id)
             response = await app_module.invoke_agent_stream(
-                app_module.InvokeRequest(user_query="add 2 and 3", timeout_seconds=60),
+                app_module.AgentInvokeRequest(user_query="add 2 and 3", timeout_seconds=60),
                 _session_data(app_module, channel_id),
             )
             turn_key = app_module.turn_registry.active_turn_key(channel_id)

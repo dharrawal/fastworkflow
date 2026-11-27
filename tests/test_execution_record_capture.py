@@ -26,11 +26,12 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow import TurnResult, tracing
+from fastworkflow import TurnResult
+from fastworkflow.observability import tracing
 from fastworkflow.observability import store as obs
-from fastworkflow.command_executor import CommandExecutor
+from fastworkflow.engine.command_executor import CommandExecutor
 from fastworkflow.observability.execution_recorder import record_execution
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 from tests.todo_list_workflow.application.todo_manager import TodoListManager
 
@@ -46,7 +47,7 @@ def todo_workflow_path() -> str:
 @pytest.fixture
 def initialized_fastworkflow():
     fastworkflow.init({})
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     RoutingRegistry.clear_registry()
     yield
@@ -138,7 +139,7 @@ def test_direct_action_turn_populates_execution_records(ctx, sink):
     assert turn_result.execution_records, "execution_records stayed empty"
 
     record = turn_result.execution_records[0]
-    tool_call = sink.named(tracing.SPAN_AGENT_TOOL_CALL)[0]
+    tool_call = sink.named(tracing.SPAN_COMMAND)[0]
     span_call_id = tool_call.attributes[tracing.ATTR_COMMAND_CALL_ID]
 
     assert record.command_call_id == span_call_id
@@ -155,7 +156,7 @@ def test_execution_records_survive_turn_record_serialization(ctx, sink):
     turn_row, _artifacts = obs.serialize_turn_result(sink.turn_records[-1])
     persisted = json.loads(turn_row["record_json"])
 
-    span_call_id = sink.named(tracing.SPAN_AGENT_TOOL_CALL)[0].attributes[
+    span_call_id = sink.named(tracing.SPAN_COMMAND)[0].attributes[
         tracing.ATTR_COMMAND_CALL_ID
     ]
     assert persisted["execution_records"] == [
@@ -164,7 +165,7 @@ def test_execution_records_survive_turn_record_serialization(ctx, sink):
             "command_call_id": span_call_id,
             "parent_call_id": None,
             "command_ordinal": 0,
-            "span_id": sink.named(tracing.SPAN_AGENT_TOOL_CALL)[0].span_id,
+            "span_id": sink.named(tracing.SPAN_COMMAND)[0].span_id,
         }
     ]
 
@@ -206,7 +207,7 @@ def test_prose_path_records_nested_child_calls(
 
         parent = turn_result.execution_records[0]
         child = turn_result.execution_records[1]
-        execute = sink.named(tracing.SPAN_COMMAND_EXECUTE)[0]
+        execute = sink.named(tracing.SPAN_COMMAND)[0]
 
         assert parent.command_call_id == execute.attributes[tracing.ATTR_COMMAND_CALL_ID]
         assert parent.span_id == execute.span_id

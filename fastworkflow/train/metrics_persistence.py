@@ -203,7 +203,7 @@ def persist_train_run_metrics(
     Returns the run_id written, or None on failure.
     """
     try:
-        from fastworkflow import state_paths
+        from fastworkflow.session import state_paths
         from fastworkflow.observability import store as observability_store
 
         if completed_at is None:
@@ -212,7 +212,7 @@ def persist_train_run_metrics(
 
         workflow_fingerprint: Optional[str] = None
         try:
-            from fastworkflow.command_directory import (
+            from fastworkflow.core.command_directory import (
                 compute_commands_source_fingerprint,
             )
 

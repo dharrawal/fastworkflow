@@ -282,7 +282,7 @@ caps, would help every DSPy server user.
 ## 5. Session eviction silently dropped the workflow context
 
 **Files:** `fastworkflow/run_fastapi_mcp/utils.py`,
-`fastworkflow/session_state_store.py`
+`fastworkflow/session/session_state_store.py`
 
 Lowering the session cap from 2000 to 50 and adding an idle TTL made an existing,
 latent behaviour routine, so it had to be resolved before the new defaults could

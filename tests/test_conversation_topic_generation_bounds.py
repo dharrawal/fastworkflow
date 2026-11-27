@@ -55,7 +55,7 @@ import pytest
 from dotenv import dotenv_values
 
 import fastworkflow
-from fastworkflow.conversation_labeling import (
+from fastworkflow.session.conversation_labeling import (
     DEFAULT_TOPIC_GENERATION_TIMEOUT_SECONDS,
     TOPIC_GENERATION_MAX_RETRIES,
     TOPIC_GENERATION_TIMEOUT_ENV_VAR,
@@ -165,14 +165,14 @@ def test_the_retry_count_is_pinned_because_it_multiplies_the_deadline(
     that generation builds, not off the transport.
     """
     built: list = []
-    real_get_lm = fastworkflow.conversation_labeling.get_lm
+    real_get_lm = fastworkflow.session.conversation_labeling.get_lm
 
     def record_lm(*args, **kwargs):
         lm = real_get_lm(*args, **kwargs)
         built.append(lm)
         return lm
 
-    monkeypatch.setattr(fastworkflow.conversation_labeling, "get_lm", record_lm)
+    monkeypatch.setattr(fastworkflow.session.conversation_labeling, "get_lm", record_lm)
 
     with pytest.raises(Exception):
         generate_topic_and_summary(_turns("retries"))
@@ -268,18 +268,18 @@ def test_the_workflow_env_file_is_used_when_the_process_has_no_override(
     assert resolve_topic_generation_timeout() == (3.5, "workflow env file")
 
 
-def test_an_empty_process_value_falls_through_instead_of_failing(
+def test_an_empty_process_value_is_set_and_means_the_default_instead_of_failing(
     conversation_store_env, monkeypatch
 ):
     """An exported-but-empty variable is how container templating leaves a blank.
 
-    Treating "" as a configured value would turn a blank template into a hard
-    failure, or worse a zero deadline.
+    It is set (the one precedence rule, ``fastworkflow.raw_env_var``: an empty process value hides the env file's),
+    and an empty value means the default: never a hard failure, never a zero deadline.
     """
     monkeypatch.setenv(TOPIC_GENERATION_TIMEOUT_ENV_VAR, "")
     conversation_store_env[TOPIC_GENERATION_TIMEOUT_ENV_VAR] = "3.5"
 
-    assert resolve_topic_generation_timeout() == (3.5, "workflow env file")
+    assert resolve_topic_generation_timeout() == (DEFAULT_TOPIC_GENERATION_TIMEOUT_SECONDS, "default")
 
 
 @pytest.mark.parametrize("bad", ["banana", "12s", "0", "-1"])
@@ -328,16 +328,6 @@ def hello_world_workflow_path():
     if not os.path.isdir(workflow_path):
         pytest.skip(f"hello_world workflow not found at {workflow_path}")
     return workflow_path
-
-
-@pytest.fixture
-def env_files():
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    env_file = os.path.join(project_root, "env", ".env")
-    passwords_file = os.path.join(project_root, "passwords", ".env")
-    if not os.path.isfile(env_file) or not os.path.isfile(passwords_file):
-        pytest.skip("env files missing for FastAPI tests")
-    return env_file, passwords_file
 
 
 @pytest.fixture

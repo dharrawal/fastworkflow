@@ -3,7 +3,7 @@ import re
 
 import pytest
 
-from fastworkflow.split_merge import merge_subtasks, request_subjects, subjects_in, without_repeated_clauses
+from fastworkflow.agent.split_merge import merge_subtasks, request_subjects, subjects_in, without_repeated_clauses
 
 
 # ------------------------------------------------------------------ subjects
@@ -335,13 +335,13 @@ def test_a_request_sentence_whose_record_no_sub_task_names_is_put_back_in_place(
 
 # ------------------------------------------------------------------ referents (chosen by the caller)
 def test_the_unnamed_subjects_are_the_request_subjects_a_sub_task_leaves_out():
-    from fastworkflow.split_merge import unnamed_subjects
+    from fastworkflow.agent.split_merge import unnamed_subjects
     q = "Ann Lee leaves on Friday. Then tag the customer `on-leave`."
     assert unnamed_subjects(q, "Tag the customer `on-leave`.") == ["Ann Lee"]
 
 
 def test_a_record_listed_with_the_one_a_sub_task_names_is_not_its_unnamed_subject():
-    from fastworkflow.split_merge import unnamed_subjects
+    from fastworkflow.agent.split_merge import unnamed_subjects
     q = ("Northwind Ltd is closing. Walk its whole roster: every person on it. Ann Lee and Bob Kerr leave at the end "
          "of the month, so each of them down to their first login listed. And Cid Moss has asked for the right "
          "Payroll_Admin: what it exposes and who holds it.")
@@ -353,7 +353,7 @@ def test_a_record_listed_with_the_one_a_sub_task_names_is_not_its_unnamed_subjec
 
 
 def test_a_referent_replaces_the_one_pointing_phrase_or_is_appended():
-    from fastworkflow.split_merge import with_referent
+    from fastworkflow.agent.split_merge import with_referent
     assert with_referent("Raj Patel from that team is leaving.", "Hart Mills Ltd") == \
         "Raj Patel from Hart Mills Ltd is leaving."
     assert with_referent("Confirm whether Raj Patel is among its holders.", "Payroll_Approver") == \
@@ -368,7 +368,7 @@ def test_a_referent_replaces_the_one_pointing_phrase_or_is_appended():
 
 
 def test_a_definite_description_of_the_referent_gets_the_record_written_after_it():
-    from fastworkflow.split_merge import with_referent
+    from fastworkflow.agent.split_merge import with_referent
     text = "Tag the customer `on-leave` and show me its tags before and after."
     # the caller found that "the customer" stands for the record: written in there, and the one "its" too
     assert with_referent(text, "Ann Lee", "the customer") == \
@@ -383,7 +383,7 @@ def test_a_definite_description_of_the_referent_gets_the_record_written_after_it
 
 
 def test_definite_descriptions_leave_out_plurals_common_words_of_phrases_and_named_ones():
-    from fastworkflow.split_merge import definite_descriptions
+    from fastworkflow.agent.split_merge import definite_descriptions
     assert definite_descriptions("Tag the customer `on-leave` and show me its tags.") == ["the customer"]
     assert definite_descriptions("Show me the customer's tags.") == ["the customer"]
     assert definite_descriptions(
@@ -464,7 +464,7 @@ def test_an_asking_sentence_is_not_written_before_jobs_that_name_a_record():
 
 
 def test_statements_and_asks():
-    from fastworkflow.split_merge import _asks, _is_statement
+    from fastworkflow.agent.split_merge import _asks, _is_statement
     for statement in ("Ann Lee leaves at the end of the week.", "I am closing out Field Sales for the year.",
                       "Field Sales and Sons 1 is being folded into another unit."):
         assert _is_statement(statement)
@@ -482,10 +482,48 @@ def test_a_subtask_putting_another_sentences_record_in_a_job_is_dropped():
     split = ["Audit BuildOps admin rights wherever they appear, including the system that publishes it.",
              "Audit Field Sales wherever it appears, including the system that publishes it.",
              "Walk Field Sales end to end: every identity on the roster."]
-    assert merge_subtasks(q, split) == [
+    # fix-ftdl.12: the model's part carries "BuildOps", which the sentence it comes from does not write as a
+    # subject, so the sentence no longer replaces it (a rewrite keeps every subject the part carried): the part
+    # stays as the model wrote it and the doubt is recorded; rule 6 still puts the sentence back, cut per record
+    doubts: list[dict] = []
+    assert merge_subtasks(q, split, doubts=doubts) == [
+        "Audit BuildOps admin rights wherever they appear, including the system that publishes it.",
+        "Audit Field Sales wherever it appears, including the system that publishes it. "
+        "Walk Field Sales end to end: every identity on the roster.",
         "Audit BuildOps_Release Manager wherever they appear, each with the system that publishes it.",
-        "Audit BuildOps_Backup Administrator wherever they appear, each with the system that publishes it.",
-        "Walk Field Sales end to end: every identity on the roster."]
+        "Audit BuildOps_Backup Administrator wherever they appear, each with the system that publishes it."]
+    assert doubts == [{"part": split[0],
+                       "missing": ["BuildOps_Backup Administrator", "BuildOps_Release Manager"]}]
+
+
+def test_a_part_carrying_a_name_of_another_sentence_is_not_replaced_by_a_sentence_lacking_it():
+    q = ("Northwind Ltd recertification. Give me the full recertification: owner, members, the Night_Shift group "
+         "with its members, and the risk. Then list the loans Cid Moss never returned, with their count.")
+    split = ["Northwind Ltd recertification: its owner, its members, its group with that group's members, and its risk.",
+             "List the loans Cid Moss never returned, with their count."]
+    doubts: list[dict] = []
+    merged = merge_subtasks(q, split, doubts=doubts)
+    # the part keeps "Northwind Ltd" (the sentence it would have become never names it); rule 6 puts back the
+    # sentence naming Night_Shift, which no part names, beside it
+    assert merged == [split[0],
+                      "Give me the full recertification: owner, members, the Night_Shift group with its members, "
+                      "and the risk.",
+                      split[1]]
+    assert doubts == [{"part": split[0], "missing": ["Night_Shift"]}]
+
+
+def test_a_part_carrying_no_subject_of_its_own_is_still_restored_with_no_doubt():
+    q = ("Feed review. List the logins nobody owns on NORTHFEED and on SOUTHFEED, with a count for each. "
+         "Confirm whether the HR feed carries any logins at all. "
+         "Then open the riskier of NORTHFEED and SOUTHFEED and show me the controls it trips.")
+    split = ["List the logins nobody owns on NORTHFEED, with a count for each.",
+             "Confirm whether the HR feed carries any logins at all.",
+             "Open the riskier of NORTHFEED and SOUTHFEED and show me the controls it trips."]
+    doubts: list[dict] = []
+    assert merge_subtasks(q, split, doubts=doubts)[:2] == [
+        "List the logins nobody owns on NORTHFEED, with a count for each.",
+        "List the logins nobody owns on SOUTHFEED, with a count for each."]
+    assert doubts == []
 
 
 def test_an_asked_job_whose_record_only_other_jobs_name_is_put_back():
@@ -611,3 +649,56 @@ def test_a_name_taken_from_the_earlier_turns_is_not_an_invention_and_the_request
     # When everything joins, the request (never the earlier turns) is the one job.
     assert merge_subtasks(q, ["Add a note to Mia Chen's record that she was reminded.",
                               "Show the notes on Mia Chen's record."], context=context) == [q]
+
+
+# ------------------------------------------------------------------ name integrity (fix-26pf, fix-hia1.38)
+def test_a_name_with_and_cut_in_two_is_put_back_together():
+    q = "Show the groups of Baker and Sons and Sons and the cases of Ann Lee."
+    split = ["Show the groups of Baker", "Show the groups of Sons and the cases of Ann Lee."]
+    assert merge_subtasks(q, split) == [q]
+
+
+def test_a_quoted_name_with_and_cut_in_two_is_never_left_cut():
+    q = "Show the groups of 'Baker and Sons' and the cases of Ann Lee."
+    out = merge_subtasks(q, ["Show the groups of Baker.", "Show the groups of Sons.", "Show the cases of Ann Lee."])
+    assert out == [q]
+
+
+def test_a_stuttered_name_is_collapsed_to_the_requests_spelling():
+    q = "Walk Blake and Sons. Then show the cases of Ann Lee."
+    split = ["Walk Blake and Sons and Sons and Sons and Sons.", "Show the cases of Ann Lee."]
+    assert merge_subtasks(q, split) == ["Walk Blake and Sons.", "Show the cases of Ann Lee."]
+    q = "Walk 'Blake and Sons'. Then show the cases of Ann Lee."
+    assert merge_subtasks(q, ["Walk Blake and Sons and Sons.", "Show the cases of Ann Lee."]) == [
+        "Walk Blake and Sons.", "Show the cases of Ann Lee."]
+
+
+def test_a_name_the_request_itself_repeats_is_not_collapsed():
+    q = "Walk Blake and Sons and Sons. Then show the cases of Ann Lee."
+    split = ["Walk Blake and Sons and Sons.", "Show the cases of Ann Lee."]
+    assert merge_subtasks(q, split) == split
+
+
+def test_whole_names_with_and_come_through_unchanged():
+    q = "Show the groups of Baker and Sons and the cases of Ann Lee. Then walk 'Cobb and Daughters'."
+    split = ["Show the groups of Baker and Sons.", "Show the cases of Ann Lee.", "Walk 'Cobb and Daughters'."]
+    assert merge_subtasks(q, split) == split
+
+
+# ------------------------------------------------------------------ dependent parts stay together (fix-dr1e d)
+def test_a_dependent_part_naming_the_same_person_is_kept_with_its_parent():
+    q = "Who does Ann Lee report to and what is the delta between her permissions and that of her boss"
+    assert merge_subtasks(q, ["Who does Ann Lee report to?",
+                              "What is the delta between Ann Lee's permissions and that of her boss?"]) == [q]
+
+
+def test_a_subject_less_dependent_part_is_kept_with_its_parent():
+    q = "Walk one login to an entitlement, then audit that entitlement. Also sweep Bo Chan."
+    out = merge_subtasks(q, ["Walk one login to an entitlement.", "Audit that entitlement.", "Sweep Bo Chan."])
+    assert not any("Audit that entitlement" in t and "Walk one login" not in t for t in out)
+
+
+def test_a_comparison_followed_by_a_dependent_listing_is_one_job():
+    q = "Compare Ann Lee and Bo Chan, then for whichever carries more risk, list the findings."
+    assert merge_subtasks(q, ["Compare Ann Lee and Bo Chan.",
+                              "For whichever carries more risk, list the findings."]) == [q]

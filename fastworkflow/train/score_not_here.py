@@ -47,7 +47,7 @@ import sys
 from collections import Counter
 from typing import Any, Iterable, Optional, Sequence
 
-from fastworkflow.nlu_labels import is_non_routable, label_of
+from fastworkflow.intent.nlu_labels import is_non_routable, label_of
 
 SCHEMA_VERSION = 1
 Z_95 = 1.959963984540054
@@ -264,7 +264,7 @@ class ArmMismatchError(ValueError):
 
 def refuse_retired(arm: str) -> None:
     """Raise ValueError when *arm* is a retired arm (Phase 9 step 5): it no longer exists to score."""
-    from fastworkflow.model_pipeline_training import RETIRED_ARMS
+    from fastworkflow.train.model_pipeline_training import RETIRED_ARMS
 
     if arm in RETIRED_ARMS:
         raise ValueError(f"arm {arm!r} is retired: {RETIRED_ARMS[arm]}")
@@ -367,7 +367,7 @@ def predict_cases(workflow_folderpath: str, cases: Sequence[dict], arm: Optional
     the artifacts were trained with.
     """
     from fastworkflow.train import artifact_versioning
-    from fastworkflow.model_pipeline_training import CommandRouter
+    from fastworkflow.intent.router import CommandRouter
 
     effective_arm = check_arm(workflow_folderpath, arm)
     version = artifact_versioning.resolve_current_version(workflow_folderpath)

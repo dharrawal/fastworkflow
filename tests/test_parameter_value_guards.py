@@ -11,8 +11,8 @@ from typing import List, Optional
 import pytest
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from fastworkflow.utils import signatures
-from fastworkflow.utils.signatures import (
+from fastworkflow.parameters import signatures
+from fastworkflow.parameters.signatures import (
     INVALID_INT_VALUE,
     InputForParamExtraction,
     is_sentinel_number,
@@ -175,9 +175,7 @@ def test_list_field_items_lose_their_quotes():
 @pytest.mark.parametrize("value, field", [
     ("desired-tag", "tag"),
     ("your_item_uid", "item_uid"),
-    ("new-name", "group_name"),
     ("the-tag", "tag"),
-    ("some-value", "tag"),
     ("uid", "item_uid"),
     ("tag", "tag"),
 ])
@@ -193,6 +191,9 @@ def test_placeholder_shaped_values_the_request_never_writes(value, field):
     ("billing", "tag", "add a tag"),
     ("desired-tag", "tag", None),              # nothing to ground against
     ("tag2", "tag", "add a tag"),
+    # no list of stand-in words (bd fix-ftdl.6.1): only an echo of the field's own name is refused here
+    ("new-name", "group_name", "label the item 9a1b2c3d"),
+    ("some-value", "tag", "label the item 9a1b2c3d"),
 ])
 def test_values_that_are_not_ungrounded_placeholders(value, field, request_text):
     assert not is_ungrounded_placeholder(value, field, request_text)

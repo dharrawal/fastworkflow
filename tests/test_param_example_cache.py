@@ -65,8 +65,8 @@ from fastworkflow.train.utterance_cache import (
     callable_identity,
     source_digest,
 )
-from fastworkflow.utils import generate_param_examples
-from fastworkflow.utils.generate_param_examples import (
+from fastworkflow.train import generate_param_examples
+from fastworkflow.train.generate_param_examples import (
     DSPY_EXAMPLE_TEMPERATURE,
     _UNDIGESTED_FUNCTIONS,
     _digested_functions,
@@ -158,9 +158,7 @@ class StructuredFieldTypesInput(BaseModel):
     item_ids: list[str]
     reference: str | int
     mode: DeliveryMode
-    reason: str = Field(
-        json_schema_extra={"enum": ["no longer needed", "ordered by mistake"]}
-    )
+    reason: Literal["no longer needed", "ordered by mistake"]
     note: str | None = None
 
 
@@ -273,7 +271,6 @@ def _fingerprint(**overrides):
         "command_name": COMMAND_NAME,
         "num_examples": 3,
         "validation_threshold": 0.3,
-        "model": MODEL,
         "completion_fn": RecordingParamCompletion(),
     }
     kwargs |= overrides
@@ -282,7 +279,6 @@ def _fingerprint(**overrides):
         kwargs["command_name"],
         kwargs["num_examples"],
         kwargs["validation_threshold"],
-        kwargs["model"],
         completion_fn=kwargs["completion_fn"],
     )
 
@@ -679,14 +675,36 @@ def test_fingerprint_is_stable_for_identical_inputs():
         pytest.param({"command_name": "subtract_two_numbers"}, id="command-name"),
         pytest.param({"num_examples": 4}, id="num-examples"),
         pytest.param({"validation_threshold": 0.4}, id="validation-threshold"),
-        pytest.param({"model": "openai/gpt-4o-mini"}, id="model"),
         pytest.param({"completion_fn": None}, id="completion-backend"),
     ],
 )
 def test_changing_any_generation_input_changes_the_variant_key(overrides):
-    """Every input the LLM sees, plus every input that shapes what gets stored."""
+    """Every input the LLM sees except the model, plus every input that shapes what gets stored."""
     assert _fingerprint().variant_key != _fingerprint(**overrides).variant_key
 
+
+def test_the_generator_model_is_not_a_fingerprint_input():
+    """bd fix-ygxo: examples written by one model are reused under another. `generate_dspy_examples` still passes the
+    model it read (its source is a key input and is not edited), and the fingerprint ignores it."""
+    fields = AddTwoNumbersInput.model_fields
+    with_one = param_example_fingerprint(fields, COMMAND_NAME, 3, 0.3, "mistral/mistral-small-latest")
+    with_another = param_example_fingerprint(fields, COMMAND_NAME, 3, 0.3, "openai/gpt-4o-mini")
+
+    assert with_one.variant_key == with_another.variant_key
+    assert "model" not in with_one.inputs
+
+
+def test_the_role_completion_is_the_production_backend_in_the_key():
+    """The trainer passes `dspy_utils.role_completion("LLM_SYNDATA_GEN")` (the role's model and key, per call); the
+    key names it as the production backend, so a cache written by the plain `litellm.completion` path still hits."""
+    from fastworkflow.utils import dspy_utils
+
+    fields = AddTwoNumbersInput.model_fields
+    production = param_example_fingerprint(fields, COMMAND_NAME, 3, 0.3, completion_fn=None)
+    through_the_role = param_example_fingerprint(
+        fields, COMMAND_NAME, 3, 0.3, completion_fn=dspy_utils.role_completion("LLM_SYNDATA_GEN"))
+
+    assert through_the_role.variant_key == production.variant_key
 
 def test_the_temperature_is_in_the_fingerprint():
     """A future decision to lower it must invalidate loudly, not reuse silently.

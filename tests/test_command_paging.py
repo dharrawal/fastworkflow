@@ -21,11 +21,12 @@ import pytest
 from pydantic import BaseModel, ConfigDict, Field
 
 import fastworkflow
-from fastworkflow import ModuleType, planning_phases
-from fastworkflow.command_executor import frame_command_result
-from fastworkflow.command_routing import RoutingRegistry
+from fastworkflow import ModuleType
+from fastworkflow.planning import planning_phases
+from fastworkflow.engine.command_executor import frame_command_result
+from fastworkflow.core.command_routing import RoutingRegistry
 from fastworkflow.observation_offloading.facts import output_page, paging_parameters
-from fastworkflow.planning_commands import PlanningCommandFormatError
+from fastworkflow.planning.planning_commands import PlanningCommandFormatError
 from tests.test_planning_command_code_steps import (  # noqa: F401 - the todo fixtures of that file
     ItemsParams,
     Phase,

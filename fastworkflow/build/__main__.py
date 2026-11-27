@@ -7,11 +7,14 @@ import ast
 import fastworkflow
 from fastworkflow.build.command_file_generator import validate_python_syntax_in_dir, validate_command_file_components_in_dir, verify_commands_against_context_model, validate_command_imports
 from fastworkflow.build import ast_class_extractor
+from fastworkflow.core.command_directory import declares_signature
 from fastworkflow.build.command_file_generator import generate_command_files as real_generate_command_files
-from fastworkflow.build.context_model_generator import generate_context_model as real_generate_context_model
+from fastworkflow.build.context_model_generator import (
+    derive_inherits, existing_context_files, generate_context_model as real_generate_context_model)
 from fastworkflow.build.context_folder_generator import ContextFolderGenerator
 from fastworkflow.build.command_stub_generator import CommandStubGenerator
 from fastworkflow.build.navigator_stub_generator import NavigatorStubGenerator
+from fastworkflow.utils.env import add_env_file_arguments
 from fastworkflow.utils.logging import logger
 
 def parse_args():
@@ -23,7 +26,17 @@ def parse_args():
     parser.add_argument('--overwrite', action='store_true', help='Overwrite files in output directory if present')
     parser.add_argument('--stub-commands', help='Comma-separated list of command names to generate stubs for')
     parser.add_argument('--no-startup', action='store_true', help='Skip generating the startup.py file')
+    add_env_file_arguments(parser)
     return parser.parse_args()
+
+
+
+def init_env(args) -> None:
+    """``fastworkflow.init`` with the workflow's env files (``utils.env.init_from_env_files``)."""
+    from fastworkflow.utils.env import init_from_env_files
+
+    init_from_env_files(args.workflow_folderpath, getattr(args, "env_file_path", None),
+                        getattr(args, "passwords_file_path", None))
 
 def validate_directories(args):
     if not os.path.isdir(args.app_dir):
@@ -79,8 +92,10 @@ def run_command_generation(args):
     # Resolve inherited properties for all classes
     ast_class_extractor.resolve_inherited_properties(all_classes)
 
-    # Generate context model
-    context_model_data = real_generate_context_model(all_classes, args.workflow_folderpath)
+    # Each context's inherits, derived from the class hierarchy. No file is written for it: the _<Context>.py files
+    # that exist now are hand-written and never edited; the ones created below get the derived line.
+    hand_written = existing_context_files(args.workflow_folderpath)
+    context_model_data = {name: {"base": bases} for name, bases in derive_inherits(all_classes).items()}
 
     # Generate startup command file (unless --no-startup flag is used)
     if not args.no_startup:
@@ -90,11 +105,7 @@ def run_command_generation(args):
             logger.warning("Failed to generate startup command file")
 
     # Generate context folders based on the model
-    context_model_path = os.path.join(commands_dir, 'context_inheritance_model.json')
-    folder_generator = ContextFolderGenerator(
-        commands_root=commands_dir,
-        model_path=context_model_path
-    )
+    folder_generator = ContextFolderGenerator(commands_root=commands_dir, model=context_model_data)
     try:
         created_folders = folder_generator.generate_folders()
         logger.info(f"Created context folders: {', '.join(created_folders.keys())}")
@@ -102,12 +113,13 @@ def run_command_generation(args):
         logger.error(f"Error generating context folders: {e}")
         # Continue with command generation even if folder generation fails
 
+    # Print each context's inherits line and where it belongs; write it only into the files created above
+    real_generate_context_model(all_classes, args.workflow_folderpath, hand_written)
+
     # Always generate command stubs if stub_commands is provided
     if args.stub_commands:
         try:
-            generate_command_stubs_for_contexts(
-                args, context_model_path, context_model_data
-            )
+            generate_command_stubs_for_contexts(args, context_model_data)
         except Exception as e:
             logger.error(f"Error generating command stubs: {e}")
             # Continue with command generation even if stub generation fails
@@ -115,10 +127,7 @@ def run_command_generation(args):
     # Always generate navigator stubs
     try:
         navigators_dir = os.path.join(args.workflow_folderpath, "navigators")
-        navigator_generator = NavigatorStubGenerator(
-            navigators_root=navigators_dir,
-            model_path=context_model_path
-        )
+        navigator_generator = NavigatorStubGenerator(navigators_root=navigators_dir, model=context_model_data)
 
         # Generate navigators for all contexts
         generated_files = navigator_generator.generate_navigator_stubs(force=args.overwrite)
@@ -137,18 +146,15 @@ def run_command_generation(args):
     return all_classes, context_model_data
 
 
-def generate_command_stubs_for_contexts(args, context_model_path, context_model_data):
+def generate_command_stubs_for_contexts(args, context_model_data):
     commands_dir = os.path.join(args.workflow_folderpath, "_commands")
-    stub_generator = CommandStubGenerator(
-        commands_root=commands_dir,
-        model_path=context_model_path
-    )
+    stub_generator = CommandStubGenerator(commands_root=commands_dir, model=context_model_data)
 
     # Parse command names
     command_names = [name.strip() for name in args.stub_commands.split(',')]
 
     # Generate stubs for each context
-    contexts = list(context_model_data.get('inheritance', {}).keys())
+    contexts = list(context_model_data)
     generated_files = {}
 
     for context in contexts:
@@ -173,7 +179,7 @@ def run_validation(args, all_classes, context_model_dict):
         for f in glob.glob(
             os.path.join(commands_dir, '**', '*.py'), recursive=True
         )
-        if not f.endswith('__init__.py') and not os.path.basename(f).startswith('_') and os.path.basename(f) != 'startup.py'
+        if not f.endswith('__init__.py') and not os.path.basename(f).startswith('_') and declares_signature(f)
     ]:
         if syntax_errors := validate_python_syntax_in_dir(commands_dir):
             errors.append(f"Error: {len(syntax_errors)} syntax error(s) found in generated command files.")
@@ -188,18 +194,10 @@ def run_validation(args, all_classes, context_model_dict):
     else:
         errors.append(f"Error: No command files were generated in {commands_dir}. Aborting.")
     
-    # Check for context model file - ensure we're looking for context_inheritance_model.json
-    context_model_path = os.path.join(commands_dir, 'context_inheritance_model.json')
-    if not os.path.isfile(context_model_path):
-        errors.append(f"Error: Context inheritance model JSON was not generated at {context_model_path}. Aborting.")
-    else:
-        commands_ok = verify_commands_against_context_model(
-            context_model_dict,
-            commands_dir,
-            all_classes
-        )
-        if isinstance(commands_ok, list) and commands_ok:
-            errors.extend(commands_ok)
+    # The context folders against the contexts derived from the classes (build writes no context model file)
+    commands_ok = verify_commands_against_context_model(context_model_dict, commands_dir, all_classes)
+    if isinstance(commands_ok, list) and commands_ok:
+        errors.extend(commands_ok)
     
     # Check for startup.py file (if not explicitly skipped)
     if not args.no_startup and not os.path.isfile(os.path.join(commands_dir, 'startup.py')):
@@ -231,16 +229,35 @@ def run_documentation(args):
     else:
         logger.error("Failed to write README.md.")
 
+def generate_startup_action(workflow_folderpath: str) -> bool:
+    """Write ``startup_action.json`` naming the generated ``startup`` command, unless the workflow folder has one: the
+    file every entry point runs first (``fastworkflow.workflow_startup_action``). A startup command has no Signature,
+    so nothing else runs it. An existing file is the author's and is never replaced. Returns False on a write error."""
+    action_path = os.path.join(workflow_folderpath, "startup_action.json")
+    if os.path.exists(action_path):
+        logger.debug(f"Startup action file already exists at {action_path}")
+        return True
+    try:
+        with open(action_path, "w", encoding="utf-8") as f:
+            f.write('{"command_name": "startup"}\n')
+        logger.info(f"Generated startup action file: {action_path}")
+        return True
+    except OSError as e:
+        logger.error(f"Error writing startup action file: {e}")
+        return False
+
+
 def generate_startup_command(workflow_folderpath: str, app_dir: str, overwrite: bool = False) -> bool:
-    """Generate a startup command file in the _commands directory.
+    """Generate a startup command file in the _commands directory, and the ``startup_action.json`` that runs it
+    (``generate_startup_action``; an existing one is kept).
     
     Args:
         workflow_folderpath: Path to the workflow folder
         app_dir: Path to the application source directory
-        overwrite: Whether to overwrite existing file
+        overwrite: Whether to overwrite an existing startup.py
         
     Returns:
-        bool: True if file was created or already exists, False on error
+        bool: True if the files were created or already exist, False on error
     """
     # Determine file path
     startup_path = os.path.join(workflow_folderpath, "_commands", "startup.py")
@@ -248,7 +265,7 @@ def generate_startup_command(workflow_folderpath: str, app_dir: str, overwrite: 
     # Check if file already exists and overwrite is False
     if os.path.exists(startup_path) and not overwrite:
         logger.debug(f"Startup file already exists at {startup_path}")
-        return True
+        return generate_startup_action(workflow_folderpath)
 
     # Get the name of the application module (last part of source_dir)
     app_module = os.path.basename(os.path.normpath(app_dir))
@@ -312,7 +329,7 @@ class ResponseGenerator:
         with open(startup_path, 'w') as f:
             f.write(startup_content)
         logger.info(f"Generated startup command file: {startup_path}")
-        return True
+        return generate_startup_action(workflow_folderpath)
     except Exception as e:
         logger.error(f"Error writing startup command file: {e}")
         return False
@@ -320,7 +337,7 @@ class ResponseGenerator:
 def main():  # sourcery skip: extract-method
     try:
         args = parse_args()
-        fastworkflow.init(env_vars={})  # Initialize with empty environment variables
+        init_env(args)
         validate_directories(args)
         all_classes_data, ctx_model_data = run_command_generation(args)
         if errors := run_validation(args, all_classes_data, ctx_model_data):
@@ -343,7 +360,7 @@ def build_main(args):  # sourcery skip: extract-method
 
     try:
         # Skip parsing args since they're provided by the CLI
-        fastworkflow.init(env_vars={})  # Initialize with empty environment variables
+        init_env(args)
         validate_directories(args)
         all_classes_data, ctx_model_data = run_command_generation(args)
         if errors := run_validation(args, all_classes_data, ctx_model_data):

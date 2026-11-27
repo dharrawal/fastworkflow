@@ -577,7 +577,7 @@ and `command_routing.py` — which carry AR2 and AR5 — were still unmodified a
 
 ```bash
 # F1 - split over the same synthetic set
-grep -n "train_test_split" fastworkflow/model_pipeline_training.py
+grep -n "train_test_split" fastworkflow/train/model_pipeline_training.py
 
 # F2 - no seeding anywhere; persona sample is free-running
 grep -rn "manual_seed\|random.seed\|set_seed\|np.random.seed" --include=*.py fastworkflow/
@@ -589,8 +589,8 @@ grep -n "return \[command_name\]" fastworkflow/train/generate_synthetic.py
 
 # F6/F8 - wildcard label assembly from ancestor contexts
 # (range corrected from 769,801 to 768,801 by AR7 - the def line is 768)
-grep -n "net_ancestor_plus_wildcard_utterances" -B 4 fastworkflow/model_pipeline_training.py
-sed -n '768,801p' fastworkflow/model_pipeline_training.py
+grep -n "net_ancestor_plus_wildcard_utterances" -B 4 fastworkflow/train/model_pipeline_training.py
+sed -n '768,801p' fastworkflow/train/model_pipeline_training.py
 
 # F7 - top-k wildcard takes the ambiguity branch; wildcard filtered from the message
 grep -n "len(predictions)==1\|command_name == \"wildcard\"" fastworkflow/_workflows/command_metadata_extraction/intent_detection.py
@@ -605,20 +605,20 @@ du -sh <workflow>/___command_info/*/ | sort -h | tail -5
 
 # AR2 - the base axis reaches the wildcard class through commands(); both models live
 # together in tests/todo_list_workflow (TodoList base:[TodoItem], TodoItem parent:[TodoList])
-cat tests/todo_list_workflow/_commands/context_inheritance_model.json
+cat tests/todo_list_workflow/_commands/context_inheritance_model.json   # removed spelling: now inherits on class Context
 cat tests/todo_list_workflow/context_hierarchy_model.json
 grep -n "context_model.commands(ancestor_ctx)\|get_ancestor_contexts" \
-     fastworkflow/model_pipeline_training.py fastworkflow/command_context_model.py
+     fastworkflow/train/model_pipeline_training.py fastworkflow/core/command_context_model.py
 
 # AR2 - simple-name shadowing in the resolved command list
-sed -n '252,266p' fastworkflow/command_context_model.py
+sed -n '252,266p' fastworkflow/core/command_context_model.py
 
 # AR5 - training order is set-iteration order; the in-run cache is order-dependent, and
 # core commands are absent from commands() but present in crd.contexts
-sed -n '820,829p' fastworkflow/model_pipeline_training.py
-sed -n '839,863p' fastworkflow/model_pipeline_training.py
-grep -n "core_commands" fastworkflow/command_routing.py
-grep -n "pop('Core'" fastworkflow/command_context_model.py
+sed -n '820,829p' fastworkflow/train/model_pipeline_training.py
+sed -n '839,863p' fastworkflow/train/model_pipeline_training.py
+grep -n "core_commands" fastworkflow/core/command_routing.py
+grep -n "pop('Core'" fastworkflow/core/command_context_model.py
 ```
 
 Related skills: `fastworkflow-nlu-pipeline-reference` (the NLU stack this spec modifies),
@@ -693,7 +693,7 @@ cached utterances:
 ### AR2 — the closure was incomplete; `base` and `parent` compose
 
 fastWorkflow has two inheritance axes and D5 modelled only one. `base`
-(`_commands/context_inheritance_model.json`) pulls a context's commands into a derived context's
+(`_commands/context_inheritance_model.json` (a removed spelling: a context's bases are now `inherits` on its `class Context`)) pulls a context's commands into a derived context's
 own label space, resolved by `CommandContextModel.commands`
 (`command_context_model.py:222-266`). `parent` (`context_hierarchy_model.json`) drives
 `get_ancestor_contexts` (`:169-215`) and determines whose utterances become a context's
@@ -956,7 +956,9 @@ prompting. The only rejection mechanism is the ambiguity threshold in
 `CommandRouter.predict` (`model_pipeline_training.py:321-334`), and for retail it is
 **0.2395 / 0.3392** — anything clearing ~24–34% confidence executes. Those thresholds are not
 a calibrated operating point; they are computed at `:1174-1190` as the *mean confidence of
-misclassified test samples*, a descriptive statistic of the training run.
+misclassified test samples*, a descriptive statistic of the training run. (Written at that commit. Since fix-1hs8
+the large tier takes the 10th percentile of correct-row confidences when fewer than 5 test rows are misclassified;
+the failed mean is unchanged otherwise.)
 
 ### M4 — seeding cannot make training reproducible while an LLM generates the data
 
@@ -1190,7 +1192,7 @@ Where §4 understates the problem:
 changed command". That question is real and its answer is subtle — the base and parent axes
 compose, so `AdminSession`'s wildcard class carries `Account/close` even though `Account` is
 nowhere on its parent chain — but it structurally cannot answer *"would this workflow produce
-this model today"*. A `context_inheritance_model.json` edit removes commands from a label space
+this model today"*. A `context_inheritance_model.json` (a removed spelling: a context's bases are now `inherits` on its `class Context`) edit removes commands from a label space
 with **every command file byte-identical**. Roughly half of R5's implementation is a recorded
 `TrainingSignature` (per-context label space, ancestors, wildcard sources; global seed, model
 ids, persona source, generator digest, reserved-label constants, and a hand-bumped

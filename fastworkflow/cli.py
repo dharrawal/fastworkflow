@@ -192,6 +192,13 @@ def find_default_env_files(workflow_path):
     workflow_path = Path(workflow_path).resolve()        
     return workflow_path / "fastworkflow.env", workflow_path / "fastworkflow.passwords.env"
 
+def _add_build_env_file_arguments(parser) -> None:
+    """``build`` and ``refine`` load the workflow's env files as ``train`` does (``utils.env``)."""
+    from .utils.env import add_env_file_arguments
+
+    add_env_file_arguments(parser)
+
+
 def add_build_parser(subparsers):
     """Add subparser for the 'build' command."""
     parser_build = subparsers.add_parser(
@@ -204,6 +211,7 @@ def add_build_parser(subparsers):
     parser_build.add_argument('--overwrite', action='store_true', help='Overwrite files in output directory if present')
     parser_build.add_argument('--stub-commands', help='Comma-separated list of command names to generate stubs for')
     parser_build.add_argument('--no-startup', action='store_true', help='Skip generating the startup.py file')
+    _add_build_env_file_arguments(parser_build)
 
     # Lazy-import build_main only if the user actually invokes the command
     def _build_main_wrapper(args):
@@ -220,6 +228,7 @@ def add_refine_parser(subparsers):
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser_refine.add_argument('--workflow-folderpath', '-w', required=True, help='Path to the workflow folder to refine')
+    _add_build_env_file_arguments(parser_refine)
 
     # Lazy-import refine_main only if the user actually invokes the command
     def _refine_main_wrapper(args):
@@ -257,16 +266,77 @@ def add_train_parser(subparsers):
     parser_train.set_defaults(func=lambda args: train_with_defaults(args))
 
 
-def add_run_parser(subparsers):
-    """Add subparser for the 'run' command (alias: 'run_cli').
+def add_learn_parser(subparsers):
+    """Add 'learn' (refit the local head from what the workflow recorded) and 'learned' (review and remove it)."""
+    parser_learn = subparsers.add_parser(
+        "learn",
+        help="Learn from use: refit the workflow's local intent head with its confirmed requests (behind a "
+             "cross-fit gate) and calibrate its commit threshold. Makes no model call.")
+    parser_learn.add_argument("workflow_folderpath", help="Path to the workflow folder")
+    parser_learn.add_argument("env_file_path", nargs="?", default=None,
+                              help="Path to the environment file (default: as for 'train')")
+    parser_learn.add_argument("passwords_file_path", nargs="?", default=None,
+                              help="Accepted for symmetry with 'train'; no key is used")
+    parser_learn.add_argument("--dry-run", action="store_true",
+                              help="Run the gate and the calibration and write nothing")
+    parser_learn.set_defaults(func=_learn_main)
 
-    The alias names the transport the way its siblings do — run_cli /
-    run_chatbot / run_fastapi_mcp — while 'run' stays valid for existing
-    scripts and docs.
-    """
+    parser_learned = subparsers.add_parser(
+        "learned", help="Review what a workflow recorded from use: list, remove or count its rows.")
+    learned_subparsers = parser_learned.add_subparsers(dest="action", required=True)
+    parser_list = learned_subparsers.add_parser("list", help="List the recorded requests, oldest first")
+    parser_list.add_argument("workflow_folderpath", help="Path to the workflow folder")
+    parser_list.add_argument("--confirmed", action="store_true", help="Only the rows a person or agent confirmed")
+    parser_remove = learned_subparsers.add_parser("remove", help="Delete recorded rows by id")
+    parser_remove.add_argument("workflow_folderpath", help="Path to the workflow folder")
+    parser_remove.add_argument("ids", nargs="+", type=int, help="Row ids, as 'learned list' prints them")
+    parser_stats = learned_subparsers.add_parser("stats", help="Count the recorded rows")
+    parser_stats.add_argument("workflow_folderpath", help="Path to the workflow folder")
+    parser_list.set_defaults(func=_learned_main)
+    parser_remove.set_defaults(func=_learned_main)
+    parser_stats.set_defaults(func=_learned_main)
+
+
+def _learn_main(args):
+    from dotenv import dotenv_values
+
+    import fastworkflow
+
+    workflow_path = os.path.abspath(args.workflow_folderpath)
+    if not os.path.isdir(workflow_path):
+        print(f"Error: '{workflow_path}' is not a workflow folder.", file=sys.stderr)
+        sys.exit(1)
+    env_file = args.env_file_path or find_default_env_files(workflow_path)[0]
+    if not os.path.isfile(env_file):
+        print(f"Error: Environment file not found at: {env_file}", file=sys.stderr)
+        sys.exit(1)
+    fastworkflow.init(env_vars=dotenv_values(env_file))
+    from .train import head_refit
+
+    print(head_refit.format_report(head_refit.learn(workflow_path, publish=not args.dry_run)))
+
+
+def _learned_main(args):
+    from fastworkflow.intent import intent_learning
+
+    workflow_path = os.path.abspath(args.workflow_folderpath)
+    if args.action == "stats":
+        for key, value in intent_learning.stats(workflow_path).items():
+            print(f"{key}: {value}")
+    elif args.action == "remove":
+        print(f"Removed {intent_learning.remove(workflow_path, args.ids)} of {len(args.ids)} row(s).")
+    else:
+        for row in intent_learning.rows(workflow_path, confirmed_only=args.confirmed):
+            rejected = f" (instead of {row['rejected_label']})" if row["rejected_label"] else ""
+            print(f"{row['id']}\t{row['ts'][:19]}\t{row['how']}\t{'confirmed' if row['confirmed'] else 'unconfirmed'}"
+                  f"\t{row['context']}\t{row['command']}{rejected}\t{row['text']}")
+
+
+def add_run_parser(subparsers):
+    """Add subparser for the 'run_cli' command, named for its transport as its siblings
+    run_chatbot and run_fastapi_mcp are."""
     parser_run = subparsers.add_parser(
-        "run",
-        aliases=["run_cli"],
+        "run_cli",
         help="Run a workflow's interactive assistant in this terminal.",
     )
     parser_run.add_argument("workflow_path", help="Path to the workflow folder")
@@ -291,13 +361,36 @@ def add_run_parser(subparsers):
     parser_run.add_argument("--project_folderpath", help="Optional path to project folder containing application code", default=None)
     parser_run.add_argument(
         "--assistant", action="store_true", default=False,
-        help="Run in assistant (non-agentic) mode. Default is agentic mode.",
+        help="Run in assistant (non-agentic) mode. Default is agentic mode, or assistant mode when no agent model (LLM_AGENT) is set.",
+    )
+    parser_run.add_argument(
+        "--timeout_seconds", type=float, default=None,
+        help="Optional per-turn limit in seconds (default: none; the run_fastapi_mcp request field of the same name is "
+             "its server counterpart). Past it the terminal stops waiting and returns to the prompt; the engine cannot "
+             "abort a turn, so it finishes in the background and its result is discarded.",
     )
     parser_run.add_argument(
         "--generate_insights", action="store_true", default=False,
         help="Enable insights-distillation mode: compare teacher and student agents, extract planning and execution insights on divergence.",
     )
     parser_run.set_defaults(func=lambda args: run_with_defaults(args))
+
+def add_migrate_contexts_parser(subparsers):
+    """Add 'migrate-contexts': move a workflow's _commands/context_inheritance_model.json (a removed spelling) into
+    inherits declarations on each class Context, and list the contexts whose parents must be written by hand."""
+    parser = subparsers.add_parser(
+        "migrate-contexts",
+        help="Write inherits = [...] into each context's class Context from _commands/context_inheritance_model.json, "
+             "delete the file, and list the contexts with a get_parent that need parents = [...] written by hand.",
+    )
+    parser.add_argument("workflow_folder", help="Path to the workflow folder")
+
+    def _migrate_main(args):
+        from fastworkflow.build.migrate_context_declarations import migrate_main
+        sys.exit(migrate_main(args))
+
+    parser.set_defaults(func=_migrate_main)
+
 
 def add_command_parser(subparsers):
     """Add the 'command' group: 'command preview' renders a workflow's planning commands to markdown; 'command run-code'
@@ -320,7 +413,7 @@ def add_command_parser(subparsers):
 
     # Lazy-import the preview generator only if the user actually invokes the command
     def _preview_main_wrapper(args):
-        from .command_preview import preview_main
+        from fastworkflow.planning.command_preview import preview_main
         code = preview_main(args)
         if code:
             sys.exit(code)
@@ -346,7 +439,7 @@ def add_command_parser(subparsers):
     )
 
     def _run_code_main_wrapper(args):
-        from .planning_code_run import run_code_main
+        from fastworkflow.planning.planning_code_run import run_code_main
         code = run_code_main(args)
         if code:
             sys.exit(code)
@@ -566,7 +659,7 @@ def _open_workflow_store(args, usage: str):
 
 def _distill_main(args):
     """Run a distillation comparison over recorded runs."""
-    from fastworkflow import distillation_compare
+    from fastworkflow.evaluation import distillation_compare
 
     if problem := _distill_mode_error(args):
         print(f"Error: {problem}", file=sys.stderr)
@@ -715,8 +808,8 @@ def add_policy_parser(subparsers):
 
 def _policy_replay_main(args) -> int:
     """Replay a recorded experiment through a policy table."""
-    from fastworkflow.policy_loader import POLICY_FOLDER, TABLE_FILE, load_policy
-    from fastworkflow.policy_replay import format_report, replay_experiment
+    from fastworkflow.policy.policy_loader import POLICY_FOLDER, TABLE_FILE, load_policy
+    from fastworkflow.evaluation.policy_replay import format_report, replay_experiment
 
     store = _open_workflow_store(
         args,
@@ -771,6 +864,35 @@ def add_run_fastapi_mcp_parser(subparsers):
     parser_run_fastapi_mcp.add_argument(
         "--cors_origin", default=None,
         help="Pin CORS to exactly this origin (no wildcard). Default: allow all origins.",
+    )
+    parser_run_fastapi_mcp.add_argument(
+        "--expect_encrypted_jwt", action="store_true", default=False,
+        help="Enable JWT signature verification (default: unsigned tokens accepted for trusted networks)",
+    )
+    parser_run_fastapi_mcp.add_argument(
+        "--cors_loopback_only", action="store_true", default=False,
+        help="Pin CORS to loopback origins only (127.0.0.1/localhost/[::1], any port). "
+             "Takes precedence over --cors_origin.",
+    )
+    parser_run_fastapi_mcp.add_argument(
+        "--enable_admin_endpoints", action="store_true", default=False,
+        help="Serve /admin/dump_all_conversations and /admin/generate_mcp_token. Off by default; "
+             "while on, both additionally require a Bearer token.",
+    )
+    parser_run_fastapi_mcp.add_argument(
+        "--allow_request_cache_toggle", action="store_true", default=False,
+        help="Let a request's use_dspy_cache switch the process-wide LLM response cache on or off (the "
+             "memory bound stays in force). Off by default: the argument is ignored and reported in the "
+             "X-FW-DSPy-Cache response header. For a single local user; the cache is otherwise chosen at "
+             "start with FW_LM_CACHE=0.",
+    )
+    parser_run_fastapi_mcp.add_argument(
+        "--chat_approval_surface", choices=("channel", "host"), default="host",
+        help="Approval surface of /invoke_agent_stream (MCP invoke_agent) and /invoke_assistant. "
+             "'host' (default, strict): the /invoke_agent rule (signed JWT with a user_id via "
+             "--expect_encrypted_jwt, token delivered and returned as approval_token; otherwise an "
+             "approval-gated command is refused). 'channel': a plain yes approves, no token; "
+             "for local development tools only.",
     )
     parser_run_fastapi_mcp.set_defaults(func=lambda args: run_fastapi_mcp_with_defaults(args))
 
@@ -851,7 +973,7 @@ def run_with_defaults(args):  # sourcery skip: extract-duplicate-method
         sys.exit(1)
 
     # Lazy import here to avoid heavy startup when not needed
-    from .run.__main__ import run_main as _run_main
+    from .run_cli.__main__ import run_main as _run_main
     return _run_main(args)
 
 def _require_server_extra():
@@ -942,9 +1064,18 @@ def run_fastapi_mcp_with_defaults(args):  # sourcery skip: extract-duplicate-met
         cmd.extend(['--project_folderpath', args.project_folderpath])
     if getattr(args, 'cors_origin', None):
         cmd.extend(['--cors_origin', args.cors_origin])
+    cmd.extend(['--chat_approval_surface', getattr(args, 'chat_approval_surface', 'host')])
+    # store_true flags are appended only when set, so leaving one off gives the server's own default.
+    for flag in ('expect_encrypted_jwt', 'cors_loopback_only', 'enable_admin_endpoints', 'allow_request_cache_toggle'):
+        if getattr(args, flag, False):
+            cmd.append(f'--{flag}')
 
-    # Run the subprocess
-    return subprocess.run(cmd).returncode
+    # Run the subprocess. Its exit code is this process's: a server that did not start (a load or runtime startup
+    # problem; uvicorn exits 3) must not read as a clean exit to whatever supervises it.
+    returncode = subprocess.run(cmd).returncode
+    if returncode:
+        sys.exit(returncode)
+    return returncode
 
 def main():
     """Main function for the fastworkflow CLI."""
@@ -972,10 +1103,12 @@ def main():
     add_build_parser(subparsers)
     add_refine_parser(subparsers)
     add_train_parser(subparsers)
+    add_learn_parser(subparsers)
     add_run_parser(subparsers)
     add_run_fastapi_mcp_parser(subparsers)
     add_run_chatbot_parser(subparsers)
     add_command_parser(subparsers)
+    add_migrate_contexts_parser(subparsers)
     add_distill_parser(subparsers)
     add_policy_parser(subparsers)
 

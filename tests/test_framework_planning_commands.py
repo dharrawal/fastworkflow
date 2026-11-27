@@ -15,14 +15,15 @@ import json
 from pathlib import Path
 
 import fastworkflow
-from fastworkflow import command_executor, planning_commands
-from fastworkflow.command_directory import CommandDirectory, is_visible_planning
+from fastworkflow.engine import command_executor
+from fastworkflow.planning import planning_commands
+from fastworkflow.core.command_directory import CommandDirectory, is_visible_planning
 from fastworkflow.train.artifact_versioning import construction_record_problem, workflow_has_planning_commands
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401 - the routing registry
 
 pytestmark = __import__('pytest').mark.usefixtures('initialized_fastworkflow')
 
-FRAMEWORK = ("review_subtasks", "review_plan")
+FRAMEWORK = ("review_subtasks",)
 LIBRARY = str(Path(fastworkflow.__file__).resolve().parent / "examples" / "library")
 HELLO_WORLD = str(Path(fastworkflow.__file__).resolve().parent / "examples" / "hello_world")
 CME = fastworkflow.get_internal_workflow_path("command_metadata_extraction")
@@ -61,34 +62,32 @@ def test_c_the_framework_commands_are_not_in_the_planner_or_the_agent_listing():
 
 def test_c_the_agent_cannot_name_a_framework_command_as_a_tool():
     routing = fastworkflow.RoutingRegistry.get_definition(LIBRARY)
-    assert "review_plan" not in routing.get_planning_command_names("*")
-    assert "review_plan" in CommandDirectory.load(LIBRARY).map_command_2_metadata      # the loader still has it
+    assert "review_subtasks" not in routing.get_planning_command_names("*")
+    assert "review_subtasks" in CommandDirectory.load(LIBRARY).map_command_2_metadata      # the loader still has it
 
 
 def test_c_a_framework_command_is_not_a_label_of_the_intent_model():
-    from fastworkflow.model_pipeline_training import _is_planning_name
+    from fastworkflow.train.model_pipeline_training import _is_planning_name
 
     directory = CommandDirectory.load(LIBRARY)
-    assert _is_planning_name(directory, "review_plan") is False
+    assert _is_planning_name(directory, "review_subtasks") is False
     assert _is_planning_name(directory, "Library/note_member") is True   # an app planning command is still one
 
 
 def test_d_the_framework_commands_resolve_through_the_loader_and_the_executor_when_called_explicitly():
     assert planning_commands.planning_command(LIBRARY, "review_subtasks") is not None
-    assert planning_commands.planning_command(LIBRARY, "review_plan") is not None
-    assert command_executor._resolve_planning_command_name(LIBRARY, "review_plan") == "review_plan"
     assert command_executor._resolve_planning_command_name(LIBRARY, "review_subtasks") == "review_subtasks"
 
 
 def test_d_the_flag_is_on_the_metadata_only_for_framework_commands():
     directory = CommandDirectory.load(LIBRARY)
-    assert directory.map_command_2_metadata["review_plan"].framework is True
+    assert directory.map_command_2_metadata["review_subtasks"].framework is True
     assert directory.map_command_2_metadata["Library/note_member"].framework is False
     assert is_visible_planning(directory.map_command_2_metadata["Library/note_member"]) is True
-    assert is_visible_planning(directory.map_command_2_metadata["review_plan"]) is False
+    assert is_visible_planning(directory.map_command_2_metadata["review_subtasks"]) is False
 
 
-FRAMEWORK_NAMES = {"review_subtasks", "review_plan", "review_proposal"}
+FRAMEWORK_NAMES = {"review_subtasks", "review_proposal"}
 
 
 def test_e_the_training_report_has_no_row_for_a_framework_command_and_the_gate_does_not_refuse_it():
@@ -120,7 +119,7 @@ def test_e_the_parameter_example_commands_exclude_framework_commands():
 
 def test_f_the_test_set_inventory_excludes_framework_commands_and_counts_only_app_planning_commands():
     from fastworkflow.train.planning_test_set import inventory
-    from fastworkflow.planning_commands import resolve_field_sources, visible_planning_commands
+    from fastworkflow.planning.planning_commands import resolve_field_sources, visible_planning_commands
 
     planning = set(inventory(LIBRARY).planning)
     assert not planning & FRAMEWORK_NAMES
@@ -131,6 +130,6 @@ def test_f_the_test_set_inventory_excludes_framework_commands_and_counts_only_ap
 
 
 def test_f_the_scoring_listing_excludes_framework_commands():
-    from fastworkflow import planning_commands
+    from fastworkflow.planning import planning_commands
 
     assert not set(planning_commands.visible_planning_commands(LIBRARY)) & FRAMEWORK_NAMES

@@ -14,7 +14,7 @@ runs it retrieved nothing useful.
 
 - Code: `fastworkflow/observation_offloading/search.py` (kept as is). The tool
   wrapper is `search_memory` inside `initialize_workflow_tool_agent` in
-  `fastworkflow/workflow_agent.py`.
+  `fastworkflow/agent/workflow_agent.py`.
 - The agent's tools are `what_can_i_do`, `execute_workflow_query` and `ask_user`.
 - To re-enable it, uncomment `search_memory,` in the `tools` list of
   `initialize_workflow_tool_agent`. The search model is then read from
@@ -100,7 +100,7 @@ The context is the one the command **ran in**, read before the dispatch. A
 command that moved the context says so with `; and resulted in a context change`,
 and the command's own response states where it moved to. The instance identity is
 declared by the context class (a classmethod `instance_label(...)` or an
-`instance_label_attr`, see `fastworkflow/context_identity.py`), never derived; a
+`instance_label_attr`, see `fastworkflow/core/context_identity.py`), never derived; a
 context with no declaration prints its name alone. Backend text is never
 inspected, and there is no fallback to another step's alias.
 
@@ -144,7 +144,7 @@ on its next open, rows archived before it read exactly as before (with no
 runs), and it is erased and aged with the turn's evidence.
 
 Phase facts are filled in code from those runs by `fill_output` in
-`fastworkflow/planning_phases.py`, which types each field by the command whose `Output` or `Input` it
+`fastworkflow/planning/planning_phases.py`, which types each field by the command whose `Output` or `Input` it
 is (design 3.12). A facts field is typed with a command's `Output` or `Input`, a union of them, or one
 of those `| None = None`. A field typed with an `Output` takes that command's `Output` from its run in
 the phase; a field typed with an `Input` takes the arguments that run was called with. There is no
@@ -192,7 +192,7 @@ not counted against it.
 ## Configuration
 
 Budgets are derived from the model's context window in
-`fastworkflow/context_budget.py`; see
+`fastworkflow/observation_offloading/context_budget.py`; see
 [`docs/context_budget.md`](context_budget.md). The values below are what a
 131,072-token window (`cerebras/gpt-oss-120b`, the reference main agent model)
 produces. Each name remains an optional tuning override.
@@ -204,7 +204,7 @@ produces. Each name remains an optional tuning override.
 
 Offloading has no on/off switch. A turn runs in one ReAct loop until the agent
 selects `finish` or the iteration ceiling is reached (default 25 steps,
-`DEFAULT_MAX_ITERS` in `observation_offloading/agent.py`). The one evidence
+`DEFAULT_MAX_ITERS` in `agent/tool_agent.py`). The one evidence
 setting is `FW_OFFLOAD_EVIDENCE_REDACTION`: `on` (the default) or `off`. See
 *Retention, redaction and known limits*.
 

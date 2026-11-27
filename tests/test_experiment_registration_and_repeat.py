@@ -24,7 +24,7 @@ import sqlite3
 
 import pytest
 
-from fastworkflow import state_paths
+from fastworkflow.session import state_paths
 from fastworkflow.benchmark import setup
 from fastworkflow.benchmark.catalog import BenchmarkManifestError
 from fastworkflow.experiment.runner import ExperimentController
@@ -380,6 +380,24 @@ def _declare(controller, record, experiment_id=None, attempts=1):
 
 
 class TestRunnerRecordsIntoTheLiveDb:
+    def test_a_driver_that_gives_no_workflow_name_records_the_folders(self, folder):
+        """fix-75ex: omitting workflow_name must not record NULL."""
+        benchmark = _benchmark(folder)
+        record = setup.create_experiment(folder, benchmark["benchmark_id"], "v1")
+        store, controller = _controller(folder)
+        task_ids = record["task_ids"]
+
+        controller.create_experiment(
+            record["experiment_id"],
+            "",
+            declared_tasks=len(task_ids),
+            declared_attempts=1,
+            declarations=[(t, 1, f"ch-{t}") for t in task_ids],
+        )
+
+        row = store.get_experiment(record["experiment_id"])
+        assert row["workflow_name"] == setup.workflow_name_for(folder)
+
     def test_starting_a_runner_keeps_the_registration_winner(self, folder):
         benchmark = _benchmark(folder)
         record = setup.create_experiment(folder, benchmark["benchmark_id"], "v1")

@@ -127,7 +127,7 @@ No other attributes or methods need to be copied.
 
 ## 6. Packaging & distribution of templates
 
-Template workflows are ordinary Python packages that ship an `_commands/` folder plus any helper files (`context_inheritance_model.json`, `workflow_inheritance_model.json`, etc.). Enclosing records come from each context's `get_parent`, not from a hierarchy file. They can be:
+Template workflows are ordinary Python packages that ship an `_commands/` folder plus any helper files (`workflow_inheritance_model.json`, `_commands/_shared/`, etc.). Each context's bases and enclosing contexts are declared on its `class Context` (`inherits`, `parents` beside `get_parent`); a `context_inheritance_model.json` is a removed spelling that stops the workflow (`fastworkflow migrate-contexts` moves it). They can be:
 
 * **Built-in** – published inside `fastworkflow.examples.*`.
 * **Third-party** – installed via `pip install mycompany-wf-templates`.

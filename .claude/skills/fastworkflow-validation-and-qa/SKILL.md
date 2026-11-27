@@ -112,9 +112,10 @@ Whether the 11 mock-using files are sanctioned exceptions or drift to be cleaned
 | `tests/example_workflow/` | Todo-list app (TodoItem/TodoList/TodoListManager contexts) | **Gitignored** (`.gitignore:7`); only 6 files tracked; `_commands/` untracked — fresh-clone trap | ~6 runtime test files + `tests/test_build/` fixtures (which build into `tmp_path`) |
 | `tests/todo_list_workflow/` | Fuller todo-list workflow, moved from `fastworkflow/examples/todo_list` in commit d679c38 | 35 files tracked. **CLAUDE.md omits it** (doc rot — CLAUDE.md names only example_workflow and hello_world_workflow) | 12 test files (`test_context_model.py`, `test_what_can_i_do_command.py`, `test_session_state_serialization.py`, ...) |
 | `fastworkflow/examples/hello_world/___command_info/` | **Pre-trained** intent model for the bundled example | Untracked/gitignored; exists only where someone ran `fastworkflow train` | 4 tests in `test_fastapi_service.py` — they FAIL (not skip) without it |
+| `fastworkflow/_workflows/plan_metadata_extraction/___command_info/ProposalReview/` | Locally trained plan reply head (version id in `current.json`) | Gitignored | Only the tests marked `requires_plan_head` (skip, or fail under `FW_REQUIRE_HEADS=1`); the reply-reader tests use `tests/fixtures/review_reply_router_answers.json` via `tests/recorded_router.py` and need no head |
 | `fastworkflow/examples/retail_workflow/` | The tau-bench retail domain workflow | Source tracked; trained artifacts untracked | conftest sys.path injection; retail tests; the entire tau2 reliability program |
 
-Related doc rot, verified: CLAUDE.md also says intent models are trained "via scikit-learn" — actually torch/transformers fine-tuning (`fastworkflow/model_pipeline_training.py` imports `torch`, `transformers`; sklearn supplies only LabelEncoder/split/metrics/PCA). And `testing_rules.mdc` references `tests/README.md`, which does not exist.
+Related doc rot, verified: CLAUDE.md also says intent models are trained "via scikit-learn" — actually torch/transformers fine-tuning (`fastworkflow/train/model_pipeline_training.py` imports `torch`, `transformers`; sklearn supplies only LabelEncoder/split/metrics/PCA). And `testing_rules.mdc` references `tests/README.md`, which does not exist.
 
 ### Protecting golden artifacts — the fix-0hb law
 
@@ -211,7 +212,7 @@ Re-verify volatile facts:
 | fix-0hb narrative + train recipe | `bd show fix-0hb` (read-only) |
 | Temp-copy pattern source | `git show fa97b48 -- tests/test_train_modern_stack.py` |
 | requests-mock unused | `grep -n 'requests-mock' pyproject.toml; grep -rn 'requests_mock' tests --include='*.py'` |
-| Trainer is torch/transformers not sklearn | `grep -n 'import torch\|from transformers' fastworkflow/model_pipeline_training.py \| head -3` |
+| Trainer is torch/transformers not sklearn | `grep -n 'import torch\|from transformers' fastworkflow/train/model_pipeline_training.py \| head -3` |
 | Environment gates on THIS machine | `bash .claude/skills/fastworkflow-validation-and-qa/scripts/qa_env_report.sh` |
 
 Full per-file inventory (skips, mocks, gating, golden-asset map): [references/test-suite-inventory.md](references/test-suite-inventory.md).

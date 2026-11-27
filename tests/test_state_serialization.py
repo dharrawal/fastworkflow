@@ -23,22 +23,19 @@ from datetime import datetime
 import pytest
 
 import fastworkflow
-from fastworkflow.state_serialization import (
+from fastworkflow.session.state_serialization import (
     StateEncodingError,
     encode_state,
     state_digest,
     validate_state,
 )
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 
 @pytest.fixture(scope="module")
-def initialized():
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    env_file = os.path.join(project_root, "env", ".env")
-    passwords_file = os.path.join(project_root, "passwords", ".env")
-    if not os.path.isfile(env_file) or not os.path.isfile(passwords_file):
-        pytest.skip("env files missing")
+def initialized(tmp_path_factory):
+    from tests.fastapi_hermetic import write_placeholder_env
+    env_file, passwords_file = write_placeholder_env(tmp_path_factory.mktemp("env_files"))
     from dotenv import dotenv_values
 
     fastworkflow.init({**dotenv_values(env_file), **dotenv_values(passwords_file)})
@@ -70,14 +67,13 @@ def _serialize(ctx):
 
 def test_clean_state_serializes_through_the_context(ctx):
     """The control: an ordinary suspended context still round-trips."""
-    ctx._awaiting_user = True
-    ctx._suspended_user_message = "which one?"
-    ctx._pending_clarification_request = {"options": ["a", "b"], "count": 2}
+    ctx._ask_agent_question("which one?", "which one?")
+    ctx._turn_use_plan = {"options": ["a", "b"], "count": 2}
 
     state = _serialize(ctx)
 
-    assert state["awaiting_user"] is True
-    assert state["pending_clarification_request"]["count"] == 2
+    assert state["waiting"]["kind"] == "agent" and ctx.awaiting_user is True
+    assert state["use_plan"]["count"] == 2
     assert json.loads(encode_state(state)) == state
 
 
@@ -87,20 +83,20 @@ def test_a_non_json_value_is_rejected_rather_than_stringified(ctx):
     A datetime became "2026-08-06 00:00:00" and restore handed the application a
     string where it had stored an object — with nothing reporting the swap.
     """
-    ctx._awaiting_user = True
-    ctx._pending_clarification_request = {"deadline": datetime(2026, 8, 6)}
+    ctx._ask_agent_question("which one?")
+    ctx._turn_use_plan = {"deadline": datetime(2026, 8, 6)}
 
     with pytest.raises(StateEncodingError) as exc:
         _serialize(ctx)
 
     assert "datetime" in str(exc.value)
-    assert "pending_clarification_request" in str(exc.value)
+    assert "use_plan" in str(exc.value)
 
 
 def test_a_non_string_dict_key_is_rejected(ctx):
     """JSON has no integer keys; coercing them makes 1 and "1" collide on restore."""
-    ctx._awaiting_user = True
-    ctx._pending_clarification_request = {1: "first"}
+    ctx._ask_agent_question("which one?")
+    ctx._turn_use_plan = {1: "first"}
 
     with pytest.raises(StateEncodingError, match="not str"):
         _serialize(ctx)
@@ -109,8 +105,8 @@ def test_a_non_string_dict_key_is_rejected(ctx):
 def test_shared_mutable_containers_are_rejected(ctx):
     """Two paths to one list restore as two lists; anything relying on that is now wrong."""
     shared = ["x"]
-    ctx._awaiting_user = True
-    ctx._pending_clarification_request = {"a": shared, "b": shared}
+    ctx._ask_agent_question("which one?")
+    ctx._turn_use_plan = {"a": shared, "b": shared}
 
     with pytest.raises(StateEncodingError, match="two independent copies"):
         _serialize(ctx)
@@ -118,16 +114,16 @@ def test_shared_mutable_containers_are_rejected(ctx):
 
 def test_a_failed_encode_leaves_the_context_usable(ctx):
     """Invariant 8: a serialization failure keeps the runtime live."""
-    ctx._awaiting_user = True
-    ctx._pending_clarification_request = {"bad": {object()}}
+    ctx._ask_agent_question("which one?")
+    ctx._turn_use_plan = {"bad": {object()}}
 
     with pytest.raises(StateEncodingError):
         _serialize(ctx)
 
     # Still the authority on its own state, and still serializable once fixed.
     assert ctx.awaiting_user is True
-    ctx._pending_clarification_request = {"good": True}
-    assert _serialize(ctx)["pending_clarification_request"] == {"good": True}
+    ctx._turn_use_plan = {"good": True}
+    assert _serialize(ctx)["use_plan"] == {"good": True}
 
 
 # ---------------------------------------------------------------------------

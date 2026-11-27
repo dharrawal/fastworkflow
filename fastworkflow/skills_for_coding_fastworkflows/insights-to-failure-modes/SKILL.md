@@ -39,8 +39,9 @@ what you mark compilable, and explicit about why you left things out.
 2. **Provenance**: which runs, tasks and trial pairs produced the corpus, and which side was
    the reference (a teacher run, or a passing trial of the same model).
    - `fastworkflow distill ... --provenance FILE` writes this. It maps every pair to the
-     insights it produced and its `reference_source`; match insights to it by text to tag
-     each mode's `source`.
+     insights it produced and its `reference_source` (`self` or `teacher` for `--self` and
+     pool runs; empty for `--teacher/--student`, whose reference is the teacher). Match
+     insights to it by text to tag each mode's `source`.
    - Otherwise use the distill report, or the experiment's annotations in the debug UI.
 3. **The workflow's commands**: names, parameters, and what each returns (`<workflow>/_commands/`,
    or `what_can_i_do`). A check can only be phrased over what the workflow exposes.
@@ -120,6 +121,21 @@ model-backed signal adds a failure mode and latency.
 
 ### 4. Decide compile / don't compile, and say why
 
+First ask where the defect is best stopped. A verifier row checks only the agent's own model
+steps (not a command the user typed, nor one a planning command's code runs), and all it can do
+is hand the agent text. Some defects the workflow's own code can make impossible for every
+caller:
+
+| defect | stopped by |
+|---|---|
+| a value outside an accepted set, in the wrong form, or against a precondition on the current record | the command's `Input`: a field type or pattern, or a model validator raising `fastworkflow.Refused` ([validate-command-parameters](../validate-command-parameters/SKILL.md)) |
+| a write the user never confirmed | `@user_approval_for_execution(UserApproval.REQUIRED_ALWAYS)` on the command: the user is asked before every run |
+| a multi-command job done out of order, or with a write nobody asked for or a write repeated | a planning command ([author-planning-commands](../author-planning-commands/SKILL.md)): inside its phases a command marked `@writes` runs only when a step names it, and no more often than the steps name it |
+
+If the workflow already has the mechanism, the mode is `compiled: false` with `covered-by`
+naming it. If it could have one, decide the row on its own merits below and list the workflow
+change in the hand-off summary.
+
 Mark a mode `compiled: <rule id>` only if all of these hold:
 
 - **Positive evidence.** The rule fires on something observed (a value present and wrong, a
@@ -150,7 +166,8 @@ the specifics:
 - `not-outcome-relevant`
 - `needs-judge`
 - `task-specific`
-- `covered-by`: another rule enforces the same principle; name it.
+- `covered-by`: another rule, or the workflow's own code (above), enforces the same
+  principle; name it.
 
 Good advice that cannot be checked is prompt material, not verifier material: say so.
 
@@ -183,23 +200,21 @@ python fastworkflow/skills_for_coding_fastworkflows/insights-to-failure-modes/ch
 (From an installed package, the skill folder is under
 `python -c "import fastworkflow, os; print(os.path.dirname(fastworkflow.__file__))"`.)
 
-It reports these problems:
+It counts the items of each file (`N.` lines, `## N.` headings) and reports, as errors (exit 1):
 
-- insights assigned to no mode, or to several;
-- ids that do not exist;
-- missing fields;
-- compiled modes without a `check` or `hook`;
-- uncompiled modes without a reason;
-- task-data-looking literals in `check` fields. By default it flags long digit runs and
-  currency amounts; pass `--forbid` with the workflow's own id shapes.
+- insights assigned to no mode, or to several, and ids that do not exist;
+- missing fields, a duplicate mode id, an unknown `signal` or `hook`;
+- compiled modes without a `check` or `hook`, and uncompiled modes without `notes`;
+- task-data-looking literals in `check` fields. By default it flags runs of five or more digits
+  and currency amounts; pass `--forbid` with the workflow's own id shapes.
 
-Fix everything it reports.
+`notes` that do not start with a reason keyword are a warning. Fix everything it reports.
 
 ### 7. Hand-off summary
 
 Finish with a short table for whoever compiles the rules: mode -> insights -> signal ->
-compile decision -> overlap. Then list excluded insights with their one-line reasons, and the
-gaps. The summary is what gets reviewed; the YAML is what gets compiled.
+compile decision -> overlap. Then list excluded insights with their one-line reasons, the
+workflow changes that would stop a mode in code (step 4), and the gaps. The summary is what gets reviewed; the YAML is what gets compiled.
 
 ## Example
 

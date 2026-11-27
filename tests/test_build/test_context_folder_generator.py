@@ -5,7 +5,7 @@ import pytest
 from pathlib import Path
 
 from fastworkflow.build.context_folder_generator import ContextFolderGenerator
-from fastworkflow.command_context_model import CommandContextModel
+from fastworkflow.core.command_context_model import CommandContextModel
 
 
 def create_test_context_model(path, model_data):
@@ -96,58 +96,31 @@ def test_handler_file_creation(temp_dir, basic_context_model, commands_dir):
     assert (commands_dir / "TodoItem" / "_TodoItem.py").exists()
     assert (commands_dir / "User" / "_User.py").exists()
 
-    # Check content of handler files
-    with open(commands_dir / "TodoList" / "_TodoList.py", 'r') as f:
-        content = f.read()
-        # Verify imports
-        assert "from typing import Optional" in content
-        assert "from ...application.todolist import TodoList" in content
-        # Verify Context class with get_parent method
+    # Check content of handler files: an empty Context class, no get_parent (the context starts top level; its
+    # author declares parents and writes get_parent together)
+    for name in ("TodoList", "TodoItem"):
+        content = (commands_dir / name / f"_{name}.py").read_text()
         assert "class Context:" in content
-        assert "@classmethod" in content
-        assert "def get_parent(cls, record: TodoList)" in content
-        assert "return getattr(record, 'parent', None)" in content
-
-    # Check TodoItem handler file
-    with open(commands_dir / "TodoItem" / "_TodoItem.py", 'r') as f:
-        content = f.read()
-        assert "from typing import Optional" in content
-        assert "from ...application.todoitem import TodoItem" in content
-        assert "class Context:" in content
-        assert "@classmethod" in content
-        assert "def get_parent(cls, record: TodoItem)" in content
-        assert "return getattr(record, 'parent', None)" in content
+        assert "get_parent" not in content.split('"""')[0] + content.split('"""')[-1]
+        assert "def get_parent" not in content
+        assert "parents" in content   # the docstring says how to place it inside another context
 
 
 def test_handler_file_with_inheritance(temp_dir, inheritance_context_model, commands_dir):
-    """Test that handler files correctly reference parent classes from inheritance."""
+    """A context that inherits gets the same empty Context class: inheritance is not containment, so no parent
+    type is guessed from a base class."""
     generator = ContextFolderGenerator(
         commands_root=commands_dir,
         model_path=inheritance_context_model
     )
-    
-    # Generate folders and handler files
+
     generator.generate_folders()
-    
-    # Check TodoList handler file with inheritance
-    with open(commands_dir / "TodoList" / "_TodoList.py", 'r') as f:
-        content = f.read()
-        # Verify imports include the parent class
-        assert "from ...application.todolist import TodoList" in content
-        assert "from ...application.baselist import BaseList" in content
-        # Verify return type annotation includes parent class
-        assert "def get_parent(cls, record: TodoList) -> Optional[BaseList]:" in content
-        assert "return getattr(record, 'parent', None)" in content
-    
-    # Check TodoItem handler file with inheritance
-    with open(commands_dir / "TodoItem" / "_TodoItem.py", 'r') as f:
-        content = f.read()
-        # Verify imports include the parent class
-        assert "from ...application.todoitem import TodoItem" in content
-        assert "from ...application.baseitem import BaseItem" in content
-        # Verify return type annotation includes parent class
-        assert "def get_parent(cls, record: TodoItem) -> Optional[BaseItem]:" in content
-        assert "return getattr(record, 'parent', None)" in content
+
+    for name in ("TodoList", "TodoItem"):
+        content = (commands_dir / name / f"_{name}.py").read_text()
+        assert "class Context:" in content
+        assert "def get_parent" not in content
+        assert "import" not in content
 
 
 def test_idempotence(temp_dir, basic_context_model, commands_dir):

@@ -33,7 +33,7 @@ from pathlib import Path
 
 import pytest
 
-from fastworkflow import state_paths
+from fastworkflow.session import state_paths
 from fastworkflow.observability import store as obs
 from fastworkflow.observability import training_history as th
 from fastworkflow.run_chatbot import server as run_chatbot_server

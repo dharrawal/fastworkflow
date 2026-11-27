@@ -5,6 +5,8 @@ import fastworkflow
 from ...application.workitem import WorkItem
 
 class Context:
+    parents = ["WorkItem"]
+
     state_version = 1
 
     @classmethod

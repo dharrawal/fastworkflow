@@ -46,7 +46,7 @@ notes: [references/docs-inventory.md](references/docs-inventory.md).
 | `README.md` (603 lines) | Doc of record for public positioning + quickstart | Public | Live; benchmark provenance gap (§4) |
 | `CLAUDE.md` | Doc of record for agent discipline | Agents | Live; 3 known inaccuracies (§3) |
 | `AGENTS.md` | Doc of record for beads (`bd`) issue tracking + venv rule | Agents | Live |
-| `.claude/rules/command-authoring.md` | Doc of record for writing `_commands/*.py` | Agents | Live; path-scoped to `**/_commands/**` and `**/context_inheritance_model.json` — loads only when touching those paths (moved out of CLAUDE.md in c33b9a5) |
+| `.claude/rules/command-authoring.md` | Doc of record for writing `_commands/*.py` | Agents | Live; path-scoped to `**/_commands/**` (`context_inheritance_model.json` is a removed spelling and no longer listed) — loads only when touching those paths (moved out of CLAUDE.md in c33b9a5) |
 | `.cursor/rules/testing_rules.mdc` | Doc of record for testing rules | Agents (Cursor) | Live, `alwaysApply: true` |
 | `fastworkflow-article-1..4.md` (repo root) | Published TUTORIAL series | Public | Live; see name-collision warning (§2) |
 | `docs/*.md` (git-tracked) | Design docs; per-doc supremacy clauses | Team | Mixed — some are ghosts (§3) |
@@ -69,7 +69,7 @@ one is public, one is team-private.
 | | Root tutorial series | docs/ failure series |
 |---|---|---|
 | Files | `fastworkflow-article-1.md` … `-4.md` (repo root, git-tracked) | `docs/Article 1 - The Setup.pdf`, `Article 2 - The Failure Taxonomy.pdf`, `Article 3 - Mitigations and a Path Forward.pdf` (UNTRACKED) |
-| What | 4-part published tutorial: hello_world → stateful classes → inheritance (`context_inheritance_model.json`) → parent-child hierarchies (`get_parent` in `_<Context>.py`) | 3-part study of an RLM memory layer on τ²-bench retail: 15 hand-picked hard tasks, 2/15 → 5/15 after mitigations, failure taxonomy |
+| What | 4-part published tutorial: hello_world → stateful classes → inheritance (`context_inheritance_model.json`, now a removed spelling: `inherits` on `class Context`) → parent-child hierarchies (`get_parent` in `_<Context>.py`) | 3-part study of an RLM memory layer on τ²-bench retail: 15 hand-picked hard tasks, 2/15 → 5/15 after mitigations, failure taxonomy |
 | Authors | Dhar Rawal / core team | Rakshit Pandhi (principal), Sanchit Satija, Sharvil Oza; mentored by Dhar; funded by Radiant Logic |
 | Visibility | PUBLIC | TEAM-PRIVATE until Dhar decides (dated Jul 7 2026) |
 | Citation hygiene | article-4 link text says `github.com/fastworkflow/fastworkflow` but href is `radiantlogicinc/fastworkflow` (line 637) — org migration status unknown | DOI + arXiv citation errors, see §4 |
@@ -92,7 +92,7 @@ below, the code wins. Do not "fix" tracked docs without going through
 
 | Location | What is wrong | Evidence |
 |---|---|---|
-| `CLAUDE.md:7,30` | Says intent models are trained "via scikit-learn" / pipeline built on "DSPy, scikit-learn, and Pydantic" | Training is torch/transformers: `fastworkflow/model_pipeline_training.py:3-17` imports `AutoModelForSequenceClassification`, `torch`, `AdamW`; sklearn supplies only PCA, metrics, split, LabelEncoder |
+| `CLAUDE.md:7,30` | Says intent models are trained "via scikit-learn" / pipeline built on "DSPy, scikit-learn, and Pydantic" | Training is torch/transformers: `fastworkflow/train/model_pipeline_training.py:3-17` imports `AutoModelForSequenceClassification`, `torch`, `AdamW`; sklearn supplies only PCA, metrics, split, LabelEncoder |
 | `CLAUDE.md:33` | "sklearn classifier identifies the target command" | Same — it is a fine-tuned BERT-family classifier (see `fastworkflow-nlu-pipeline-reference`) |
 | `CLAUDE.md:13` | Names only `tests/example_workflow/` and `tests/hello_world_workflow/` | Third real test workflow `tests/todo_list_workflow/` is used by 10+ test files (`grep -rl todo_list_workflow tests/`) |
 | `fastworkflow/run_fastapi_mcp/README.md` | Launch command `uvicorn services.run_fastapi.main:app` (lines 31, 63, 75) — that package was deleted; request examples use `channel_query` (lines 314, 337, 344) but the model field is `user_query`; documents 504-on-timeout (line 360) but v2.22.0 switched to 202-deferral | File itself + `git log --oneline -- services/` + `fastworkflow/run_fastapi_mcp/turns.py` |
@@ -162,10 +162,9 @@ parity is sacred: NEVER modify tau-bench tools/tasks for benchmark runs.
   (publish the fork + artifacts) lands.
 - Any pass^k / reliability number — none has been measured under the E0 harness (E0 is
   unbuilt as of 2026-07-09; no `eval/` dir exists).
-- "1-shot adaptation from intent-detection mistakes" (README.md:373) is implemented
-  (`fastworkflow/cache_matching.py:53 store_utterance_cache`) but its test coverage and
-  cross-session persistence claims are unaudited — treat elaborations beyond the README
-  sentence as unverified.
+- "1-shot adaptation from intent-detection mistakes" is NOT a claim any more: the similarity
+  cache behind it was removed (fix-o5wi.8) and the README says learning from corrections is planned
+  (recorded rows plus a background refit of the head). Do not reintroduce the claim.
 
 Full claims register with per-claim status: [references/external-claims-register.md](references/external-claims-register.md).
 
@@ -264,7 +263,7 @@ Facts verified 2026-07-09 against v2.22.2 (commit c33b9a5). Re-verify volatile f
 
 | Fact | Re-verification command |
 |---|---|
-| CLAUDE.md scikit-learn rot (lines 7, 30, 33) | `grep -n -e sklearn -e scikit CLAUDE.md; sed -n 3,7p fastworkflow/model_pipeline_training.py` |
+| CLAUDE.md scikit-learn rot (lines 7, 30, 33) | `grep -n -e sklearn -e scikit CLAUDE.md; sed -n 3,7p fastworkflow/train/model_pipeline_training.py` |
 | CLAUDE.md test-workflow omission (line 13) | `grep -n workflow CLAUDE.md; ls -d tests/*workflow*` |
 | Which docs/ files are team-private (untracked) | `git status --porcelain docs/` |
 | Team-private markers still present | `grep -n -i "team-private" docs/rsi_harness_agent_report.md docs/forge_meta_workflow_spec.md` |

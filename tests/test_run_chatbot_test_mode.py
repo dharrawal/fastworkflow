@@ -38,7 +38,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from fastworkflow.observability import store as obs
-from fastworkflow import state_paths
+from fastworkflow.session import state_paths
 from fastworkflow.cli import add_run_chatbot_parser
 from fastworkflow.run_chatbot import launcher
 from fastworkflow.run_chatbot import server as run_chatbot_server
@@ -51,16 +51,6 @@ def workflow_path():
     if not os.path.isdir(path):
         pytest.skip(f"hello_world_workflow not found at {path}")
     return path
-
-
-@pytest.fixture
-def env_files():
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    env_file = os.path.join(project_root, "env", ".env")
-    passwords_file = os.path.join(project_root, "passwords", ".env")
-    if not os.path.isfile(env_file) or not os.path.isfile(passwords_file):
-        pytest.skip("env files missing for FastAPI tests")
-    return env_file, passwords_file
 
 
 def _load_app_module(workflow_path, env_files, tmp_path, extra_argv=()):
@@ -324,7 +314,7 @@ class TestChatbotTestModeAssets:
         assert b"https://" not in page
 
     def test_page_csp_connects_to_loopback_only(self, tmp_path, monkeypatch):
-        from fastworkflow import state_paths
+        from fastworkflow.session import state_paths
         from fastworkflow.run_chatbot import server as run_chatbot_server
 
         monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "state"))
@@ -405,6 +395,25 @@ class TestSpawnDecision:
         assert "--cors_loopback_only" in plan.cmd
         assert "--cors_origin" not in plan.cmd
         assert "*" not in plan.cmd
+
+    def test_the_spawned_server_pins_the_channel_approval_surface(self):
+        # fix-rkr1: the chat's behaviour (a plain yes approves, no token) is stated, not inherited from a
+        # server default that a later release moves to host. Signed or unsigned.
+        for signed in (False, True):
+            plan = launcher.plan_server_spawn(
+                **self.KW, allow_unsigned_jwt=not signed, expect_encrypted_jwt=signed, missing_packages=[]
+            )
+            at = plan.cmd.index("--chat_approval_surface")
+            assert plan.cmd[at + 1] == "channel"
+            assert plan.cmd.count("--chat_approval_surface") == 1
+
+    def test_the_spawned_server_opts_in_to_the_request_cache_toggle(self):
+        # The chat page's "LLM cache" checkbox keeps its effect for the local chat; no other server has it.
+        for signed in (False, True):
+            plan = launcher.plan_server_spawn(
+                **self.KW, allow_unsigned_jwt=not signed, expect_encrypted_jwt=signed, missing_packages=[]
+            )
+            assert plan.cmd.count("--allow_request_cache_toggle") == 1
 
     def test_missing_server_extra_is_a_friendly_refusal(self):
         plan = launcher.plan_server_spawn(

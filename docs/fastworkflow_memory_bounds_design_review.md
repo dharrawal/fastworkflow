@@ -408,7 +408,7 @@ has been persisted **successfully**," and §8.4 forbids `default=str` precisely 
 lossy write appear successful." But §8.7 step 4 persists suspended state through the existing
 store, and that path is:
 
-```61:64:fastworkflow/session_state_store.py
+```61:64:fastworkflow/session/session_state_store.py
     def save(self, channel_id: str, state: dict[str, Any]) -> None:
         path = self._json_path(channel_id)
         with open(path, "w", encoding="utf-8") as f:
@@ -432,7 +432,7 @@ implementation map delivers.
 §8.2 names the target prefix (`fw:session:workflow_context:`) and §12 reduces the work to
 "namespaced factory support." The factory cannot express it today:
 
-```112:135:fastworkflow/session_state_store.py
+```112:135:fastworkflow/session/session_state_store.py
 def get_session_state_store(
     *,
     base_folder: Optional[str] = None,

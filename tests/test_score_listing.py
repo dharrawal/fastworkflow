@@ -15,8 +15,9 @@ from pathlib import Path
 
 import pytest
 
-from fastworkflow import run_listing
+from fastworkflow.agent import run_listing
 from fastworkflow.train import score_listing as sl
+from tests.context_declarations import declare_inherits
 
 ROOT = Path(__file__).resolve().parent
 TEST_SETS = ROOT / "planning_test_sets"
@@ -167,12 +168,11 @@ def test_inherited_commands_count_as_reachable_but_not_as_strict_entries():
 
 
 def test_the_inheritance_declaration_is_read_transitively_from_the_workflow(tmp_path):
-    (tmp_path / "_commands").mkdir()
-    (tmp_path / "_commands" / "context_inheritance_model.json").write_text(json.dumps({
-        "Book": {"base": ["Media"]}, "Media": {"base": ["Record"]}, "Record": {}}))
+    (tmp_path / "_commands" / "Record").mkdir(parents=True)
+    declare_inherits(tmp_path, {"Book": ["Media"], "Media": ["Record"]})
     bases = sl.inheritance_bases(tmp_path)
     assert bases["Book"] == frozenset({"Media", "Record"})
-    assert bases["Record"] == frozenset()
+    assert bases.get("Record", frozenset()) == frozenset()   # a context with no inherits declaration has no bases
     assert sl.inheritance_bases(tmp_path / "missing") == {}
 
 
@@ -269,7 +269,7 @@ def test_the_oracle_seeds_bound_the_shortlist_from_above_on_this_workflow(tutori
 
 def test_without_a_planning_match_the_exact_name_gather_misses_natural_requests(tutorial_run):
     """Offline gathering reads exact names only (the per-scope head answers need live heads): recall is the floor."""
-    # the production threshold now gives the tutorial's full listing whole (6,353 < 7,000), so the shortlist's own
+    # the production threshold now gives the tutorial's full listing whole (5,901 < 8,000), so the shortlist's own
     # floor is read from the sweep row where the threshold forces the shortlist
     assert tutorial_run["sweep"]["thresholds"]["3000"]["recall"][sl.MODE_NONE]["command_shortlist"] == 0.0
 

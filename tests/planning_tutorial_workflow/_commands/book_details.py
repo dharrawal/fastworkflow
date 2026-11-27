@@ -1,7 +1,7 @@
-"""book_details: the first book matching the request's words, or that none matches.
+"""book_details: the book whose title the request names, or that none matches.
 
-find lists the matches; book opens the first one, and is skipped when nothing matched;
-__result__ says what book found, or that no book matches.
+find lists the matches; book opens the one whose title is the request's title (run(..., named=...)), and
+is skipped when nothing matched; __result__ says what book found, or that no book matches.
 """
 from pydantic import BaseModel, Field
 
@@ -17,7 +17,7 @@ class Signature:
     plain_utterances = ["who wrote Persuasion", "how many copies of Emma are there"]
 
     class Input(BaseModel):
-        title: str = Field(description="the book's title")
+        title: str = Field(description="the book's title", json_schema_extra={"copied_from_command_text": True})
 
 
 class PlanGenerator:
@@ -39,10 +39,10 @@ class PlanGenerator:
         def copies(self) -> int:
             return self.show.copies
 
-    def book(self, find) -> Book:
+    def book(self, input, find) -> Book:
         if not find.book_uids:
             return []
-        return [run("show_book", book_uid=find.book_uids[0])]
+        return [run("show_book", named=input.title)]
 
     def __result__(self, input, book=None):
         if book is None:

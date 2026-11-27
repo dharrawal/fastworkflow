@@ -7,7 +7,7 @@ to false keeps its wording: neither form won there (each failed a different case
 """
 from types import SimpleNamespace
 
-from fastworkflow import planning_commands
+from fastworkflow.planning import planning_commands
 
 
 def _bool(default):

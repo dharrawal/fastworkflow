@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import json
 import importlib
-import os
 import shutil
 import sys
 import uuid
@@ -19,7 +18,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from fastworkflow import approval_binding as ab
+from fastworkflow.review import approval_binding as ab
 from pathlib import Path as _Path
 
 from tests.test_approval_binding import _annotate
@@ -27,7 +26,10 @@ from tests.test_approval_binding import _annotate
 # The FastAPI routes exercised here (perform_action, and invoke_agent answering a pending approval) do
 # not route by intent, so this file keeps the todo copy: its approval path needs no trained model.
 TODO = _Path(__file__).resolve().parent / "todo_list_workflow"
-_COPY_IGNORE = shutil.ignore_patterns("___command_info", "___workflow_contexts", "___convo_info", "__pycache__")
+# These tests build the channel's root themselves, so the copy carries no startup_action.json (a server given a
+# workflow folder with one now runs it as every session's first turn, bd fix-qjne.10, and the root would be set twice).
+_COPY_IGNORE = shutil.ignore_patterns("___command_info", "___workflow_contexts", "___convo_info", "__pycache__",
+                                      "startup_action.json")
 from tests.todo_list_workflow.application.todo_list import TodoList
 from tests.todo_list_workflow.application.todo_manager import TodoListManager
 
@@ -44,16 +46,6 @@ def no_live_model(monkeypatch):
 
     monkeypatch.setattr(litellm, "completion", _refuse)
     monkeypatch.setattr(litellm, "acompletion", _refuse)
-
-
-@pytest.fixture
-def env_files():
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    env_file = os.path.join(project_root, "env", ".env")
-    passwords_file = os.path.join(project_root, "passwords", ".env")
-    if not os.path.isfile(env_file) or not os.path.isfile(passwords_file):
-        pytest.skip("env files missing for FastAPI tests")
-    return env_file, passwords_file
 
 
 @pytest.fixture
@@ -92,7 +84,7 @@ def _setup_todo_context(app_module, channel_id: str):
         root.lists[7] = chores
         wf.record = chores
         # A list is identified by its id in the instance label (as a record is), so the context locates.
-        from fastworkflow.context_identity import context_class_for
+        from fastworkflow.core.context_identity import context_class_for
         context_class_for(wf, "TodoList").instance_label_attr = "id"
         return wf, chores
     return asyncio.run(go())

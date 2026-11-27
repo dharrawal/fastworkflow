@@ -90,9 +90,7 @@ def invoke_agent(user_query: str, timeout_seconds: int = 60):
 - `name-conversation` prompt
 - `summarize-conversation` prompt
 
-**Kept in spec:**
-- `format-command` - helps clients format XML-tagged parameters
-- `clarify-params` - helps clients compose clarification questions
+**Kept in spec (never implemented):** `format-command` and `clarify-params`. fastapi-mcp 0.4.0 has no prompt support, so the server registers no MCP prompts.
 
 ## 4. Streaming and Traces in CommandOutput
 
@@ -148,8 +146,7 @@ def invoke_agent(user_query: str, timeout_seconds: int = 60):
 4. Token lasts 1 year by default (no refresh needed)
 
 ### Prompts:
-- ✅ `format-command` - format commands with XML tags
-- ✅ `clarify-params` - compose clarification questions
+- not implemented: `format-command`, `clarify-params` (no prompts are registered; fastapi-mcp 0.4.0 has none)
 - ❌ `name-conversation` - handled by FastWorkflow
 - ❌ `summarize-conversation` - handled by FastWorkflow
 - ❌ `plan-next-steps` - redundant with `invoke_agent`
@@ -204,8 +201,8 @@ def invoke_agent(user_query: str, timeout_seconds: int = 60):
 
 **Related specs:**
 - [fastworkflow_fastapi_spec.md](./fastworkflow_fastapi_spec.md) - REST API counterpart
-- FastWorkflow CLI runner: `fastworkflow/run/__main__.py`
-- Agent implementation: `fastworkflow/workflow_agent.py`
+- FastWorkflow CLI runner: `fastworkflow/run_cli/__main__.py`
+- Agent implementation: `fastworkflow/agent/workflow_agent.py`
 
 ---
 

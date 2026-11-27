@@ -1,6 +1,6 @@
 """A planning command typed by its name is matched by name, before the classifier.
 
-The defect: `CommandNamePrediction._predict_impl` builds its exact-name candidate set
+The defect: the CME's intent stage built its exact-name candidate set
 from the routed commands only (`cme` names plus `get_command_names(context)`). A
 planning command (a skill file that runs a plan) is absent from that set, so typing it
 by name never exact-matches. Its words fall through to fuzzy and then to the context's
@@ -25,16 +25,17 @@ from types import SimpleNamespace
 import pytest
 
 import fastworkflow
+from fastworkflow.intent import router as intent_router
 from fastworkflow._workflows.command_metadata_extraction import intent_detection
 from fastworkflow._workflows.command_metadata_extraction.intent_detection import (
     MATCHER_LAYER_KNOWN_NAME_FOREIGN_CONTEXT,
     CommandNamePrediction,
 )
-from fastworkflow.command_executor import CommandExecutor, _resolve_planning_command_name
-from fastworkflow.command_routing import RoutingRegistry
-from fastworkflow.model_pipeline_training import trained_command_labels
-from fastworkflow.workflow_agent import planner_commands_text
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.command_executor import CommandExecutor, _resolve_planning_command_name
+from fastworkflow.core.command_routing import RoutingRegistry
+from fastworkflow.train.model_pipeline_training import trained_command_labels
+from fastworkflow.agent.workflow_agent import planner_commands_text
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 from tests.test_intent_detection_foreign_context import (
     _refusing_router as refusing_router,
 )
@@ -45,8 +46,6 @@ from tests.test_turn_result_capture import (  # noqa: F401 - shared fixture
     initialized_fastworkflow,
 )
 
-INTENT_DETECTION = fastworkflow.NLUPipelineStage.INTENT_DETECTION
-MISUNDERSTANDING = fastworkflow.NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION
 
 #: A planning command owned by the root context, the shape of the live `inspect_entity`:
 #: a request-level argument. Its one phase is a guard (`do_not_run`), so the run calls no
@@ -110,7 +109,7 @@ def planning_name_env(tmp_path, initialized_fastworkflow, monkeypatch):
 def classifier_consulted(planning_name_env, monkeypatch):
     """Route every classifier consultation to a double that records it and raises."""
     consulted: list[str] = []
-    monkeypatch.setattr(intent_detection, "CommandRouter", refusing_router(consulted))
+    monkeypatch.setattr(intent_router, "CommandRouter", refusing_router(consulted))
     return consulted
 
 
@@ -119,13 +118,15 @@ def predictor(planning_name_env):
     return CommandNamePrediction(planning_name_env.ctx._cme_workflow)
 
 
-def _predict(predictor, context: str, utterance: str, stage=INTENT_DETECTION):
-    # The clarification stage reads the pending utterance the wildcard stored on the CME
-    # context; store it as the wildcard would, so the stage sees a real pending turn.
-    predictor.cme_workflow.context["command"] = utterance
-    nlu_trace: dict = {}
-    output = predictor._predict_impl(context, utterance, stage, nlu_trace)
-    return output, nlu_trace
+def _predict(predictor, utterance: str):
+    """The intent loop's decision for *utterance* from where the workflow stands, and the span facts."""
+    output = predictor.predict(utterance)
+    return output, predictor.trace
+
+
+def _stand_in_the_root(planning_name_env):
+    """The root ('*') context: the workflow has no current record, so only the global scope is on the path."""
+    planning_name_env.wf.record = None
 
 
 # ---------------------------------------------------------------------------
@@ -133,91 +134,79 @@ def _predict(predictor, context: str, utterance: str, stage=INTENT_DETECTION):
 # ---------------------------------------------------------------------------
 
 def test_a_planning_command_is_matched_by_name_in_its_own_context(predictor, classifier_consulted):
-    output, trace = _predict(predictor, "Library", "count_books query=Jane Austen")
+    output, trace = _predict(predictor, "count_books query=Jane Austen")
 
-    assert output.command_name == COUNT_BOOKS
-    assert output.is_cme_command is False
+    assert output.command == COUNT_BOOKS
+    assert output.kind != "core"
     assert trace["matcher_layer"] == "exact_prefix"
     assert classifier_consulted == []
 
 
 def test_a_root_planning_command_is_matched_by_name_in_the_root_context(
-    predictor, classifier_consulted
+    planning_name_env, predictor, classifier_consulted
 ):
-    output, trace = _predict(predictor, "*", f"{ROOT_PLANNING} query=Jesse Rodgers-ADM")
+    _stand_in_the_root(planning_name_env)
+    output, trace = _predict(predictor, f"{ROOT_PLANNING} query=Jesse Rodgers-ADM")
 
-    assert output.command_name == ROOT_PLANNING
+    assert output.command == ROOT_PLANNING and output.context == "*"
     assert trace["matcher_layer"] == "exact_prefix"
     assert classifier_consulted == []
 
 
 def test_free_text_after_a_root_planning_name_still_matches_the_name(
-    predictor, classifier_consulted
+    planning_name_env, predictor, classifier_consulted
 ):
     """The live shape: the name, then the request in free words, no key=value."""
-    output, trace = _predict(predictor, "*", FREE_TEXT)
+    _stand_in_the_root(planning_name_env)
+    output, trace = _predict(predictor, FREE_TEXT)
 
-    assert output.command_name == ROOT_PLANNING
+    assert output.command == ROOT_PLANNING
     assert trace["matcher_layer"] == "exact_prefix"
     assert classifier_consulted == []
 
 
-def test_the_misunderstanding_stage_matches_a_planning_name_too(predictor, classifier_consulted):
-    output, trace = _predict(predictor, "*", FREE_TEXT, stage=MISUNDERSTANDING)
+def test_the_misunderstanding_question_offers_a_planning_command_of_the_context_too(planning_name_env):
+    """Every command the user can name is a candidate of the misunderstanding question, planning commands among them
+    (it used to be the misunderstanding stage's own matching set)."""
+    from fastworkflow.intent import intent_loop
 
-    assert output.command_name == ROOT_PLANNING
-    assert trace["matcher_layer"] == "exact_prefix"
-    assert classifier_consulted == []
+    names = [choice["name"] for choice in intent_loop.command_choices(planning_name_env.wf)]
+    assert COUNT_BOOKS in names
+    assert intent_loop.read("count_books", names).name == COUNT_BOOKS
 
 
 # ---------------------------------------------------------------------------
 # The foreign-context guard: a planning command owned elsewhere is named, not guessed
 # ---------------------------------------------------------------------------
 
-def test_a_root_planning_name_typed_in_another_context_names_its_owner(
+def test_a_root_planning_name_typed_in_another_context_is_found_in_the_global_scope(
     predictor, classifier_consulted
 ):
-    output, trace = _predict(predictor, "Library", FREE_TEXT)
+    """The global scope is on every lookup path (asked last), so the root planning command is not foreign to Library:
+    it is decided by name, in the scope it lives in, with no climb and no classifier."""
+    output, trace = _predict(predictor, FREE_TEXT)
 
-    assert output.command_name is None
-    assert trace["matcher_layer"] == MATCHER_LAYER_KNOWN_NAME_FOREIGN_CONTEXT
-    assert trace["known_name_owner_contexts"] == ["*"]
-    assert classifier_consulted == []
-
-
-def test_the_parent_walk_from_library_reaches_the_root_planning_command(
-    predictor, classifier_consulted
-):
-    """`Library -> *`, the loop `_commands/wildcard.py` runs while the name is None."""
-    visited = []
-    resolved = None
-    for context in ("Library", "*"):
-        output, trace = _predict(predictor, context, FREE_TEXT)
-        visited.append((context, output.command_name, trace["matcher_layer"]))
-        if output.command_name is not None:
-            resolved = output.command_name
-            break
-
-    assert resolved == ROOT_PLANNING
-    assert visited == [
-        ("Library", None, MATCHER_LAYER_KNOWN_NAME_FOREIGN_CONTEXT),
-        ("*", ROOT_PLANNING, "exact_prefix"),
-    ]
+    assert output.command == ROOT_PLANNING
+    assert (output.context, output.decided_by) == ("*", "exact_name")
+    assert trace["matcher_layer"] == "exact_prefix"
     assert classifier_consulted == []
 
 
 def test_a_sibling_planning_command_is_named_after_its_owner(predictor, classifier_consulted):
-    output, trace = _predict(predictor, "Library", "loan_report Dune")
+    output, trace = _predict(predictor, "loan_report Dune")
 
-    assert output.command_name is None
+    assert output.command is None and output.decided_by == "foreign_name"
     assert trace["matcher_layer"] == MATCHER_LAYER_KNOWN_NAME_FOREIGN_CONTEXT
     assert "Book" in trace["known_name_owner_contexts"]
     assert "Library" not in trace["known_name_owner_contexts"]
+    assert "loan_report" in output.hint
     assert classifier_consulted == []
 
 
-def test_the_inventory_lists_planning_commands_with_their_owners(predictor):
-    inventory = predictor.command_inventory()
+def test_the_inventory_lists_planning_commands_with_their_owners(planning_name_env):
+    from fastworkflow.intent import intent_loop
+
+    inventory = intent_loop.command_inventory(planning_name_env.folder)
 
     assert inventory[ROOT_PLANNING] == ("*",)
     assert inventory["count_books"] == ("Library",)
@@ -231,7 +220,7 @@ def test_the_inventory_lists_planning_commands_with_their_owners(predictor):
 def test_planning_commands_are_classifier_labels_of_their_heads(planning_name_env):
     """Phase 10 step 1 (production): a root planning command labels the global head, and a scoped one
     labels the heads on its lookup path. The baseline arm keeps the pre-step-1 rule (no labels)."""
-    from fastworkflow.model_pipeline_training import (
+    from fastworkflow.train.model_pipeline_training import (
         PLANNING_HEADS_NOT_HERE,
         experiment_planning_heads,
         experiment_reserved_class_arm,
@@ -248,17 +237,20 @@ def test_planning_commands_are_classifier_labels_of_their_heads(planning_name_en
 
 
 def test_a_routed_command_still_resolves_by_name_in_its_context(predictor, classifier_consulted):
-    output, trace = _predict(predictor, "Library", "find_book query=Dune")
+    output, trace = _predict(predictor, "find_book query=Dune")
 
-    assert output.command_name == "Library/find_book"
+    assert output.command == "Library/find_book"
     assert trace["matcher_layer"] == "exact_prefix"
     assert classifier_consulted == []
 
 
-def test_a_routed_command_typed_in_the_root_is_still_foreign(predictor, classifier_consulted):
-    output, trace = _predict(predictor, "*", "find_book query=Dune")
+def test_a_routed_command_typed_in_the_root_is_still_foreign(
+    planning_name_env, predictor, classifier_consulted
+):
+    _stand_in_the_root(planning_name_env)
+    output, trace = _predict(predictor, "find_book query=Dune")
 
-    assert output.command_name is None
+    assert output.command is None
     assert trace["known_name_owner_contexts"] == ["Library"]
     assert classifier_consulted == []
 

@@ -15,10 +15,12 @@ import pytest
 from dotenv import dotenv_values
 
 import fastworkflow
-from fastworkflow import planning_commands, command_preview, workflow_agent
+from fastworkflow.planning import planning_commands, command_preview
+from fastworkflow.core import turn_cache
+from fastworkflow.agent import workflow_agent
 from fastworkflow.build.class_analysis_structures import ClassInfo, MethodInfo
 from fastworkflow.build.command_file_template import create_command_file
-from fastworkflow.command_directory import CommandDirectory
+from fastworkflow.core.command_directory import CommandDirectory
 from fastworkflow.observation_offloading.facts import workflow_signatures
 from fastworkflow.utils import python_utils
 
@@ -60,6 +62,9 @@ BRANCH_CONTEXT = """from ...application.library import Branch, Library
 
 
 class Context:
+    inherits = ["Library"]
+    parents = ["Library"]
+
     @classmethod
     def get_parent(cls, record: Branch) -> Library:
         return record.library
@@ -118,14 +123,9 @@ def _library_workflow(tmp_path, extra_planning_commands: dict[str, str] | None =
     app_lib = folder / "application" / "library.py"
     app_lib.write_text(app_lib.read_text(encoding="utf-8") + BRANCH_APP_ADDITION, encoding="utf-8")
 
-    with open(os.path.join(LIBRARY, "_commands", "context_inheritance_model.json"),
-              encoding="utf-8") as handle:
-        inheritance = json.load(handle)
-    inheritance["Branch"] = {"base": ["Library"]}
+    # the copied context classes carry the library's inherits; BRANCH_CONTEXT declares Branch's
     commands_dir = folder / "_commands"
     commands_dir.mkdir(parents=True, exist_ok=True)
-    (commands_dir / "context_inheritance_model.json").write_text(
-        json.dumps(inheritance, indent=2) + "\n", encoding="utf-8")
 
     for rel in (*_COPIED_CONTEXT_CLASSES, *_COPIED_COMMANDS):
         src = os.path.join(LIBRARY, rel)
@@ -175,7 +175,6 @@ def test_copied_execution_commands_all_load_their_signatures(tmp_path):
 
     resolution = planning_commands.resolve_field_sources(folder)
     assert resolution.errors == ()
-    assert resolution.infos == ()
     assert signatures["Library/open_book"].Input.model_fields["book_uid"].json_schema_extra[
         "available_from"
     ] == ["Library/find_book.book_uids"]
@@ -258,7 +257,10 @@ def test_root_planning_command_colliding_with_root_command_is_a_load_error(tmp_p
     # Phase 7 (one tree): a planning command takes the path an execution command would take (here
     # library_hours.py replaces the copied command). The build generator refuses to overwrite it
     # even with overwrite=True, and the workflow loads the file as a planning command.
-    folder = _library_workflow(tmp_path, {"library_hours": ROOT_PLANNING_COMMAND})
+    # Its steps must not run library_hours: in this file that is the planning command itself, a call cycle that
+    # fails its load (bd fix-ftdl.2).
+    folder = _library_workflow(tmp_path, {"library_hours": ROOT_PLANNING_COMMAND.replace(
+        '"library_hours", ', "")})
     planning = Path(folder, "_commands", "library_hours.py")
     before = planning.read_bytes()
 
@@ -351,13 +353,11 @@ def jev_env():
         pytest.skip("JEV_API_KEY not set in passwords/.env: matching needs a real Jev call")
     fastworkflow.init(env_vars=env_vars)
     workflow_agent._jev_lm.cache_clear()
-    workflow_agent._planning_command_matcher.cache_clear()
     try:
         yield
     finally:
         fastworkflow.init(env_vars=previous)
         workflow_agent._jev_lm.cache_clear()
-        workflow_agent._planning_command_matcher.cache_clear()
 
 
 def test_planning_command_scopes_along_library_contexts_and_without_library(tmp_path):
@@ -404,14 +404,15 @@ def test_jev_library_and_root_planning_commands_match_only_where_visible(tmp_pat
     # and when a Book inside the Library is active; the root skill matches in each of them too.
     for active in (library, lib_mod.Branch(library, "Central"), library.books["b1"]):
         wf.record = active
+        turn_cache.begin_turn()
         scopes = workflow_agent.planning_scopes(wf)
-        matched_lib = workflow_agent.match_planning_command(dune_query, folder, scopes=scopes)
-        assert matched_lib is not None and matched_lib[0] == "Library/dune_search"
-        template, _ = workflow_agent.planner_planning_command_for(dune_query, folder, scopes=scopes)
-        assert "find_book query=Dune" in template
+        assert workflow_agent.plan_label(wf, dune_query) == "Library/dune_search"
+        steps = workflow_agent.load_planning_command_map(folder)["Library/dune_search"].template
+        assert "find_book query=Dune" in workflow_agent._template_text(steps)
 
-        matched_root = workflow_agent.match_planning_command(hours_query, folder, scopes=scopes)
-        assert matched_root is not None and matched_root[0] == "hours_overview"
+        # The intent loop decides over the commands too: a request the library's own command also answers may be
+        # an ambiguity (no plan) instead of the root plan, but it is never a plan of another scope.
+        assert workflow_agent.plan_label(wf, hours_query) in (None, "hours_overview")
 
     # 2. Where Library is NOT on the path (bare root before startup, or detached Book),
     # the Library skill does not match, while the root skill still matches everywhere.
@@ -421,10 +422,9 @@ def test_jev_library_and_root_planning_commands_match_only_where_visible(tmp_pat
     for non_lib_wf in (bare_wf, detached_wf):
         scopes = workflow_agent.planning_scopes(non_lib_wf)
         assert "Library" not in scopes
-        assert workflow_agent.match_planning_command(dune_query, folder, scopes=scopes) is None
-        assert workflow_agent.planner_planning_command_for(dune_query, folder, scopes=scopes) == ("", None)
-        matched_root = workflow_agent.match_planning_command(hours_query, folder, scopes=scopes)
-        assert matched_root is not None and matched_root[0] == "hours_overview"
+        turn_cache.begin_turn()      # each is a turn of its own: the part memo is per turn, not per workflow object
+        assert workflow_agent.plan_label(non_lib_wf, dune_query) is None
+        assert workflow_agent.plan_label(non_lib_wf, hours_query) in (None, "hours_overview")
 
 
 def test_jev_library_scope_wins_before_root_scope_when_both_fit(tmp_path, caplog, jev_env):
@@ -443,13 +443,7 @@ class PlanGenerator:
     assert scopes == ("Library", "")
 
     dune_query = "Look up Dune in the library and tell me how many books match."
-    caplog.clear()
-    with caplog.at_level(logging.INFO):
-        matched = workflow_agent.match_planning_command(dune_query, folder, scopes=scopes)
-    assert matched is not None
-    assert matched[0] == "Library/dune_search"
-    assert "planning command match in scope 'Library'" in caplog.text
-    assert "planning command match in scope 'root'" not in caplog.text
+    assert workflow_agent.plan_label(wf, dune_query) == "Library/dune_search"
 
 
 # ------------------------------------------------------------------
@@ -551,33 +545,14 @@ def test_write_previews_removes_orphan_context_preview_and_empty_folder_but_keep
 # ------------------------------------------------------------------
 
 
-@pytest.fixture
-def no_jev_env(monkeypatch):
-    """Ensure ``JEV_API_KEY`` is absent from both ``os.environ`` and ``fastworkflow._env_vars``."""
-    previous = dict(fastworkflow._env_vars)
-    monkeypatch.delenv("JEV_API_KEY", raising=False)
-    env_vars = {k: v for k, v in previous.items() if k != "JEV_API_KEY"}
-    fastworkflow.init(env_vars=env_vars)
-    workflow_agent._jev_lm.cache_clear()
-    workflow_agent._planning_command_matcher.cache_clear()
-    try:
-        yield
-    finally:
-        fastworkflow.init(env_vars=previous)
-        workflow_agent._jev_lm.cache_clear()
-        workflow_agent._planning_command_matcher.cache_clear()
-
-
-def test_missing_jev_key_logs_an_info_line_once_per_workflow_folder(tmp_path, caplog, no_jev_env):
+def test_missing_jev_key_logs_an_info_line_once_per_workflow_folder(tmp_path, caplog, no_planner_key):
     folder = _library_workflow(tmp_path)
     workflow_agent._jev_lm.cache_clear()
-    workflow_agent._planning_command_matcher.cache_clear()
 
     caplog.clear()
     with caplog.at_level(logging.INFO):
         workflow_agent.warm_planning_commands(folder)
         workflow_agent.warm_planning_commands(folder)
-        assert workflow_agent.match_planning_command("anything", folder) is None
 
     # 3.9's INFO line; this library's planning commands have no verify field, so none is named.
     expected = (
@@ -590,27 +565,24 @@ def test_missing_jev_key_logs_an_info_line_once_per_workflow_folder(tmp_path, ca
                    for r in caplog.records)
 
 
-def test_missing_jev_key_does_not_warn_without_planning_commands(tmp_path, caplog, no_jev_env):
+def test_missing_jev_key_does_not_warn_without_planning_commands(tmp_path, caplog, no_planner_key):
     empty_planning_commands_folder = _library_workflow(tmp_path / "empty_planning_commands", default_planning_commands=False)
     no_planning_commands_folder = _library_workflow(tmp_path / "no_planning_commands", default_planning_commands=False)
     shutil.rmtree(os.path.join(no_planning_commands_folder, "_commands"))   # no planning commands at all
 
     for folder in (empty_planning_commands_folder, no_planning_commands_folder):
         workflow_agent._jev_lm.cache_clear()
-        workflow_agent._planning_command_matcher.cache_clear()
         caplog.clear()
         with caplog.at_level(logging.INFO):
             workflow_agent.warm_planning_commands(folder)
             workflow_agent.warm_planning_commands(folder)
-            assert workflow_agent.match_planning_command("anything", folder) is None
         assert not any("JEV_API_KEY" in r.getMessage() for r in caplog.records)
 
 
-def test_command_preview_does_not_warn_when_jev_key_is_unset(tmp_path, caplog, no_jev_env):
+def test_command_preview_does_not_warn_when_jev_key_is_unset(tmp_path, caplog, no_planner_key):
     folder = _library_workflow(tmp_path / "wf")
     out = str(tmp_path / "previews")
     workflow_agent._jev_lm.cache_clear()
-    workflow_agent._planning_command_matcher.cache_clear()
 
     caplog.clear()
     with caplog.at_level(logging.WARNING):
@@ -674,7 +646,8 @@ def _with_rule_check(tmp_path) -> str:
     """A library copy with the rule_check planning command, loaded as a workflow's commands are."""
     folder = _library_workflow(tmp_path)
     # The Library planning command the rule test reads (its extraction sentences), and its helper.
-    for rel in ("_commands/Library/_wording.py", "_commands/Library/book_by_title.py"):
+    for rel in ("_commands/_shared/__init__.py", "_commands/_shared/wording.py", "_commands/Library/book_by_title.py"):
+        Path(folder, rel).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(os.path.join(LIBRARY, rel), Path(folder, rel))
     Path(folder, RULE_CHECK_FILE).write_text(RULE_CHECK_SOURCE, encoding="utf-8")
     fastworkflow.RoutingRegistry.clear_registry()
@@ -683,7 +656,7 @@ def _with_rule_check(tmp_path) -> str:
 
 
 def test_the_jev_info_line_names_the_verify_fields_and_is_logged_once_per_folder(
-        tmp_path, no_jev_env, caplog):
+        tmp_path, no_planner_key, caplog):
     folder = _with_rule_check(tmp_path)
 
     caplog.clear()

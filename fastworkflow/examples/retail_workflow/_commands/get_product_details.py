@@ -1,8 +1,9 @@
+import json
 from typing import List
 
 import fastworkflow
 from pydantic import BaseModel, Field, ConfigDict
-from fastworkflow.workflow import Workflow
+from fastworkflow.core.workflow import Workflow
 
 from ..retail_data import load_data
 from ..tools.get_product_details import GetProductDetails
@@ -12,8 +13,8 @@ class Signature:
     """Get product details"""
     class Input(BaseModel):
         product_id: str = Field(
+            json_schema_extra={"from_command_output": ["get_order_details.product_ids", "list_all_product_types.product_ids"]},
             description="The product ID (numeric string)",
-            json_schema_extra={"from_command_output": ["get_order_details", "list_all_product_types"]},
             pattern=r"^(\d{10})$",
             examples=["6086499569"],
         )
@@ -25,10 +26,12 @@ class Signature:
             description=(
                 "Detailed product information of all product variants of a given product type"
                 "including item id, options, availability and price"
-            ),
-            json_schema_extra={
-                "used_by": ["exchange_delivered_order_items", "modify_pending_order_items"]
-            }
+            )
+        )
+        item_ids: List[str] = Field(
+            default_factory=list,
+            json_schema_extra={"ui": {"hidden": True}},
+            description="The ids of the product's items (variants); empty when the product is not found.",
         )
 
     plain_utterances: List[str] = [
@@ -51,11 +54,27 @@ class Signature:
 
 
 class ResponseGenerator:
-    def __call__(self, workflow: Workflow, command: str, command_parameters: Signature.Input) -> Signature.Output:
+    def __call__(self, workflow: Workflow, command: str, command_parameters: Signature.Input) -> fastworkflow.CommandResponse:
         output = self._process_command(workflow, command_parameters)
-        return output
+        # the response text is the product_details field's JSON alone, as it was before the id list was added
+        return fastworkflow.CommandResponse(
+            response=output.model_dump_json(include={"product_details"}), output=output)
 
     def _process_command(self, workflow: Workflow, input: Signature.Input) -> Signature.Output:
         data = load_data()
         product_details = GetProductDetails.invoke(data=data, product_id=input.product_id)
-        return Signature.Output(product_details=product_details) 
+        product = _json_object(product_details)
+        variants = product.get("variants")
+        return Signature.Output(
+            product_details=product_details,
+            item_ids=[str(v.get("item_id", key)) for key, v in variants.items() if isinstance(v, dict)]
+            if isinstance(variants, dict) else [],
+        )
+
+def _json_object(text: str) -> dict:
+    """The tool's JSON text as a dict; empty for its error text."""
+    try:
+        value = json.loads(text)
+    except ValueError:
+        return {}
+    return value if isinstance(value, dict) else {}

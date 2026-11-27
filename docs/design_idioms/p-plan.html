@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A plan in place of a body · Design idioms · fastWorkflow</title>
+<link rel="stylesheet" href="idioms.css">
+</head>
+<body data-page="p-plan">
+<aside class="rail"></aside>
+
+<main id="top">
+  <section class="group planning">
+<!-- IDIOM BODY START -->
+    <article class="idiom" id="p-plan">
+      <div class="prose">
+        <p class="num">01</p>
+        <h3>A plan in place of a body</h3>
+        <p>A planning command is a command whose job is to run other commands of your workflow, in a fixed order. It is written like any command file, with the same <code>Signature</code>. The difference is the second class. An execution command has a <code>ResponseGenerator</code>, whose code does the work. A planning command has a <code>PlanGenerator</code> instead, whose methods return the steps. Those steps become a numbered plan, and the framework's own code runs every step it can.</p>
+        <p>Reach for one when a family of requests is always answered by the same few commands you already have, in the same order: find, then open, then read, then answer. Writing the order down means the agent (the language model that carries out a turn) does not have to find it each time, and does not get it wrong. A planning command adds no new ability to your workflow: every step runs an existing command. If one call into your application could do the whole job, write an execution command instead. It is shorter, and it also runs in assistant mode (<code>fastworkflow run_cli --assistant</code>) and through direct API and MCP calls, which refuse a planning command.</p>
+        <p>This is the library example's <code>count_books</code>. It runs <code>find_book</code>, an execution command of the same folder, and writes the answer from what that command returned.</p>
+      </div>
+      <figure>
+        <figcaption>fastworkflow/examples/library/_commands/Library/count_books.py</figcaption>
+        <pre><code>from pydantic import BaseModel, Field
+
+from fastworkflow.planning import count, run
+
+from .find_book import Signature as FindBook
+
+
+class Signature:
+    """Count the books whose title or author holds some words."""
+
+    plain_utterances = [
+        "how many books by Jane Austen do you have",
+        "how many Herbert books are in the catalogue",
+        <span class="c"># ... six more</span>
+    ]
+
+    class Input(BaseModel):
+        query: str = Field(description="words of the title or the author's name",
+                           json_schema_extra={"copied_from_command_text": True})
+
+
+class PlanGenerator:
+    def find(self, input) -&gt; FindBook.Output:
+        return [run("find_book", query=input.query)]
+
+    def __result__(self, input, find):
+        return f"{input.query} matches {count(find.total, 'book')}."</code></pre>
+      </figure>
+      <div class="prose">
+        <p>What the framework reads, part by part:</p>
+        <ul>
+          <li><strong>The file's place.</strong> It sits in <code>_commands/Library/</code>, so it belongs to the <code>Library</code> context and its name is <code>Library/count_books</code>, exactly as for an execution command.</li>
+          <li><strong><code>Signature</code></strong> is the same as an execution command's. The docstring is the description that lists and matches the command (<a href="e-purpose.html">the purpose sentence</a>), <code>plain_utterances</code> are example requests that train intent detection (<a href="e-purpose.html#e-seeds">seeds</a>), and <code>Input</code> holds the values taken from the request (<a href="e-input.html">an input</a>). A planning command's field types are narrower than an execution command's, because its values arrive as text; the list, and the message for <code>Optional[int]</code>, are on <a href="e-words.html">field options</a>. A <code>str</code> value stands as the model filled it, after the template-token, pronoun and vocabulary-word screens (a value the request names as a record passes them, and a pronoun becomes that record when the request names exactly one, with a note on the call); the example carries <code>copied_from_command_text</code> because the query must be words the user wrote, and only a marked field is held to them, by the same check and with the same sentences to the extraction model as on an execution command (<a href="e-words.html#e-words-text">the request's own words</a>): an unmarked field is not told to copy the request, nor compared with another field.</li>
+          <li><strong><code>PlanGenerator</code></strong> is the switch. Its presence makes the file a planning command. A file that defines both <code>ResponseGenerator</code> and <code>PlanGenerator</code> does not load. Like every other mistake below, it skips only that one command (see <a href="removed.html#load-rule">what a mistake stops</a>).</li>
+          <li><strong>Each public method is a phase</strong>, run in the order written, and returns its steps as a list. <code>find</code> is the only phase here. <code>run("find_book", query=...)</code> writes a step that code runs itself (<a href="p-run.html">a step the code runs</a>). The return annotation <code>-&gt; FindBook.Output</code> hands on what <code>find_book</code> returned, and a later method receives it as the parameter <code>find</code> (<a href="p-facts.html">what a phase hands on</a>). The methods only build steps; they must never call your application or read its data. Nothing enforces that: the framework calls every phase method when the files load, once for each combination of placeholder inputs, and again when the plan runs and when a paused plan resumes. So a phase must depend only on its input: one that fails on the placeholders is a load error, and one that calls your application would do so at load time.</li>
+          <li><strong><code>__result__</code></strong> runs after the last phase and writes the answer in plain code (<a href="p-result.html">the answer, in code</a>). Without it, the agent writes the answer; with no agent model the run ends at an answer stop with a statement of what ran, written by code.</li>
+        </ul>
+        <p>You can run the plan with no model at all. <code>fastworkflow command run-code</code> runs every step code can run, against the workflow's real commands, and prints what happened:</p>
+      </div>
+      <figure>
+        <figcaption>fastworkflow command run-code fastworkflow/examples/library Library/count_books --input '{"query": "Austen"}'</figcaption>
+        <pre><code>Phase find
+  1. find_book query=Austen
+  code runs: find_book query=Austen
+  facts: Output(book_uids=['b3', 'b4'], titles=['Emma', 'Persuasion'], total=2)
+answer written by __result__:
+  Austen matches 2 books.</code></pre>
+      </figure>
+      <div class="prose">
+        <p>At run time a user who types "how many Austen books do you have" sees the same questions any command can ask, then one review, then the run:</p>
+      </div>
+      <figure>
+        <figcaption>what the user sees</figcaption>
+        <ol class="walk">
+          <li><strong>Which command.</strong> If more than one command fits the request, the user is asked which one, from a numbered list. A planning command that only the local intent model picked is never run on that alone: the remote model confirms it, or the user is asked.</li>
+          <li><strong>Missing values.</strong> If the request leaves out a value the <code>Input</code> requires, one question names it, and the reply fills it.</li>
+          <li><strong>One review of the turn.</strong> Before anything runs, the user sees the command and the values drafted for it, and answers the review (<a href="r-turn.html#p-review">the review</a>). There is no review when the request typed the command's exact name, when the user just picked it at the which-command question, or when no one is there to answer. A plan the caller pinned (<code>use_plan</code>) that has parameters gets its parameter question instead, which shows every value drafted for it; that question is its review, and only <code>yes</code> runs it.</li>
+          <li><strong>The run.</strong> Code runs each <code>run(...)</code> step, and <code>__result__</code> writes the answer: "Austen matches 2 books." A step written as a plain sentence instead of <code>run(...)</code> is carried out by the agent (<a href="p-run.html">a step the code runs</a> has the details). With no agent model configured, the run stops at the first such step and the answer says what ran.</li>
+        </ol>
+      </figure>
+      <div class="prose">
+        <p>Two beginner mistakes, both caught when the files load (run <code>fastworkflow command run-code</code> or <code>fastworkflow command preview --check</code> to see them before you start the workflow). A step that names a command that does not exist, such as <code>run("find_bok", ...)</code>, is reported as <code>a step runs 'find_bok', which is not a command of the workflow</code>, and the planning command is skipped. A phase annotated <code>-&gt; FindBook.Output</code> whose steps never run <code>find_book</code> is reported as <code>phase 'find' hands on find_book's Output, but none of its steps runs find_book</code>.</p>
+        <p class="see">Where a planning command runs depends on the entry point. In assistant mode (a "/" message, or <code>--assistant</code>) it runs when it resolves to the command and code can do every step: no prose or conditional step, no <code>classifier_confirms</code> or <code>classifier_decides</code> field, no phase decided at run time, and a <code>__result__</code>; otherwise the reply says <code>... is a planning command; it runs in agent mode</code> with the reasons. With no agent model configured nothing is refused and the plan runs up to its first open step. Direct API and MCP calls refuse every planning command, even a mechanical one. The next pages teach the parts: <a href="p-run.html">steps</a>, <a href="p-facts.html">facts</a>, <a href="p-result.html">the answer</a>.</p>
+      </div>
+    </article>
+<!-- IDIOM BODY END -->
+  </section>
+
+  <nav class="pager" aria-label="Previous and next">
+    <a class="prev" href="e-root.html"><span>Previous</span>The root object</a>
+    <a class="next" href="p-run.html"><span>Next</span>A step the code runs</a>
+  </nav>
+</main>
+<script src="nav.js"></script>
+<script src="idioms.js"></script>
+</body>
+</html>

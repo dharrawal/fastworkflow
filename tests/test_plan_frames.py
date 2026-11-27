@@ -19,24 +19,24 @@ from types import SimpleNamespace
 import pytest
 
 import fastworkflow
-from fastworkflow import plan_frame as plan_frame_module
-from fastworkflow.command_executor import CommandExecutor
+from fastworkflow.planning import plan_frame as plan_frame_module
+from fastworkflow.engine.command_executor import CommandExecutor
 from fastworkflow.observation_offloading.state import (
     archive_for_path,
     observability_db_path,
     scope_for_host,
 )
-from fastworkflow.plan_frame import (
+from fastworkflow.planning.plan_frame import (
     DEFAULT_TURN_MAX_STEPS,
     TURN_MAX_STEPS_ENV,
     PlanFrame,
     turn_max_steps,
 )
-from fastworkflow.session_state_store import SCHEMA_VERSION
-from fastworkflow.state_serialization import validate_state
-from fastworkflow.turn import TurnStatus
+from fastworkflow.session.session_state_store import SCHEMA_VERSION
+from fastworkflow.session.state_serialization import validate_state
+from fastworkflow.core.turn import TurnStatus
 from fastworkflow.utils.logging import logger as fastworkflow_logger
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 from tests.test_planning_command_code_steps import Model
 from tests.test_step_helpers import LibraryRunner, _library_workflow
 from tests.test_turn_result_capture import (  # noqa: F401 - shared fixtures
@@ -260,10 +260,12 @@ def test_a_blob_without_the_new_keys_restores_one_frame_and_the_old_keys_as_befo
     assert restored._next_step == 4
 
 
-def test_the_session_schema_version_is_still_four():
-    # Phase 4 deliberately did not bump SCHEMA_VERSION (design 3.5, Serialisation): the new keys
-    # are optional and an absent key means "no nested frames". Bump it only with that decision revisited.
-    assert SCHEMA_VERSION == 4
+def test_nested_frames_did_not_bump_the_session_schema_version():
+    # Nested frames deliberately did not bump SCHEMA_VERSION (design 3.5, Serialisation): their keys are optional and
+    # an absent key means "no nested frames". The version is 8 since the pending question became one saved record
+    # (docs/pending_state_design.md, steps 4, 8 and 9) and a running part's last loop stopped being saved (fix-fpyb.11),
+    # which did change the format; frames are still not a reason to bump it.
+    assert SCHEMA_VERSION == 8
 
 
 def test_the_current_frame_alias_is_the_top_frames_and_pops_back_to_the_turn(
@@ -298,11 +300,12 @@ def test_a_positive_integer_overrides_the_turn_budget(monkeypatch, no_turn_budge
     assert turn_max_steps() == 50
 
 
-def test_the_workflow_env_file_wins_over_the_process_environment(monkeypatch, no_turn_budget_env):
-    monkeypatch.setenv(TURN_MAX_STEPS_ENV, "75")
-    assert turn_max_steps() == 75
+def test_the_process_environment_wins_over_the_workflow_env_file(monkeypatch, no_turn_budget_env):
+    # The one precedence rule (bd fix-ygxo): a shell export beats the env file, which beats the default.
     monkeypatch.setitem(fastworkflow._env_vars, TURN_MAX_STEPS_ENV, "50")
     assert turn_max_steps() == 50
+    monkeypatch.setenv(TURN_MAX_STEPS_ENV, "75")
+    assert turn_max_steps() == 75
 
 
 @pytest.mark.parametrize("raw", ["0", "-3", "abc"])
@@ -347,15 +350,14 @@ def library_sessions(monkeypatch, initialized_fastworkflow):
             runner(ctx, "startup")
             runner.sent.clear()
         monkeypatch.setattr(
-            "fastworkflow.workflow_agent.build_query_with_next_steps",
+            "fastworkflow.agent.workflow_agent.build_query_with_next_steps",
             lambda user_query, session, **kwargs: user_query,
         )
+        from tests.conftest import script_plan
+
+        script_plan(monkeypatch, lambda text: None)
         monkeypatch.setattr(
-            "fastworkflow.workflow_agent.planner_planning_command_for",
-            lambda text, folder_path, **_: ("", None),
-        )
-        monkeypatch.setattr(
-            "fastworkflow.workflow_agent.split_into_subtasks",
+            "fastworkflow.agent.workflow_agent.split_into_subtasks",
             lambda query, **_: list(subtasks or [query]),
         )
         monkeypatch.setattr(

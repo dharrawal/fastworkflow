@@ -19,10 +19,11 @@ import shutil
 import pytest
 
 import fastworkflow
+from fastworkflow.intent import router as intent_router
 from fastworkflow._workflows.command_metadata_extraction import intent_detection
-from fastworkflow.command_executor import CommandExecutor, CommandNotFoundError, call_response_generator
-from fastworkflow.command_metadata_api import CommandMetadataAPI
-from fastworkflow.workflow_agent import _explicit_agent_command
+from fastworkflow.engine.command_executor import CommandExecutor, CommandNotFoundError, call_response_generator
+from fastworkflow.core.command_metadata_api import CommandMetadataAPI
+from fastworkflow.agent.workflow_agent import _explicit_agent_command
 from tests.todo_list_workflow.application.todo_item import TodoItem
 from tests.todo_list_workflow.application.todo_list import TodoList
 from tests.todo_list_workflow.application.todo_manager import TodoListManager
@@ -32,6 +33,10 @@ TODO_SOURCE = os.path.join(os.path.dirname(__file__), "todo_list_workflow")
 GLOBAL_PROBE = '''"""global_probe: report the record a global command was bound to (test copy only)."""
 import fastworkflow
 from fastworkflow import CommandOutput, CommandResponse
+
+
+class Signature:
+    """Report the record a global command was bound to."""
 
 
 class ResponseGenerator:
@@ -100,7 +105,7 @@ def _run(app, cme, monkeypatch, command: str) -> Run:
     """Run *command* as the agent tool does: resolve it, let the CME walk bind and parse it, then
     run the target's response generator on the record the walk bound (the executor's own step).
     The classifier is never consulted."""
-    monkeypatch.setattr(intent_detection, "CommandRouter", _RefusingRouter)
+    monkeypatch.setattr(intent_router, "CommandRouter", _RefusingRouter)
     resolved = _explicit_agent_command(command, app)
     walked = CommandExecutor.perform_action(
         cme, fastworkflow.Action(command_name="wildcard", command=resolved))
@@ -124,7 +129,7 @@ def test_an_enclosing_context_command_by_exact_name_runs_bound_and_filed_under_i
 
     assert output.command_name == "TodoList/get_all_children"
     # Bound to the list, not the item: the command ran on the record it is filed under.
-    assert app.record is todo_list
+    assert app._command_context_for_response_generation is todo_list
     assert output.ran_on_context_name == "TodoList"
     assert output.ran_on_context_clause == "TodoList"
     # The current object does not move.
@@ -140,7 +145,7 @@ def test_a_global_command_by_exact_name_from_inside_a_context_runs_bound_to_the_
 
     assert output.response == "global_probe bound to TodoListManager"
     # The global scope binds the root object, and the run is filed under it.
-    assert app.record is manager
+    assert app._command_context_for_response_generation is manager
     assert output.ran_on_context_name == "TodoListManager"
     assert app._current_command_context is item
 
@@ -164,7 +169,7 @@ def test_a_qualified_name_on_the_path_runs_that_scope_even_when_a_nearer_scope_s
     output = _run(app, cme, monkeypatch, "TodoList/get_properties")
 
     assert output.command_name == "TodoList/get_properties"
-    assert app.record is todo_list
+    assert app._command_context_for_response_generation is todo_list
     assert output.ran_on_context_name == "TodoList"
 
 
@@ -173,7 +178,7 @@ def test_a_qualified_name_off_the_path_gets_the_navigation_message(
     """From the root, TodoItem is neither enclosing nor a base: its command is not called here."""
     app, _, _, _, manager = chain
     app.record = manager
-    monkeypatch.setattr(intent_detection, "CommandRouter", _RefusingRouter)
+    monkeypatch.setattr(intent_router, "CommandRouter", _RefusingRouter)
 
     with pytest.raises(CommandNotFoundError) as refused:
         _explicit_agent_command("TodoItem/status", app)

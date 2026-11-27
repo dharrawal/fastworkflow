@@ -1,0 +1,459 @@
+{
+  "workflows": {
+    "todo": {
+      "schemas": {
+        "TodoItem/assign_to": {
+          "kind": "execution",
+          "output_properties": [
+            "success"
+          ]
+        },
+        "TodoItem/description": {
+          "kind": "execution",
+          "output_properties": [
+            "success"
+          ]
+        },
+        "TodoItem/get_properties": {
+          "kind": "execution",
+          "output_properties": [
+            "assign_to",
+            "description",
+            "is_complete"
+          ]
+        },
+        "TodoItem/set_properties": {
+          "kind": "execution",
+          "output_properties": [
+            "success"
+          ]
+        },
+        "TodoItem/status": {
+          "kind": "execution",
+          "output_properties": [
+            "success"
+          ]
+        },
+        "TodoList/add_child_todoitem": {
+          "kind": "execution",
+          "output_properties": [
+            "current_context",
+            "new_context"
+          ]
+        },
+        "TodoList/add_child_todolist": {
+          "kind": "execution",
+          "output_properties": [
+            "current_context",
+            "new_context"
+          ]
+        },
+        "TodoList/get_all_children": {
+          "kind": "execution",
+          "output_properties": [
+            "todoitem_ids"
+          ]
+        },
+        "TodoList/get_child_by_id": {
+          "kind": "execution",
+          "output_properties": [
+            "description"
+          ]
+        },
+        "TodoList/get_properties": {
+          "kind": "execution",
+          "output_properties": [
+            "assign_to",
+            "description",
+            "is_complete"
+          ]
+        },
+        "TodoList/mark_completed": {
+          "kind": "execution",
+          "output_properties": [
+            "success"
+          ]
+        },
+        "TodoList/mark_pending": {
+          "kind": "execution",
+          "output_properties": [
+            "success"
+          ]
+        },
+        "TodoList/remove_child_by_id": {
+          "kind": "execution",
+          "output_properties": [
+            "success"
+          ]
+        },
+        "TodoList/set_properties": {
+          "kind": "execution",
+          "output_properties": [
+            "success"
+          ]
+        },
+        "TodoList/update_status": {
+          "kind": "execution",
+          "output_properties": [
+            "success"
+          ]
+        },
+        "TodoListManager/create_todo_list": {
+          "kind": "execution",
+          "output_properties": [
+            "current_context",
+            "new_context"
+          ]
+        },
+        "TodoListManager/delete_todo_list": {
+          "kind": "execution",
+          "output_properties": [
+            "success"
+          ]
+        },
+        "TodoListManager/get_todo_list": {
+          "kind": "execution",
+          "output_properties": [
+            "description"
+          ]
+        },
+        "TodoListManager/list_todo_lists": {
+          "kind": "execution",
+          "output_properties": [
+            "todolist_ids"
+          ]
+        },
+        "TodoListManager/save_lists": {
+          "kind": "execution",
+          "output_properties": [
+            "success"
+          ]
+        },
+        "TodoListManager/update_todo_list": {
+          "kind": "execution",
+          "output_properties": [
+            "success"
+          ]
+        },
+        "startup": {
+          "kind": "execution",
+          "output_properties": []
+        }
+      }
+    },
+    "library": {
+      "schemas": {
+        "Book/list_loans": {
+          "kind": "execution",
+          "output_properties": [
+            "borrowers",
+            "due_dates",
+            "total"
+          ]
+        },
+        "Book/loan_report": {
+          "kind": "planning",
+          "output_properties": []
+        },
+        "Book/shelf_report": {
+          "kind": "planning",
+          "output_properties": []
+        },
+        "Book/show_book": {
+          "kind": "execution",
+          "output_properties": [
+            "author",
+            "book_uid",
+            "branch",
+            "copies",
+            "on_loan",
+            "title"
+          ]
+        },
+        "Library/author_books": {
+          "kind": "planning",
+          "output_properties": []
+        },
+        "Library/book_by_title": {
+          "kind": "planning",
+          "output_properties": [
+            "author",
+            "book_uid",
+            "copies",
+            "found",
+            "title"
+          ]
+        },
+        "Library/book_loans": {
+          "kind": "planning",
+          "output_properties": []
+        },
+        "Library/count_books": {
+          "kind": "planning",
+          "output_properties": []
+        },
+        "Library/count_overdue": {
+          "kind": "execution",
+          "output_properties": [
+            "total"
+          ]
+        },
+        "Library/find_book": {
+          "kind": "execution",
+          "output_properties": [
+            "book_uids",
+            "titles",
+            "total"
+          ]
+        },
+        "Library/find_member": {
+          "kind": "execution",
+          "output_properties": [
+            "member_uids",
+            "names",
+            "total"
+          ]
+        },
+        "Library/find_record": {
+          "kind": "planning",
+          "output_properties": []
+        },
+        "Library/list_branches": {
+          "kind": "execution",
+          "output_properties": [
+            "names",
+            "total"
+          ]
+        },
+        "Library/member_report": {
+          "kind": "planning",
+          "output_properties": []
+        },
+        "Library/note_member": {
+          "kind": "planning",
+          "output_properties": []
+        },
+        "Library/open_book": {
+          "kind": "execution",
+          "output_properties": [
+            "author",
+            "book_uid",
+            "copies",
+            "title"
+          ]
+        },
+        "Library/open_member": {
+          "kind": "execution",
+          "output_properties": [
+            "member_uid",
+            "name",
+            "on_loan"
+          ]
+        },
+        "Library/overdue_summary": {
+          "kind": "planning",
+          "output_properties": []
+        },
+        "Member/list_member_loans": {
+          "kind": "execution",
+          "output_properties": [
+            "due_dates",
+            "titles",
+            "total"
+          ]
+        },
+        "Member/show_member": {
+          "kind": "execution",
+          "output_properties": [
+            "member_uid",
+            "name",
+            "on_loan"
+          ]
+        },
+        "Record/add_note": {
+          "kind": "execution",
+          "output_properties": [
+            "total"
+          ]
+        },
+        "Record/show_notes": {
+          "kind": "execution",
+          "output_properties": [
+            "notes",
+            "total"
+          ]
+        },
+        "library_hours": {
+          "kind": "execution",
+          "output_properties": [
+            "branches",
+            "hours"
+          ]
+        },
+        "startup": {
+          "kind": "execution",
+          "output_properties": []
+        }
+      }
+    }
+  },
+  "cases": [
+    {
+      "case": "todo: startup is a global command",
+      "message": "startup action",
+      "outputs": [
+        {
+          "command_name": "startup",
+          "context": "global",
+          "output_keys": []
+        }
+      ]
+    },
+    {
+      "case": "todo: a command of the current root context",
+      "message": "/create_todo_list description=Chores",
+      "outputs": [
+        {
+          "command_name": "TodoListManager/create_todo_list",
+          "context": "TodoListManager",
+          "output_keys": [
+            "current_context",
+            "new_context"
+          ]
+        }
+      ]
+    },
+    {
+      "case": "todo: a leaf owned by TodoList, TodoList current",
+      "message": "/get_properties",
+      "outputs": [
+        {
+          "command_name": "TodoList/get_properties",
+          "context": "TodoList",
+          "output_keys": [
+            "assign_to",
+            "description",
+            "is_complete"
+          ]
+        }
+      ]
+    },
+    {
+      "case": "todo: a parent context's command run from TodoList",
+      "message": "/list_todo_lists",
+      "outputs": [
+        {
+          "command_name": "TodoListManager/list_todo_lists",
+          "context": "TodoListManager",
+          "output_keys": [
+            "todolist_ids"
+          ],
+          "ran_in_context_name": "TodoListManager"
+        }
+      ]
+    },
+    {
+      "case": "todo: failed validation names the qualified command",
+      "message": "/add_child_todoitem",
+      "outputs": [
+        {
+          "command_name": "wildcard",
+          "context": "global",
+          "output_keys": [],
+          "parameter_request_command": "TodoList/add_child_todoitem"
+        }
+      ]
+    },
+    {
+      "case": "todo: the same leaf owned by TodoItem, TodoItem current",
+      "message": "/get_properties",
+      "outputs": [
+        {
+          "command_name": "TodoItem/get_properties",
+          "context": "TodoItem",
+          "output_keys": [
+            "assign_to",
+            "description",
+            "is_complete"
+          ]
+        }
+      ]
+    },
+    {
+      "case": "todo: a grandparent's command run from TodoItem",
+      "message": "/list_todo_lists",
+      "outputs": [
+        {
+          "command_name": "TodoListManager/list_todo_lists",
+          "context": "TodoListManager",
+          "output_keys": [
+            "todolist_ids"
+          ],
+          "ran_in_context_name": "TodoListManager"
+        }
+      ]
+    },
+    {
+      "case": "library: startup",
+      "message": "startup action",
+      "outputs": [
+        {
+          "command_name": "startup",
+          "context": "global",
+          "output_keys": []
+        }
+      ]
+    },
+    {
+      "case": "library: a global command with a root context current",
+      "message": "/library_hours",
+      "outputs": [
+        {
+          "command_name": "library_hours",
+          "context": "Library",
+          "output_keys": [
+            "branches",
+            "hours"
+          ]
+        }
+      ]
+    },
+    {
+      "case": "library: an execution command of the root context",
+      "message": "/count_overdue",
+      "outputs": [
+        {
+          "command_name": "Library/count_overdue",
+          "context": "Library",
+          "output_keys": [
+            "total"
+          ]
+        }
+      ]
+    },
+    {
+      "case": "library: a planning command, parameters missing",
+      "message": "/count_books",
+      "outputs": [
+        {
+          "command_name": "wildcard",
+          "context": "global",
+          "output_keys": [],
+          "parameter_request_command": "Library/count_books"
+        }
+      ]
+    },
+    {
+      "case": "library: an execution command failing validation",
+      "message": "/find_book",
+      "outputs": [
+        {
+          "command_name": "wildcard",
+          "context": "global",
+          "output_keys": [],
+          "parameter_request_command": "Library/find_book"
+        }
+      ]
+    }
+  ]
+}

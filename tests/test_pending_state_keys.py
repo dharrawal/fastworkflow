@@ -23,15 +23,15 @@ from pathlib import Path
 
 import pytest
 
-from fastworkflow import checkpoint_store, session_state_store
-from fastworkflow.checkpoint_store import CheckpointIdentity
-from fastworkflow.session_state_store import (
+from fastworkflow.session import checkpoint_store, session_state_store
+from fastworkflow.session.checkpoint_store import CheckpointIdentity
+from fastworkflow.session.session_state_store import (
     PENDING_SUFFIX,
     SAVED_AT_KEY,
     DiskSessionStateStore,
     PendingRetentionPolicy,
 )
-from fastworkflow.storage_keys import encode_path_component
+from fastworkflow.session.storage_keys import encode_path_component
 
 DAY = 86_400.0
 

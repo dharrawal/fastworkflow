@@ -46,6 +46,7 @@ class Signature:
 
     class Input(BaseModel):
         member: str = Field(description="the member's name",
+                            examples=["Raj Patel", "Ann Lee", "Mia Chen"],
                             json_schema_extra={"copied_from_command_text": True})
         loans: bool = Field(default=False,
                             description="whether to name the books the member has on loan")
@@ -182,11 +183,11 @@ Both asked for:
 
 ```text
 Phase find
-  1. find_member query=Raj Patel
-  code runs: find_member query=Raj Patel
+  1. find_member query="Raj Patel"
+  code runs: find_member query="Raj Patel"
   facts: find_member.Output(member_uids=['m2'], names=['Raj Patel'], total=1)
 Phase member
-  1. open_member with the uid of the Raj Patel match
+  1. open_member with the uid of the "Raj Patel" match
   code runs: open_member member_uid=m2
   now in: Member: Raj Patel (m2)
   facts: open_member.Output(member_uid='m2', name='Raj Patel', on_loan=2)
@@ -207,11 +208,11 @@ Neither asked for:
 
 ```text
 Phase find
-  1. find_member query=Mia Chen
-  code runs: find_member query=Mia Chen
+  1. find_member query="Mia Chen"
+  code runs: find_member query="Mia Chen"
   facts: find_member.Output(member_uids=['m3'], names=['Mia Chen'], total=1)
 Phase member
-  1. open_member with the uid of the Mia Chen match
+  1. open_member with the uid of the "Mia Chen" match
   code runs: open_member member_uid=m3
   now in: Member: Mia Chen (m3)
   facts: open_member.Output(member_uid='m3', name='Mia Chen', on_loan=1)
@@ -223,8 +224,8 @@ No match, loans asked for: both later phases skip themselves.
 
 ```text
 Phase find
-  1. find_member query=Ulysses Grant
-  code runs: find_member query=Ulysses Grant
+  1. find_member query="Ulysses Grant"
+  code runs: find_member query="Ulysses Grant"
   facts: find_member.Output(member_uids=[], names=[], total=0)
 Phase member: skipped (its method returned [])
 Phase loans: skipped (its method returned [])

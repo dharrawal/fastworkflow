@@ -7,33 +7,29 @@ import shutil
 import sys
 import time
 from datetime import datetime, timezone
-from dotenv import dotenv_values
+from typing import Optional
 import importlib.util
 
 from colorama import Fore, Style
 
 import fastworkflow
+from fastworkflow.utils.env import read_env_files
 from fastworkflow.utils.logging import logger
-from fastworkflow.utils import python_utils, workflow_vocabulary
+from fastworkflow.utils import dspy_utils, python_utils
+from fastworkflow.parameters import workflow_vocabulary
 from fastworkflow import ModuleType
-from fastworkflow import model_pipeline_training
-from fastworkflow.model_pipeline_training import (
-    CommandRouter,
-    TrainingDataError,
-    preflight_benchmark,
-    train,
-    get_route_layer_filepath_model,
-    set_active_artifact_version,
-    GLOBAL_CONTEXT_FOLDER,
-)
-from fastworkflow.utils.generate_param_examples import generate_dspy_examples, missing_value_example
-from fastworkflow.command_directory import CommandDirectory, get_cached_command_directory
-from fastworkflow.command_routing import RoutingDefinition, RoutingRegistry
-from fastworkflow.command_context_model import CommandContextModel
+from fastworkflow.train import model_pipeline_training
+from fastworkflow.intent.router import CommandRouter, get_route_layer_filepath_model, GLOBAL_CONTEXT_FOLDER
+from fastworkflow.train.model_pipeline_training import TrainingDataError, preflight_benchmark, train, set_active_artifact_version
+from fastworkflow.train.generate_param_examples import generate_dspy_examples, missing_value_example
+from fastworkflow.core.command_directory import CommandDirectory, get_cached_command_directory
+from fastworkflow.core.command_routing import RoutingDefinition, RoutingRegistry
+from fastworkflow.core.command_context_model import CommandContextModel
 from fastworkflow.train import (
     artifact_versioning,
     determinism,
     duplicate_detection,
+    intent_model_layout,
     metrics_persistence,
     param_example_cache,
     personas,
@@ -330,6 +326,10 @@ def _with_workflow_persona_source(train_func):
 
 @_with_workflow_persona_source
 def train_workflow(workflow_path: str, regenerate_utterances: bool = False):
+    # Resolve once, here: the command files this run records in its training signature take their
+    # spelling from this path, so a relative one would bake the current directory into the version
+    # and a later run from elsewhere would see a different signature.
+    workflow_path = os.path.abspath(workflow_path)
     # Ensure context model is parsed so downstream helpers have contexts
     CommandContextModel.load(workflow_path)
     RoutingDefinition.build(workflow_path)
@@ -430,6 +430,19 @@ def train_workflow(workflow_path: str, regenerate_utterances: bool = False):
     # EXPERIMENT-ONLY (Phase 9 step 3). The head layout is part of every context's signature, so
     # artifacts of the flattened and scoped layouts never mix. None is today's layout.
     head_scope = model_pipeline_training.active_experiment_head_scope()
+    # The artifact layout (INTENT_MODEL_LAYOUT in the workflow env): read here, when training
+    # starts, and nowhere at run time. It is a global input of the signature, so a change of
+    # layout is a full retrain into the other layout.
+    layout = intent_model_layout.layout_for_workflow(workflow_path)
+    # True for the layouts with one model for the workflow (``embedding``, ``workflow``).
+    workflow_layout = layout in intent_model_layout.ONE_MODEL_LAYOUTS
+    if layout == intent_model_layout.EMBEDDING:
+        embedding = intent_model_layout.embedding_settings(workflow_path)
+        print(f"{Fore.CYAN}Intent model layout: {layout} (frozen encoder {embedding['encoder']}, "
+              f"{embedding['pooling']} pooling; one linear head for the workflow, commit threshold "
+              f"{embedding['commit_threshold']:.2f}).{Style.RESET_ALL}")
+    else:
+        print(f"{Fore.CYAN}Intent model layout: {layout}.{Style.RESET_ALL}")
     try:
         plan, training_signature = selective_training.compute_training_plan(
             workflow_path,
@@ -440,6 +453,7 @@ def train_workflow(workflow_path: str, regenerate_utterances: bool = False):
             cache_mode=cache_mode,
             reserved_class_arm=arm,
             head_scope=head_scope,
+            intent_model_layout_name=layout,
         )
     except Exception:
         workflow.close()
@@ -464,6 +478,9 @@ def train_workflow(workflow_path: str, regenerate_utterances: bool = False):
         seed=seed,
         previous_version=previous_version,
         **manifest_record,
+        # A one-model layout is named; a per-context manifest is unchanged, and a manifest
+        # without the key is per-context.
+        **({intent_model_layout.MANIFEST_KEY: layout} if workflow_layout else {}),
     )
 
     # generate_diverse_utterances cannot return provenance (its signature is public API
@@ -471,7 +488,10 @@ def train_workflow(workflow_path: str, regenerate_utterances: bool = False):
     recorder = determinism.ProvenanceRecorder(workflow_path)
     # Always recorded, shipped runs included: score_not_here and the provenance readers take the
     # arm from here, and the resolved name (sparse_1 for a shipped run) is what it should say.
-    recorder.run_metadata = run_metadata
+    recorder.run_metadata = (
+        {**run_metadata, intent_model_layout.MANIFEST_KEY: layout}
+        if workflow_layout else run_metadata
+    )
     determinism.set_provenance_recorder(recorder)
     # Same reason, same shape: generation reaches the cache through a module-level handle
     # because it cannot be handed a workflow path. This is what makes two runs at the same
@@ -499,6 +519,7 @@ def train_workflow(workflow_path: str, regenerate_utterances: bool = False):
                 context_name: context_signature.not_here_samples
                 for context_name, context_signature in training_signature.contexts.items()
             },
+            intent_model_layout=layout if workflow_layout else None,
         )
         for context_name, samples in used_samples.items():
             recorded = training_signature.contexts[context_name].not_here_samples
@@ -561,9 +582,10 @@ def train_workflow(workflow_path: str, regenerate_utterances: bool = False):
         **selective_training.context_contribution_manifest_fields(
             training_signature, plan
         ),
+        **_embedding_head_manifest_fields(workflow_path, version_id, layout),
     )
     report = training_report.report_training_data(
-        workflow_path, print_report=False, write=True)
+        workflow_path, print_report=False, write=True, version_id=version_id)
     _require_publishable_training_report(report)
     # Only a SUCCESSFUL train becomes current. A failed one leaves the previous version
     # published and complete, with its own partial version beside it rather than on top
@@ -596,6 +618,29 @@ def train_workflow(workflow_path: str, regenerate_utterances: bool = False):
     # previous, complete ___command_info intact and runnable.
     _prune_stale_artifacts(workflow_path)
 
+def _embedding_head_manifest_fields(workflow_path: str, version_id: str, layout: str) -> dict:
+    """``{"intent_embedding_head": {...}}`` for a version trained in the ``embedding`` layout: the
+    encoder, the head's commit threshold, the cross-fit facts (rows, accuracy, confused pairs),
+    the times and the bytes, read back from the head's own ``scopes.json``. Empty for
+    the other layouts. Also prints the one line that says what was used and how long it took."""
+    if layout != intent_model_layout.EMBEDDING:
+        return {}
+    from fastworkflow.train import embedding_head
+
+    summary = embedding_head.read_summary(str(
+        artifact_versioning.version_dir(workflow_path, version_id)
+        / intent_model_layout.WORKFLOW_MODEL_DIRNAME))
+    if summary is None:
+        return {}
+    print(
+        f"{Fore.CYAN}Intent model: layout {layout}, encoder {summary['encoder']} "
+        f"({summary['pooling']} pooling), {summary['labels']} labels, {summary['rows']} rows. "
+        f"The head took {summary['train_seconds']:.1f} s (embedding {summary['embed_seconds']:.1f} s, "
+        f"fit {summary['fit_seconds']:.1f} s, cross-fit {summary['cross_fit_seconds']:.1f} s) "
+        f"and is {summary['bytes']:,} bytes.{Style.RESET_ALL}")
+    return {"intent_embedding_head": summary}
+
+
 #: Parameter-example settings of the trainer. The cache-report reads these too, so the
 #: variant key it checks is the one the trainer would ask for.
 PARAM_EXAMPLE_COUNT = 15
@@ -626,7 +671,9 @@ def _generate_dspy_examples_helper(workflow):
             field_annotations=fields.model_fields,
             command_name=command_name,
             num_examples=PARAM_EXAMPLE_COUNT,
-            validation_threshold=PARAM_VALIDATION_THRESHOLD  # You can adjust this threshold as needed
+            validation_threshold=PARAM_VALIDATION_THRESHOLD,  # You can adjust this threshold as needed
+            # LLM_SYNDATA_GEN, else the base model, with the key that follows it (dspy_utils.resolve_role).
+            completion_fn=dspy_utils.role_completion("LLM_SYNDATA_GEN"),
             )
             # Appended after generation so the example cache is unchanged, and only
             # beside real examples: alone it would teach "every field is missing".
@@ -760,26 +807,8 @@ def _get_commands_with_parameters(json_path):
     
     return commands_with_parameters
 
-def _trains_the_fastworkflow_package(workflow_path: str) -> bool:
-    """True when *workflow_path* is the fastworkflow package root or its CME workflow.
-
-    Those train the CME themselves (the root recurses into ``_workflows``), so the automatic
-    CME check is skipped for them. This used to be a substring test on the path, which skipped
-    the CME check for every workflow inside a checkout named ``fastworkflow``; that made the
-    CME unretrainable through ``fastworkflow train <app>`` there.
-    """
-    from fastworkflow.model_pipeline_training import (
-        is_internal_cme_folder,
-        is_internal_consultation_folder,
-    )
-
-    package = os.path.realpath(fastworkflow.get_fastworkflow_package_path())
-    real = os.path.realpath(workflow_path)
-    return (
-        real == package
-        or is_internal_cme_folder(workflow_path)
-        or is_internal_consultation_folder(workflow_path)
-    )
+#: The framework's own workflows (``fastworkflow/_workflows/<name>``), trained before any application's.
+FRAMEWORK_WORKFLOWS = ("command_metadata_extraction", "plan_metadata_extraction")
 
 
 def _internal_workflow_trained(
@@ -811,6 +840,12 @@ def _internal_workflow_trained(
         context_artifact_dir = os.path.join(
             workflow_folderpath, "___command_info", context_folder
         )
+        if intent_model_layout.is_workflow_scope_folder(context_artifact_dir):
+            # A one-model layout (the framework's own workflows are in the embedding layout):
+            # the context holds a pointer and the version's one model, not the per-context files.
+            if not intent_model_layout.workflow_context_complete(context_artifact_dir):
+                return False
+            continue
         for artifact_name in selective_training.REQUIRED_CONTEXT_ARTIFACTS:
             if not os.path.exists(os.path.join(context_artifact_dir, artifact_name)):
                 return False
@@ -824,20 +859,41 @@ def _internal_workflow_trained(
     )
     if signature is None:
         return False
-    return not selective_training.changed_commands(
-        signature.command_fingerprints,
-        selective_training.compute_command_fingerprints(workflow_folderpath),
-    )
+    current = selective_training.compute_command_fingerprints(workflow_folderpath)
+    from fastworkflow.train.model_pipeline_training import BUILT_IN_VAGUE_SOURCE
+
+    if BUILT_IN_VAGUE_SOURCE in signature.command_fingerprints:
+        # A head trained on the built-in vague replies signed them as an input (fix-1hs8).
+        current[BUILT_IN_VAGUE_SOURCE] = selective_training.built_in_vague_fingerprint()
+    return not selective_training.changed_commands(signature.command_fingerprints, current)
 
 
 def is_fast_workflow_trained(fastworkflow_folderpath: str):
     """True when shipped internal workflows have fresh, complete training artifacts."""
-    return (
-        _internal_workflow_trained(
-            fastworkflow_folderpath, "command_metadata_extraction"
-        )
-        and _internal_workflow_trained(fastworkflow_folderpath, "consultation")
-    )
+    return all(_internal_workflow_trained(fastworkflow_folderpath, name) for name in FRAMEWORK_WORKFLOWS)
+
+
+#: ``fastworkflow train`` with no model to generate utterances with.
+NO_SYNDATA_MODEL = ("no model to generate training utterances with: set LLM_SYNDATA_GEN, or LLM_AGENT or LLM_PLANNER "
+                    "(it falls back to them), in the workflow's env file.")
+
+
+def syndata_model_problem() -> Optional[str]:
+    """``NO_SYNDATA_MODEL`` when ``LLM_SYNDATA_GEN`` resolves to no model (``dspy_utils.resolve_role``), else None."""
+    return None if dspy_utils.resolve_role("LLM_SYNDATA_GEN").model else NO_SYNDATA_MODEL
+
+
+def syndata_key_notice(passwords_file_path) -> Optional[str]:
+    """One line when the utterance generator's model needs a key and none follows it, naming the setting it reads."""
+    from fastworkflow.utils.model_roles import key_var_of
+
+    role = dspy_utils.resolve_role("LLM_SYNDATA_GEN")
+    if not role.needs_key or role.key:
+        return None
+    key_var = key_var_of(role.inherited_from or role.role)
+    return (f"No key for the utterance generator's model {role.model} "
+            f"({key_var}{', or LITELLM_API_KEY_SYNDATA_GEN' if role.inherited_from else ''}): is the passwords file "
+            f"missing or its path wrong? Path: {passwords_file_path}")
 
 
 def train_main(args):
@@ -850,9 +906,16 @@ def train_main(args):
             f"{Fore.RED}Error: The specified workflow path '{workflow_path}' is not a valid directory.{Style.RESET_ALL}"
         )
         exit(1)
+    fastworkflow_folderpath = fastworkflow.get_fastworkflow_package_path()
+    if os.path.realpath(workflow_path) == os.path.realpath(fastworkflow_folderpath):
+        # The package holds workflows but is not one: training it wrote artefacts into the package itself.
+        print(f"{Fore.RED}Error: the fastworkflow package is not a workflow. Its own workflows are trained by "
+              f"`fastworkflow train <your workflow>` when they need it, or one at a time: `fastworkflow train "
+              f"{os.path.join(fastworkflow_folderpath, '_workflows', '<name>')}`.{Style.RESET_ALL}", file=sys.stderr)
+        exit(1)
 
     # A command file that does not load would be missing from the model: stop before any training work.
-    from fastworkflow.command_preview import load_problems
+    from fastworkflow.planning.command_preview import load_problems
 
     if problems := load_problems(workflow_path):
         print(f"{Fore.RED}Error: {len(problems)} command file(s) do not load; training stopped before it started:"
@@ -861,33 +924,35 @@ def train_main(args):
             print(f"  {problem}", file=sys.stderr)
         exit(1)
 
-    env_vars = {
-        **dotenv_values(args.env_file_path),
-        **dotenv_values(args.passwords_file_path)
-    }
+    env_vars = read_env_files(args.env_file_path, args.passwords_file_path)
     if not os.path.isfile(args.env_file_path):
         raise ValueError(f"Env file not found: {args.env_file_path}")
     if not env_vars:
         print(f'Env file path: {args.env_file_path}')
         raise ValueError("Env file loaded no variables! Is the env file missing? or path is incorrect?")
-    if not env_vars.get("LITELLM_API_KEY_SYNDATA_GEN"):
-        print(f"LITELLM_API_KEY_SYNDATA_GEN password env var not found! OK if this is Bedrock. Otherwise, is the password env file missing or incorrect path? Path: {args.passwords_file_path}")
 
     fastworkflow.init(env_vars=env_vars)
 
+    # The utterance generator's model: LLM_SYNDATA_GEN, else the base model (LLM_AGENT, else LLM_PLANNER).
+    if problem := syndata_model_problem():
+        print(f"{Fore.RED}Error: {problem}{Style.RESET_ALL}", file=sys.stderr)
+        exit(1)
+    if notice := syndata_key_notice(args.passwords_file_path):
+        print(notice)
+
     regenerate_utterances = getattr(args, "regenerate_utterances", False)
-    # Check if fastworkflow has been trained, and train it if not. The regeneration
-    # flag is forwarded when CME training is already required; it does not force
-    # otherwise-unneeded CME retraining.
-    fastworkflow_folderpath = fastworkflow.get_fastworkflow_package_path()
+    # Check if the framework's own workflows have been trained, and train them if not. The
+    # regeneration flag is forwarded when their training is already required; it does not force
+    # otherwise-unneeded retraining. Training one of them names it directly, so the check is skipped.
     if (
-        not _trains_the_fastworkflow_package(workflow_path) and
+        not intent_model_layout.is_framework_workflow(workflow_path) and
         not is_fast_workflow_trained(fastworkflow_folderpath)
     ):
-        train_workflow(
-            fastworkflow_folderpath,
-            regenerate_utterances=regenerate_utterances,
-        )
+        for name in FRAMEWORK_WORKFLOWS:
+            train_workflow(
+                fastworkflow.get_internal_workflow_path(name),
+                regenerate_utterances=regenerate_utterances,
+            )
 
     train_workflow(
         workflow_path,

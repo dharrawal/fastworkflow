@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 
 from fastworkflow.planning import phase, run
 
-from ._wording import copies
+from .._shared.wording import copies
 from .find_book import Signature as FindBook
 from .open_book import Signature as OpenBook
 
@@ -38,6 +38,7 @@ class Signature:
 
     class Input(BaseModel):
         author: str = Field(description="the author's name",
+                            examples=["Frank Herbert", "Jane Austen", "Austen"],
                             json_schema_extra={"copied_from_command_text": True})
 
 
@@ -78,7 +79,7 @@ class PlanGenerator:
 - **`def __result__(self, input, book)`**: named after the fan-out, `book` is the **list**
   of the items' facts, in item order: here, one `open_book` `Output` per book. It is empty
   when the find listed nothing, so `if not book` says that no book was found. `copies` is
-  the `_wording.py` helper `book_by_title` uses too (page 4).
+  the `_shared/wording.py` helper `book_by_title` uses too (page 4).
 
 The template the planner reads for `author_books`:
 
@@ -141,8 +142,8 @@ The preview: `book` fans out once per book the search found.
 
 ```text
 Phase find
-  1. find_book query=Jane Austen
-  code runs: find_book query=Jane Austen
+  1. find_book query="Jane Austen"
+  code runs: find_book query="Jane Austen"
   facts: find_book.Output(book_uids=['b3', 'b4'], titles=['Emma', 'Persuasion'], total=2)
 Phase book (item b3)
   1. open_book book_uid=b3
@@ -173,8 +174,8 @@ Run offline for Jane Austen, `book` runs once for each of the two books:
 <!-- dry-run: author_books {"author": "Jane Austen"} -->
 ```text
 Phase find
-  1. find_book query=Jane Austen
-  code runs: find_book query=Jane Austen
+  1. find_book query="Jane Austen"
+  code runs: find_book query="Jane Austen"
   facts: Output(book_uids=['b3', 'b4'], titles=['Emma', 'Persuasion'], total=2)
 Phase book (item b3)
   1. show_book book_uid=b3

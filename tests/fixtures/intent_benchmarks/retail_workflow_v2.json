@@ -1,0 +1,557 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "context": "*",
+      "utterance": "What's 348 minus 129?",
+      "kind": "routing",
+      "expected_label": "calculate"
+    },
+    {
+      "context": "*",
+      "utterance": "Multiply 12.5 by 8",
+      "kind": "routing",
+      "expected_label": "calculate"
+    },
+    {
+      "context": "*",
+      "utterance": "89.99 * 3 + 12.50",
+      "kind": "routing",
+      "expected_label": "calculate"
+    },
+    {
+      "context": "*",
+      "utterance": "Could you do a quick sum for me? I need 250 plus 75 plus 19.99 added together",
+      "kind": "routing",
+      "expected_label": "calculate"
+    },
+    {
+      "context": "*",
+      "utterance": "If I take 20 off 159.98 and then halve it, what do I get? (159.98 - 20) / 2",
+      "kind": "routing",
+      "expected_label": "calculate"
+    },
+    {
+      "context": "*",
+      "utterance": "whats 64 dividd by 4",
+      "kind": "routing",
+      "expected_label": "calculate"
+    },
+    {
+      "context": "*",
+      "utterance": "Order #W3948120 was a mistake on my part, cancel it",
+      "kind": "routing",
+      "expected_label": "cancel_pending_order"
+    },
+    {
+      "context": "*",
+      "utterance": "Can you stop my pending order from shipping? I don't want it any more",
+      "kind": "routing",
+      "expected_label": "cancel_pending_order"
+    },
+    {
+      "context": "*",
+      "utterance": "cancel #W6021775, dont need it",
+      "kind": "routing",
+      "expected_label": "cancel_pending_order"
+    },
+    {
+      "context": "*",
+      "utterance": "Hi there, I placed an order last night and I've since found the same thing cheaper elsewhere, so I'd be grateful if you could cancel the whole order before it's dispatched",
+      "kind": "routing",
+      "expected_label": "cancel_pending_order"
+    },
+    {
+      "context": "*",
+      "utterance": "How do I go about cancelling an order that hasn't been sent yet?",
+      "kind": "routing",
+      "expected_label": "cancel_pending_order"
+    },
+    {
+      "context": "*",
+      "utterance": "need to cancle my order #W8840315, orderd it by accident",
+      "kind": "routing",
+      "expected_label": "cancel_pending_order"
+    },
+    {
+      "context": "*",
+      "utterance": "For delivered order #W7181492, exchange item 5586947715 for item 7453605304 and use gift_card_4332117 for the difference",
+      "kind": "routing",
+      "expected_label": "exchange_delivered_order_items"
+    },
+    {
+      "context": "*",
+      "utterance": "The boots I received are a size too big; can I get them exchanged for a 9?",
+      "kind": "routing",
+      "expected_label": "exchange_delivered_order_items"
+    },
+    {
+      "context": "*",
+      "utterance": "exchange the tablet from order #W2890441 - got 64GB delivered, wanted 128GB",
+      "kind": "routing",
+      "expected_label": "exchange_delivered_order_items"
+    },
+    {
+      "context": "*",
+      "utterance": "Hello, my parcel arrived on Monday and unfortunately the kettle in it is the wrong colour, so I would like to exchange it for the white version of the same kettle if that is possible",
+      "kind": "routing",
+      "expected_label": "exchange_delivered_order_items"
+    },
+    {
+      "context": "*",
+      "utterance": "Is it possible to swap a delivered item for a different option of the same product?",
+      "kind": "routing",
+      "expected_label": "exchange_delivered_order_items"
+    },
+    {
+      "context": "*",
+      "utterance": "recieved the wrong size tshirt, want to exchage it for a large",
+      "kind": "routing",
+      "expected_label": "exchange_delivered_order_items"
+    },
+    {
+      "context": "*",
+      "utterance": "Find the user id that goes with hannah.lopez@example.com",
+      "kind": "routing",
+      "expected_label": "find_user_id_by_email"
+    },
+    {
+      "context": "*",
+      "utterance": "What's my user id? My email is t.okafor91@example.org",
+      "kind": "routing",
+      "expected_label": "find_user_id_by_email"
+    },
+    {
+      "context": "*",
+      "utterance": "id for marcus_bell@example.net pls",
+      "kind": "routing",
+      "expected_label": "find_user_id_by_email"
+    },
+    {
+      "context": "*",
+      "utterance": "I don't know my user id, but the email address on my account is chloe.dubois@example.com, so could you look the id up from that?",
+      "kind": "routing",
+      "expected_label": "find_user_id_by_email"
+    },
+    {
+      "context": "*",
+      "utterance": "Can you identify the customer whose email is ravi.menon@example.org?",
+      "kind": "routing",
+      "expected_label": "find_user_id_by_email"
+    },
+    {
+      "context": "*",
+      "utterance": "lookup user by emial: jen.park@example.com",
+      "kind": "routing",
+      "expected_label": "find_user_id_by_email"
+    },
+    {
+      "context": "*",
+      "utterance": "Find the user id for Laura Bennett, zip 30309",
+      "kind": "routing",
+      "expected_label": "find_user_id_by_name_zip"
+    },
+    {
+      "context": "*",
+      "utterance": "Can you look up my account by name and zip code? Omar Haddad, 48226",
+      "kind": "routing",
+      "expected_label": "find_user_id_by_name_zip"
+    },
+    {
+      "context": "*",
+      "utterance": "grace liu 94110 - need my user id",
+      "kind": "routing",
+      "expected_label": "find_user_id_by_name_zip"
+    },
+    {
+      "context": "*",
+      "utterance": "I've lost access to the email I registered with, so could you find my user id from my name instead? I'm Thomas Reed and my zip code is 19103",
+      "kind": "routing",
+      "expected_label": "find_user_id_by_name_zip"
+    },
+    {
+      "context": "*",
+      "utterance": "Who is the customer named Isabel Moreno in zip code 85004?",
+      "kind": "routing",
+      "expected_label": "find_user_id_by_name_zip"
+    },
+    {
+      "context": "*",
+      "utterance": "cant remeber my email. name is ben foster, zip 37203",
+      "kind": "routing",
+      "expected_label": "find_user_id_by_name_zip"
+    },
+    {
+      "context": "*",
+      "utterance": "Pull up order #W5271938",
+      "kind": "routing",
+      "expected_label": "get_order_details"
+    },
+    {
+      "context": "*",
+      "utterance": "What's the status of my order #W8104467 - is it still pending or already delivered?",
+      "kind": "routing",
+      "expected_label": "get_order_details"
+    },
+    {
+      "context": "*",
+      "utterance": "#W3690254 tracking?",
+      "kind": "routing",
+      "expected_label": "get_order_details"
+    },
+    {
+      "context": "*",
+      "utterance": "Could you please look at order #W1947702 and tell me which items are in it and what payment method was used?",
+      "kind": "routing",
+      "expected_label": "get_order_details"
+    },
+    {
+      "context": "*",
+      "utterance": "Has order #W6635081 been delivered yet?",
+      "kind": "routing",
+      "expected_label": "get_order_details"
+    },
+    {
+      "context": "*",
+      "utterance": "wheres my order #W4429016, need the detials",
+      "kind": "routing",
+      "expected_label": "get_order_details"
+    },
+    {
+      "context": "*",
+      "utterance": "Show me the details of product 9523456873",
+      "kind": "routing",
+      "expected_label": "get_product_details"
+    },
+    {
+      "context": "*",
+      "utterance": "Is product 2524789262 in stock, and which options does it come in?",
+      "kind": "routing",
+      "expected_label": "get_product_details"
+    },
+    {
+      "context": "*",
+      "utterance": "product 4760268021 - price?",
+      "kind": "routing",
+      "expected_label": "get_product_details"
+    },
+    {
+      "context": "*",
+      "utterance": "I'd like to know more about the product with id 1968349452 please, particularly the available variants and what each one costs",
+      "kind": "routing",
+      "expected_label": "get_product_details"
+    },
+    {
+      "context": "*",
+      "utterance": "What item ids and options exist under product 3377618313?",
+      "kind": "routing",
+      "expected_label": "get_product_details"
+    },
+    {
+      "context": "*",
+      "utterance": "deatils for prodcut 7363354090",
+      "kind": "routing",
+      "expected_label": "get_product_details"
+    },
+    {
+      "context": "*",
+      "utterance": "Get the details of user ethan_clark_3301",
+      "kind": "routing",
+      "expected_label": "get_user_details"
+    },
+    {
+      "context": "*",
+      "utterance": "What orders does user aisha_khan_5120 have on file?",
+      "kind": "routing",
+      "expected_label": "get_user_details"
+    },
+    {
+      "context": "*",
+      "utterance": "user liam_ortiz_8847 - profile pls",
+      "kind": "routing",
+      "expected_label": "get_user_details"
+    },
+    {
+      "context": "*",
+      "utterance": "Could you bring up the full record for user id nina_rossi_2209, including the email, address and payment methods we hold?",
+      "kind": "routing",
+      "expected_label": "get_user_details"
+    },
+    {
+      "context": "*",
+      "utterance": "Which payment methods are on user omar_silva_4416's account?",
+      "kind": "routing",
+      "expected_label": "get_user_details"
+    },
+    {
+      "context": "*",
+      "utterance": "show me evrything for user id zoe_meyer_7735",
+      "kind": "routing",
+      "expected_label": "get_user_details"
+    },
+    {
+      "context": "*",
+      "utterance": "What types of products do you sell?",
+      "kind": "routing",
+      "expected_label": "list_all_product_types"
+    },
+    {
+      "context": "*",
+      "utterance": "Show me the list of product types with their product ids",
+      "kind": "routing",
+      "expected_label": "list_all_product_types"
+    },
+    {
+      "context": "*",
+      "utterance": "product types?",
+      "kind": "routing",
+      "expected_label": "list_all_product_types"
+    },
+    {
+      "context": "*",
+      "utterance": "Before I pick something, could you give me a complete list of all the kinds of products that are available in the store?",
+      "kind": "routing",
+      "expected_label": "list_all_product_types"
+    },
+    {
+      "context": "*",
+      "utterance": "Name every category of product in your catalogue",
+      "kind": "routing",
+      "expected_label": "list_all_product_types"
+    },
+    {
+      "context": "*",
+      "utterance": "wat sorts of prodcuts do u have",
+      "kind": "routing",
+      "expected_label": "list_all_product_types"
+    },
+    {
+      "context": "*",
+      "utterance": "Update the shipping address of order #W9048821 to 60 Maple Ave, Apt 3B, Chicago, IL, USA, 60611",
+      "kind": "routing",
+      "expected_label": "modify_pending_order_address"
+    },
+    {
+      "context": "*",
+      "utterance": "Can the delivery address on my pending order still be changed? I typed the wrong zip",
+      "kind": "routing",
+      "expected_label": "modify_pending_order_address"
+    },
+    {
+      "context": "*",
+      "utterance": "order #W7216650 - ship to 1400 Ocean Blvd, Suite 2, San Diego, CA 92101 instead",
+      "kind": "routing",
+      "expected_label": "modify_pending_order_address"
+    },
+    {
+      "context": "*",
+      "utterance": "Hi, I've just realised that the order I placed this morning is going to my old flat, and since it hasn't shipped yet I'd like to have it delivered to my new address instead",
+      "kind": "routing",
+      "expected_label": "modify_pending_order_address"
+    },
+    {
+      "context": "*",
+      "utterance": "Please redirect pending order #W3058149 to my parents' house at 27 Willow Way, Columbus, OH, USA, 43215",
+      "kind": "routing",
+      "expected_label": "modify_pending_order_address"
+    },
+    {
+      "context": "*",
+      "utterance": "need to chnage the adress on order #W5582903 before it ships",
+      "kind": "routing",
+      "expected_label": "modify_pending_order_address"
+    },
+    {
+      "context": "*",
+      "utterance": "For pending order #W8327915, change item 3812493782 to item 6245231688 and use credit_card_7714302 for the price difference",
+      "kind": "routing",
+      "expected_label": "modify_pending_order_items"
+    },
+    {
+      "context": "*",
+      "utterance": "My order hasn't shipped - can I change the phone case in it from black to clear?",
+      "kind": "routing",
+      "expected_label": "modify_pending_order_items"
+    },
+    {
+      "context": "*",
+      "utterance": "pending order #W4960173: want size M instead of L for the hoodie",
+      "kind": "routing",
+      "expected_label": "modify_pending_order_items"
+    },
+    {
+      "context": "*",
+      "utterance": "Hello, I ordered a desk lamp yesterday and the order is still pending; I've decided I would prefer the brass finish to the chrome one, so could you change that item for me?",
+      "kind": "routing",
+      "expected_label": "modify_pending_order_items"
+    },
+    {
+      "context": "*",
+      "utterance": "Is there a way to switch one item in an order that's still processing to a different variant?",
+      "kind": "routing",
+      "expected_label": "modify_pending_order_items"
+    },
+    {
+      "context": "*",
+      "utterance": "chnage the item in my pending order #W1173846 to the 512GB verison",
+      "kind": "routing",
+      "expected_label": "modify_pending_order_items"
+    },
+    {
+      "context": "*",
+      "utterance": "Change the payment method on order #W2745506 to paypal_6617340",
+      "kind": "routing",
+      "expected_label": "modify_pending_order_payment"
+    },
+    {
+      "context": "*",
+      "utterance": "Can my pending order be charged to a different credit card than the one I used?",
+      "kind": "routing",
+      "expected_label": "modify_pending_order_payment"
+    },
+    {
+      "context": "*",
+      "utterance": "order #W9382217 - pay with gift_card_2208841 not the card",
+      "kind": "routing",
+      "expected_label": "modify_pending_order_payment"
+    },
+    {
+      "context": "*",
+      "utterance": "I paid for an order this morning with the wrong card and it hasn't shipped yet, so I was wondering whether you could move the payment over to my PayPal account instead",
+      "kind": "routing",
+      "expected_label": "modify_pending_order_payment"
+    },
+    {
+      "context": "*",
+      "utterance": "Put pending order #W6190034 on credit_card_3350918 instead of the gift card",
+      "kind": "routing",
+      "expected_label": "modify_pending_order_payment"
+    },
+    {
+      "context": "*",
+      "utterance": "want to swich payment for order #W4057728 to my other card",
+      "kind": "routing",
+      "expected_label": "modify_pending_order_payment"
+    },
+    {
+      "context": "*",
+      "utterance": "Update the address for user daniel_cho_1184 to 88 Summit Rd, Unit 4, Phoenix, AZ, USA, 85004",
+      "kind": "routing",
+      "expected_label": "modify_user_address"
+    },
+    {
+      "context": "*",
+      "utterance": "Can you change the address saved on my account? I've moved house",
+      "kind": "routing",
+      "expected_label": "modify_user_address"
+    },
+    {
+      "context": "*",
+      "utterance": "user maya_singh_3072 new address: 410 Grove St, Apt 9, Nashville, TN 37203",
+      "kind": "routing",
+      "expected_label": "modify_user_address"
+    },
+    {
+      "context": "*",
+      "utterance": "I've recently moved across town and I'd like the address you keep on my profile to be brought up to date, so that future orders go to the right place by default",
+      "kind": "routing",
+      "expected_label": "modify_user_address"
+    },
+    {
+      "context": "*",
+      "utterance": "Replace the default address on user carlos_vega_5529's profile with 12 Orchard Ln, Suite 1, Raleigh, NC, USA, 27601",
+      "kind": "routing",
+      "expected_label": "modify_user_address"
+    },
+    {
+      "context": "*",
+      "utterance": "pls udpate my acount address, moved to 730 Bay St, Tampa, FL 33602",
+      "kind": "routing",
+      "expected_label": "modify_user_address"
+    },
+    {
+      "context": "*",
+      "utterance": "Return item 6501071631 from order #W3847216 and put the refund on paypal_9150382",
+      "kind": "routing",
+      "expected_label": "return_delivered_order_items"
+    },
+    {
+      "context": "*",
+      "utterance": "I'd like to return the blender that was delivered on Friday - can I get refunded to my original card?",
+      "kind": "routing",
+      "expected_label": "return_delivered_order_items"
+    },
+    {
+      "context": "*",
+      "utterance": "return 2 items from #W7559042: 4913411651, 8054888773",
+      "kind": "routing",
+      "expected_label": "return_delivered_order_items"
+    },
+    {
+      "context": "*",
+      "utterance": "Hello, my order arrived yesterday and I've decided I don't want the running shoes or the water bottle after all, so I'd like to send both of them back and have the money returned to my gift card",
+      "kind": "routing",
+      "expected_label": "return_delivered_order_items"
+    },
+    {
+      "context": "*",
+      "utterance": "How do I get a refund for something from a delivered order that I no longer want?",
+      "kind": "routing",
+      "expected_label": "return_delivered_order_items"
+    },
+    {
+      "context": "*",
+      "utterance": "want to retrun the jacket from order #W6218834, refund to credit_card_2047719",
+      "kind": "routing",
+      "expected_label": "return_delivered_order_items"
+    },
+    {
+      "context": "*",
+      "utterance": "Pass me over to a human agent, please",
+      "kind": "routing",
+      "expected_label": "transfer_to_human_agents"
+    },
+    {
+      "context": "*",
+      "utterance": "Could you hand this conversation over to a person on your team?",
+      "kind": "routing",
+      "expected_label": "transfer_to_human_agents"
+    },
+    {
+      "context": "*",
+      "utterance": "human. now.",
+      "kind": "routing",
+      "expected_label": "transfer_to_human_agents"
+    },
+    {
+      "context": "*",
+      "utterance": "With respect, I've been at this for twenty minutes and I'd really rather speak with an actual customer service representative, so please transfer me",
+      "kind": "routing",
+      "expected_label": "transfer_to_human_agents"
+    },
+    {
+      "context": "*",
+      "utterance": "I want to speak with a live agent, not the assistant",
+      "kind": "routing",
+      "expected_label": "transfer_to_human_agents"
+    },
+    {
+      "context": "*",
+      "utterance": "can u get me a real persn to talk to",
+      "kind": "routing",
+      "expected_label": "transfer_to_human_agents"
+    },
+    {
+      "context": "*",
+      "utterance": "what can I ask you to do for me",
+      "kind": "routing",
+      "expected_label": "IntentDetection/what_can_i_do"
+    },
+    {
+      "context": "*",
+      "utterance": "which tasks do you support?",
+      "kind": "routing",
+      "expected_label": "IntentDetection/what_can_i_do"
+    }
+  ]
+}

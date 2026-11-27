@@ -12,8 +12,8 @@ import dspy
 from dspy.utils.dummies import dotdict
 from dspy.utils.exceptions import AdapterParseError
 
-from fastworkflow.utils import chat_adapter
-from fastworkflow.utils.chat_adapter import CommandsSystemPreludeAdapter, CommandsSystemPreludeJSONAdapter
+from fastworkflow.agent import chat_adapter
+from fastworkflow.agent.chat_adapter import CommandsSystemPreludeAdapter, CommandsSystemPreludeJSONAdapter
 from fastworkflow.utils.logging import logger
 
 
@@ -280,7 +280,7 @@ def test_the_json_retry_keeps_the_commands_out_of_the_user_message():
 
 def test_a_reply_with_leaked_thinking_is_parsed_after_the_thinking():
     import dspy
-    from fastworkflow.utils.chat_adapter import (
+    from fastworkflow.agent.chat_adapter import (
         CommandsSystemPreludeAdapter, CommandsSystemPreludeJSONAdapter)
 
     class Plan(dspy.Signature):

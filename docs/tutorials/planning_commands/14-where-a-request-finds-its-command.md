@@ -9,25 +9,34 @@ of command.
 
 Two things, both already seen:
 
-- **the bases of each context**, in `_commands/context_inheritance_model.json` (below). A
-  book and a member are both records, so both have `Record`'s commands;
+- **the bases of each context**, as `inherits` on the `class Context` of its `_<Context>.py`
+  (below). A book and a member are both records, so both have `Record`'s commands;
 - **the record that encloses each record**, by `get_parent()` in the context's `_<Context>.py`
-  (page 5): a book's and a member's parent is the library.
+  (page 5), with the contexts it can return records of declared as `parents`: a book's and a
+  member's parent is the library.
 
-<!-- file: fastworkflow/examples/library/_commands/context_inheritance_model.json -->
-```json
-{
-    "Book": {
-        "base": ["Record"]
-    },
-    "Member": {
-        "base": ["Record"]
-    }
-}
+The first lines of `class Context` in `_commands/Book/_Book.py` and `_commands/Member/_Member.py`:
+
+```python
+class Context:
+    inherits = ["Record"]
+    parents = ["Library"]
 ```
 
-There is no other hierarchy file. A `context_hierarchy_model.json` left over from an older
-workflow is ignored, with a warning that it can be deleted.
+No other file declares them. A `_commands/context_inheritance_model.json` is a removed spelling
+and stops the workflow (`fastworkflow migrate-contexts <workflow>` writes its bases as `inherits`
+and deletes it), and a
+`context_hierarchy_model.json` is ignored, with a warning that it can be deleted.
+`fastworkflow command preview` draws the declarations of every context, with the commands that
+enter each one, as the workflow's object model in `_object_models/<workflow>.md` beside the
+previews; for the library:
+
+```text
+- global commands
+  - Library
+    - Book (entered by `Library/open_book`)
+    - Member (entered by `Library/open_member`)
+```
 
 ## The lookup path
 
@@ -177,8 +186,8 @@ The library example gives each command eight seeds, which is the count to follow
 In agent mode a request is split into its parts, and each part gets a run of the agent of
 its own. **Before the run, the planner writes its plan**: a numbered list of steps, written
 from the list of commands described below. The agent then runs those steps. The plan is in
-the turn's trace (`fw.planner.plan`), and the planner writes the rest of it again
-(`fw.planner.replan`) when a step's arguments are refused or the user's answer to a question
+the turn's trace (a `fw.plan` span under the part it plans for), and the planner writes the rest
+of it again (another `fw.plan`, its `trigger` saying why) when a step's arguments are refused or the user's answer to a question
 changes what is needed.
 
 **Before anything runs, the parts are reviewed.** A request with several parts, or a part with no confident
@@ -252,7 +261,7 @@ say which books Mia Chen has on loan, and that the note was added
 `member_report` leaves the workflow on Mia Chen (page 5), so `add_note` runs on her record.
 
 **A larger workflow is shortlisted.** The planner is shown every command of the workflow, each planning
-command with its template, while the full list is 7000 characters or less. A larger workflow that has trained
+command with its template, while the full list is 8000 characters or less. A larger workflow that has trained
 heads is shown a shortlist instead, built like this for a request:
 
 1. **The commands that match**, in every scope on the path and in every context the library can
@@ -282,12 +291,12 @@ the planner made up is in neither, and is refused.
 
 If the planner keeps writing the same plan for one kind of request, that is the hint to write a
 command for it: an execution command if code can decide every step, and a planning command if
-the agent should run, judge or recover part of it (page 1). Its plans are the `fw.planner.plan`
+the agent should run, judge or recover part of it (page 1). Its plans are the `fw.plan`
 spans in the turn's trace, so they are there to read.
 
 ## Assistant mode
 
-`fastworkflow run --assistant` runs one execution command per message, with no agent. A planning
+`fastworkflow run_cli --assistant` runs one execution command per message, with no agent. A planning
 command named exactly, as `count_books` or `/count_books`, runs there when it is mechanical: code runs
 every step and nothing needs the agent. A planning command that needs the agent, such as
 `member_report`, is refused, with the reasons and what to change, and the message points to agent
@@ -305,6 +314,6 @@ the planner fills its inputs, code checks them and writes its steps, and the pla
 steps the request asks for beyond it; a value the request leaves out is asked for in an
 attended turn. When the call fails, the planner adapts the command's template. Without the key,
 or for a part no planning command covers, the planner plans from the list of commands, which
-shows each planning command with its template. The planner is shown the full list of commands up to 7000
+shows each planning command with its template. The planner is shown the full list of commands up to 8000
 characters; above that, the shortlist of a large workflow, which your producer `from_command_output` and `@descends_to`
 declarations complete.

@@ -6,7 +6,7 @@ import dspy
 import pytest
 
 from fastworkflow.observation_offloading import finish_check as fc
-from fastworkflow.utils.react import fastWorkflowReAct
+from fastworkflow.agent.react import fastWorkflowReAct
 
 COMMANDS = ["Library/find_book", "Library/open_book_by_uid", "Book/show_details",
             "Book/list_loans", "Book/add_note", "open_library", "wildcard"]
@@ -353,7 +353,7 @@ def test_a_failing_reviewer_never_fails_the_run(monkeypatch):
 def test_the_execution_context_attaches_a_check_whenever_the_run_has_a_plan(monkeypatch):
     from types import SimpleNamespace
 
-    from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+    from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
     ctx = WorkflowExecutionContext.__new__(WorkflowExecutionContext)
     ctx._workflow_tool_agent = SimpleNamespace(finish_reviewer="stale")
@@ -365,7 +365,7 @@ def test_the_execution_context_attaches_a_check_whenever_the_run_has_a_plan(monk
     seen = {}
     monkeypatch.setattr(fc, "review_finish", lambda **kwargs: seen.update(kwargs) or "note")
     import fastworkflow
-    from fastworkflow import workflow_agent
+    from fastworkflow.agent import workflow_agent
 
     monkeypatch.setattr(fastworkflow, "RoutingRegistry", SimpleNamespace(
         get_definition=lambda folder: SimpleNamespace(

@@ -40,14 +40,14 @@ from pydantic import ValidationError
 import fastworkflow
 from fastworkflow import TurnResult, TurnStatus, mint_turn_key
 from fastworkflow.observability import store as obs
-from fastworkflow.turn import (
+from fastworkflow.core.turn import (
     TURN_CAPTURE_CONTRACT_VERSION,
     ExecutionRecordRef,
     RoutingEvent,
     RoutingOutcome,
     RoutingTier,
 )
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 from tests.todo_list_workflow.application.todo_manager import TodoListManager
 
@@ -71,7 +71,7 @@ def todo_workflow_path() -> str:
 @pytest.fixture
 def initialized_fastworkflow():
     fastworkflow.init({})
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     RoutingRegistry.clear_registry()
     yield

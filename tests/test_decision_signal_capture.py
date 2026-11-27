@@ -1,4 +1,4 @@
-"""fw.nlu.intent spans carry decision_uncertainty under real traced flows.
+"""fw.intent spans carry decision_uncertainty under real traced flows.
 
 Complements ``tests/test_nlu_observability/decision_signals.py``: that file proves the
 assembling functions and static no-read guards; this one proves the structured
@@ -15,13 +15,14 @@ import pytest
 from dotenv import dotenv_values
 
 import fastworkflow
-from fastworkflow import tracing
+from fastworkflow.observability import tracing
 from fastworkflow._workflows.command_metadata_extraction.intent_detection import (
     ESCALATION_OUTCOMES,
 )
-from fastworkflow.command_executor import CommandExecutor
+from fastworkflow.engine.command_executor import CommandExecutor
+from tests.test_nlu_span_emission import CLASSIFIER_REQUEST
 from fastworkflow.observability.decision_signals import DecisionUncertainty
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 HELLO_WORLD = str(
     Path(__file__).parent.parent / "fastworkflow" / "examples" / "hello_world"
@@ -32,7 +33,7 @@ HELLO_WORLD = str(
 def initialized_fastworkflow():
     env = dotenv_values("fastworkflow/examples/fastworkflow.env")
     fastworkflow.init(dict(env))
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     RoutingRegistry.clear_registry()
     yield
@@ -62,7 +63,7 @@ class RecordingTraceSink:
 def hello_ctx():
     # `is_workflow_trained`, not "___command_info exists": an untrained
     # scaffold already has that directory (3.3 port adaptation).
-    from fastworkflow.model_pipeline_training import is_workflow_trained
+    from fastworkflow.intent.router import is_workflow_trained
 
     if not is_workflow_trained(HELLO_WORLD)[0]:
         pytest.skip("hello_world is not trained on this machine")
@@ -86,26 +87,23 @@ def _signal(uncertainty: DecisionUncertainty, kind: str):
     return matching[0]
 
 
-def test_exact_prefix_intent_span_carries_decision_uncertainty(hello_ctx):
+def test_an_exact_name_writes_no_intent_span_and_its_command_says_how(hello_ctx):
+    """An exact name decided nothing (bd fix-qjne.34 decision b): no fw.intent, so no command-identity uncertainty is
+    recorded for it; the command's span says it was resolved by its exact name."""
     ctx, sink = hello_ctx
     CommandExecutor.invoke_command(
         ctx,
         "add_two_numbers <first_num>5</first_num><second_num>3</second_num>",
     )
-    span = sink.named(tracing.SPAN_NLU_INTENT)[-1]
-
-    assert "decision_uncertainty" in span.attributes
-    recorded = span.attributes["decision_uncertainty"]
-    assert recorded["decision_kind"] == "command-identity"
-    assert recorded["signals_absent_reason"] == "deterministic-resolution"
-    assert DecisionUncertainty(**recorded).candidate_count == 1
+    assert sink.named(tracing.SPAN_INTENT) == []
+    assert sink.named(tracing.SPAN_COMMAND)[-1].attributes["resolved_by"] == "exact_name"
 
 
 def test_fuzzy_prematch_intent_span_carries_distance_and_threshold(hello_ctx):
     ctx, sink = hello_ctx
     CommandExecutor.invoke_command(ctx, "what can i do")
 
-    span = sink.named(tracing.SPAN_NLU_INTENT)[-1]
+    span = sink.named(tracing.SPAN_INTENT)[-1]
     assert span.attributes["matcher_layer"] == "fuzzy_prematch"
     assert "decision_uncertainty" in span.attributes
 
@@ -114,15 +112,14 @@ def test_fuzzy_prematch_intent_span_carries_distance_and_threshold(hello_ctx):
     assert span.attributes["fuzzy_threshold"] is not None
 
 
+@pytest.mark.usefixtures("no_planner_key")
 def test_classifier_intent_span_carries_confidence_signal(hello_ctx):
     ctx, sink = hello_ctx
-    CommandExecutor.invoke_command(
-        ctx, "please compute the total of five plus three"
-    )
+    CommandExecutor.invoke_command(ctx, CLASSIFIER_REQUEST)
 
     spans = [
         s
-        for s in sink.named(tracing.SPAN_NLU_INTENT)
+        for s in sink.named(tracing.SPAN_INTENT)
         if s.attributes.get("matcher_layer") == "classifier"
     ]
     assert spans, "classifier layer never ran"
@@ -141,23 +138,23 @@ def test_every_intent_span_carries_escalation_outcome(hello_ctx):
         ctx, "add_two_numbers <first_num>1</first_num><second_num>2</second_num>"
     )
 
-    spans = sink.named(tracing.SPAN_NLU_INTENT)
+    spans = sink.named(tracing.SPAN_INTENT)
     assert spans
     for span in spans:
         assert span.attributes["escalation_outcome"] in ESCALATION_OUTCOMES
         assert "decision_uncertainty" in span.attributes
 
 
-def test_param_extraction_span_carries_slot_binding_uncertainty(hello_ctx):
+def test_a_typed_extraction_writes_no_parameters_span(hello_ctx):
+    """Typed values read in code, all valid: the extraction decided nothing (bd fix-qjne.34 decision b), so no
+    fw.parameters (and no slot-binding uncertainty) is written; the command's span says the values were typed and
+    valid."""
     ctx, sink = hello_ctx
     CommandExecutor.invoke_command(
         ctx,
         "add_two_numbers <first_num>5</first_num><second_num>3</second_num>",
     )
+    assert sink.named(tracing.SPAN_PARAMETERS) == []
+    command = sink.named(tracing.SPAN_COMMAND)[-1]
+    assert command.attributes["parameters_read_by"] == "typed" and command.attributes["parameters_valid"] is True
 
-    span = sink.named(tracing.SPAN_NLU_PARAM_EXTRACTION)[-1]
-    assert "decision_uncertainty" in span.attributes
-    recorded = DecisionUncertainty(**span.attributes["decision_uncertainty"])
-    assert recorded.decision_kind == "slot-binding"
-    assert recorded.signals
-    assert recorded.signals[0].value == span.attributes["extraction_method"]

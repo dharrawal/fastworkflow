@@ -6,11 +6,10 @@ Put it at `<workflow>/_policy/table.py`; the workflow enforces it from then on.
 ## Facts: what the workflow declares
 
 ```python
-from fastworkflow.policy_decision import ContractFacts
+from fastworkflow.policy.policy_decision import ContractFacts
 
 FACTS = ContractFacts(
-    write_commands=frozenset({"close_ticket", "reassign_ticket"}),  # commands that change state
-    id_patterns=(r"T-\d+",),          # identifier shapes; default: _commands/_split.py identifier_patterns
+    id_patterns=(r"T-\d+",),          # identifier shapes; default: _commands/_workflow.py identifier_patterns
     enum_arguments={"close_ticket.resolution": frozenset({"fixed", "wont_fix"})},
     intent_operations={               # operations a user can ask for; enables the intent reader
         "close_ticket": "Close one or more tickets as resolved.",
@@ -22,15 +21,21 @@ FACTS = ContractFacts(
 )
 ```
 
+Which commands change state is not listed here: the loader fills `write_commands` from the
+`@fastworkflow.writes` marks on the workflow's execution commands (and the planning commands whose
+steps reach one), by qualified and leaf name. A table whose `FACTS` lists `write_commands` fails to load.
+
 Declare only what a predicate reads. Leave `intent_operations` empty unless a rule needs to
-know what was asked: each entry costs one model call per user message.
+know what was asked: when it is set, every user message costs one model call.
+`failure_pattern` is searched in the first 160 characters of a response; a match records
+the run as failed, as does a response that reports failure itself.
 
 ## Phases and what each input carries
 
 | phase | when | input | extra fields |
 |---|---|---|---|
 | `BEFORE_SIDE_EFFECT` | a command the model chose, after parameter extraction, before it runs | `BeforeSideEffectInput` | `command_name`, `command_args` (validated parameters), `id_arguments()` |
-| `AFTER_OBSERVATION` | a non-command tool the model chose (a question to the user) | `AfterObservationInput` | `pending_tool`, `pending_args`, `question_judgement` |
+| `AFTER_OBSERVATION` | a non-command tool the model chose (`ask_user`, `what_can_i_do`), before it runs | `AfterObservationInput` | `pending_tool`, `pending_args`, `pending_text()`, `question_judgement` (`ask_user` only, when `judge_questions` is set) |
 | `BEFORE_FINISH` | the agent picked `finish` and its answer is written | `BeforeFinishInput` | `answer` |
 
 Every input carries:
@@ -44,7 +49,7 @@ Every input carries:
 It also has these helpers:
 
 - `ran(name)`: successful runs of a command;
-- `last_user_utterance()`;
+- `last_user_utterance()`: the latest `@user` or `ask_user` record;
 - `requested(op, conditional=)`;
 - `observation_text()`.
 
@@ -64,7 +69,9 @@ The history spans the whole conversation, not one turn.
 ## Rows
 
 ```python
-from fastworkflow.policy_decision import DecisionPhase, DecisionTable, PolicyOutcome, PolicyRow
+import re
+
+from fastworkflow.policy.policy_decision import DecisionPhase, DecisionTable, PolicyOutcome, PolicyRow
 
 BEFORE_WRITE = frozenset({DecisionPhase.BEFORE_SIDE_EFFECT})
 
@@ -94,15 +101,17 @@ How rows behave:
 - **Predicates must be pure and cheap.** They run on every step at their phase.
 - **`rewrite`** is a string, or a function of the input that names what was wrong.
 - **Order.** First match wins.
-- **Required fields.** A version string and unique row ids are required.
+- **Checked at load.** A version string, unique row ids, at least one phase per row, and a
+  `rewrite` on every `REWRITE` row.
 - **`ALLOW`** marks an exemption: a row that matches to stop later rows from firing.
-- **Failure handling.** A predicate that raises lets the step through, and the failure is
-  logged.
+  Use `REWRITE` for everything else.
+- **Failure handling.** A predicate or rewrite that raises lets the step through (no later
+  row is tried), and the failure is logged.
 
 ## Testing a row
 
 ```python
-from fastworkflow.policy_decision import BeforeSideEffectInput, CommandRecord
+from fastworkflow.policy.policy_decision import BeforeSideEffectInput, CommandRecord
 
 history = (CommandRecord("list_tickets", {}, "T-1, T-2"),
            CommandRecord("get_ticket", {"ticket_id": "T-1"}, '{"id": "T-1"}'))

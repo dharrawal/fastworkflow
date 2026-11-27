@@ -8,7 +8,7 @@ EXPERIMENT TOOL. Four arms, one set of requests (``planning_test_set``), one sco
 * ``heads_not_here`` (b): the baseline layout. Planning commands only in the sparse "not here"
   class: a trained copy built under ``experiment_planning_heads("not_here")`` inside the sparse arm.
   This is the BASELINE every report compares against.
-* ``jev`` (c): Jev, through the real match path (``workflow_agent.match_planning_command``). LIVE.
+* ``jev`` (c): Jev, through the old match path (``workflow_agent.match_planning_command``, removed by bd fix-zvme: the live arm raises). LIVE.
 * ``agent_plan`` (d): the agent choosing as it plans, with no matcher. LIVE. Measured as follows
   (decision, Phase 10 step 1c; evidence checked in the code, file:line as of this change):
 
@@ -82,7 +82,7 @@ import sys
 import collections
 from typing import Any, Mapping, Optional, Sequence
 
-from fastworkflow.nlu_labels import is_non_routable, label_of
+from fastworkflow.intent.nlu_labels import is_non_routable, label_of
 from fastworkflow.train import planning_test_set as pts
 from fastworkflow.train import score_not_here as scorer
 
@@ -651,7 +651,7 @@ def estimate(arm: str, cases: Sequence[Mapping[str, Any]], workflow_folderpath: 
         out_tokens = calls * JEV_OUTPUT_TOKENS
         note = "one matcher call per case per scope that has planning commands (case scope, then root)"
     elif arm == ARM_AGENT_PLAN:
-        from fastworkflow.workflow_agent import PLANNER_INSTRUCTIONS
+        from fastworkflow.agent.workflow_agent import PLANNER_INSTRUCTIONS
 
         calls = len(cases)
         in_chars = sum(len(PLANNER_INSTRUCTIONS) + listing + len(c["utterance"]) for c in cases)
@@ -668,9 +668,9 @@ def estimate(arm: str, cases: Sequence[Mapping[str, Any]], workflow_folderpath: 
 
 def _planning_templates(workflow_folderpath: str) -> dict[str, tuple]:
     """Each planning command's template steps (what the planner's listing shows), by qualified name."""
-    from fastworkflow.planning_commands import resolve_field_sources
+    from fastworkflow.planning.planning_commands import resolve_field_sources
 
-    from fastworkflow.planning_commands import visible_planning_commands
+    from fastworkflow.planning.planning_commands import visible_planning_commands
 
     return {name: tuple(cmd.template) for name, cmd in visible_planning_commands(workflow_folderpath).items()}
 
@@ -723,7 +723,7 @@ LISTING_OUTPUT_ESTIMATE = 300
 def listing_text(opened, utterance: str, arm: str) -> str:
     """The arm's listing for one request, built by run_listing as production builds it (no provider call: the
     shortlist gathers with the trained heads' local classifiers)."""
-    from fastworkflow import run_listing
+    from fastworkflow.agent import run_listing
 
     if arm == LISTING_FULL:
         return run_listing.run_listing_text(opened.app, utterance, arm=run_listing.FULL)
@@ -761,7 +761,7 @@ def listing_workflow_rows(label: str, source: str, testset: str, context_path: O
 def listing_dry_run_totals(workflows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """Calls and prompt tokens the live run would make (the planner instructions, the listing, the request and the
     per-call overhead, at characters / 4), and the gate verdict."""
-    from fastworkflow.workflow_agent import PLANNER_INSTRUCTIONS
+    from fastworkflow.agent.workflow_agent import PLANNER_INSTRUCTIONS
 
     calls = 0
     prompt = 0
@@ -804,15 +804,15 @@ def run_listing_live(workflows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     import dspy
 
     from fastworkflow.utils import dspy_utils
-    from fastworkflow.utils.chat_adapter import CommandsSystemPreludeAdapter
-    from fastworkflow.workflow_agent import PLANNER_INSTRUCTIONS
+    from fastworkflow.agent.chat_adapter import CommandsSystemPreludeAdapter
+    from fastworkflow.agent.workflow_agent import PLANNER_INSTRUCTIONS
 
     class TaskPlannerTextSignature(dspy.Signature):
         __doc__ = PLANNER_INSTRUCTIONS
         user_query: str = dspy.InputField()
         next_steps: str = dspy.OutputField(desc="task descriptions as a numbered list of short sentences separated by line breaks")
 
-    lm = dspy_utils.get_lm("LLM_PLANNER", "LITELLM_API_KEY_PLANNER")
+    lm = dspy_utils.get_lm("LLM_PLANNER")
     predictor = dspy.ChainOfThought(TaskPlannerTextSignature)
     out_workflows = []
     with dspy.context(lm=lm, adapter=CommandsSystemPreludeAdapter()):
@@ -923,12 +923,12 @@ def score_listing_run(doc: Mapping[str, Any]) -> dict[str, Any]:
 def _job_types_by_scope(workflow_folderpath: str) -> dict[str, str]:
     """The Jev matcher's job-type text per scope (``""`` for root), as ``workflow_agent._matcher_job_types``
     lays it out, read through ``resolve_field_sources`` (no write)."""
-    from fastworkflow.planning_commands import resolve_field_sources
-    from fastworkflow.workflow_agent import MATCHER_EXAMPLES
+    from fastworkflow.planning.planning_commands import resolve_field_sources
+    from fastworkflow.agent.workflow_agent import MATCHER_EXAMPLES
 
     resolution = resolve_field_sources(workflow_folderpath)
     by_scope: dict[str, list[str]] = {}
-    from fastworkflow.planning_commands import visible_planning_commands
+    from fastworkflow.planning.planning_commands import visible_planning_commands
 
     for name, command in sorted(visible_planning_commands(workflow_folderpath).items()):
         scope = name.rpartition("/")[0]
@@ -945,14 +945,14 @@ def _job_types_by_scope(workflow_folderpath: str) -> dict[str, str]:
 def _listing_chars(workflow_folderpath: str) -> int:
     """Rough size of the planner's listing: every command's name and a description, plus each planning
     command's template. Estimated from the loader; the planner's real listing needs a live Workflow."""
-    from fastworkflow.planning_commands import resolve_field_sources
+    from fastworkflow.planning.planning_commands import resolve_field_sources
 
     resolution = resolve_field_sources(workflow_folderpath)
     total = 0
     for name, sig in resolution.signatures.items():
         doc = (getattr(sig, "__doc__", None) or "").strip()
         total += len(name) + len(doc) + 40
-    from fastworkflow.planning_commands import visible_planning_commands
+    from fastworkflow.planning.planning_commands import visible_planning_commands
 
     for planning in visible_planning_commands(workflow_folderpath).values():
         total += sum(len(str(step)) for step in planning.template)
@@ -963,13 +963,8 @@ def run_live(arm: str, cases: Sequence[Mapping[str, Any]], workflow_folderpath: 
     """Call the provider for each case and return results in the offline schema. LIVE: only after --allow-live."""
     rows = [dict(c) for c in cases]
     if arm == ARM_JEV:
-        from fastworkflow.workflow_agent import match_planning_command
-
-        for row in rows:
-            matched = match_planning_command(row["utterance"], workflow_folderpath,
-                                             scopes=tuple(dict.fromkeys((row["head"], ""))))
-            row["top_label"] = matched[0] if matched else ""
-            row["topk"] = []
+        raise RuntimeError("the Jev arm scored workflow_agent.match_planning_command, which bd fix-zvme removed: "
+                           "planning commands are matched by the intent loop (resolution.part_intent)")
     elif arm == ARM_AGENT_PLAN:
         plans = _agent_plans(rows, workflow_folderpath)
         for row, plan in zip(rows, plans):
@@ -986,12 +981,12 @@ def _plan_names(workflow_folderpath: str) -> tuple[list[str], list[str]]:
     them: ``workflow_execution_context._workflow_command_names`` (routed commands, then planning
     commands) and ``workflow_agent.core_command_names``. Needs the workflow created (routing loaded)."""
     import fastworkflow
-    from fastworkflow.planning_commands import resolve_field_sources
-    from fastworkflow.workflow_agent import core_command_names
+    from fastworkflow.planning.planning_commands import resolve_field_sources
+    from fastworkflow.agent.workflow_agent import core_command_names
 
     routing = fastworkflow.RoutingRegistry.get_definition(workflow_folderpath)
     names = list(routing.routing_definition_map)
-    from fastworkflow.planning_commands import visible_planning_commands
+    from fastworkflow.planning.planning_commands import visible_planning_commands
 
     names += list(visible_planning_commands(workflow_folderpath))
     return names, sorted(core_command_names())
@@ -1010,8 +1005,8 @@ def _agent_plans(rows: Sequence[Mapping[str, Any]], workflow_folderpath: str,
 
     import fastworkflow
     from fastworkflow.utils import dspy_utils
-    from fastworkflow.utils.chat_adapter import CommandsSystemPreludeAdapter
-    from fastworkflow.workflow_agent import PLANNER_INSTRUCTIONS, planner_commands_text
+    from fastworkflow.agent.chat_adapter import CommandsSystemPreludeAdapter
+    from fastworkflow.agent.workflow_agent import PLANNER_INSTRUCTIONS, planner_commands_text
 
     class TaskPlannerTextSignature(dspy.Signature):
         __doc__ = PLANNER_INSTRUCTIONS
@@ -1021,7 +1016,7 @@ def _agent_plans(rows: Sequence[Mapping[str, Any]], workflow_folderpath: str,
     workflow = fastworkflow.Workflow.create(workflow_folderpath, workflow_id_str="planning-match-scoring")
     listing = planner_commands_text(workflow)
     names, core = _plan_names(workflow_folderpath)
-    lm = dspy_utils.get_lm("LLM_PLANNER", "LITELLM_API_KEY_PLANNER")
+    lm = dspy_utils.get_lm("LLM_PLANNER")
     predictor = dspy.ChainOfThought(TaskPlannerTextSignature)
     plans = []
     with dspy.context(lm=lm, adapter=CommandsSystemPreludeAdapter()):

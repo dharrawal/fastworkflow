@@ -61,7 +61,7 @@ Build and train this workflow like any other:
 ```bash
 cd fastworkflow/examples/extended_workflow_example
 fastworkflow train
-fastworkflow run
+fastworkflow run_cli
 ```
 
 The system will automatically merge commands from the base template with this workflow's commands, giving this workflow's commands precedence when there are naming conflicts.

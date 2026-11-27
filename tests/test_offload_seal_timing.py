@@ -34,12 +34,12 @@ from pathlib import Path
 import dspy
 
 import fastworkflow
-from fastworkflow import tracing
-from fastworkflow.answer_rehydration import archived_observation
+from fastworkflow.observability import tracing
+from fastworkflow.observation_offloading.answer_rehydration import archived_observation
 from fastworkflow.observability import store as obs
 from fastworkflow.observation_offloading import archive as archive_module
 from fastworkflow.observation_offloading import state as offload_state
-from fastworkflow.observation_offloading.agent import build_tool_agent
+from fastworkflow.agent.tool_agent import build_tool_agent
 from fastworkflow.observation_offloading.search import search_memory
 from fastworkflow.observation_offloading.archive import (
     PersistenceError,
@@ -53,8 +53,8 @@ from fastworkflow.observation_offloading.state import (
     reset_observation_state,
     scope_for_host,
 )
-from fastworkflow.utils.react import AskUserSuspend
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.suspension import AskUserSuspend
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 REDACTION_ENV = archive_module.REDACTION_ENV
 REDACTION_ON = archive_module.REDACTION_ON
@@ -539,7 +539,7 @@ class SuspensionRoundTripTests(LiveTurnFixture):
         self.assert_all_redacted(self.reads(agent, scope, "O1"), "during the turn")
 
         blob = json.loads(json.dumps(agent.export_suspended()))
-        ctx._awaiting_user = True
+        ctx._ask_agent_question("which one?")
         ctx.pop_active_workflow()
         ctx.close()
         reset_observation_state()

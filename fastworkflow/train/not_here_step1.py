@@ -74,7 +74,7 @@ def refuse_retired_arms(arms: Sequence[str]) -> None:
     retired = [arm for arm in arms if arm in ("control", "ratio_0_5")]
     if not retired:
         return
-    from fastworkflow.model_pipeline_training import RETIRED_ARMS
+    from fastworkflow.train.model_pipeline_training import RETIRED_ARMS
 
     raise ValueError("; ".join(f"arm {arm!r} is retired: {RETIRED_ARMS[arm]}" for arm in retired))
 

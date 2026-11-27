@@ -26,9 +26,12 @@ class Signature:
 
     class Input(BaseModel):
         member: str = Field(description="the member's name",
+                            examples=["Raj Patel", "Ann Lee", "Mia Chen"],
                             json_schema_extra={"copied_from_command_text": True})
         text: str = Field(description="what the note says, without the request around it "
                                       "(to note that someone called: 'someone called')",
+                          examples=["prefers email reminders", "card renewed",
+                                    "asked for a call back"],
                           json_schema_extra={"copied_from_command_text": True})
 
         @model_validator(mode="after")

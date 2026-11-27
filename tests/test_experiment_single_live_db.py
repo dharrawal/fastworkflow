@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from fastworkflow import state_paths
+from fastworkflow.session import state_paths
 from fastworkflow.benchmark import setup
 from fastworkflow.experiment import ExperimentNotRegisteredHere
 from fastworkflow.experiment.runner import ExperimentController, ExperimentHarness
@@ -79,7 +79,7 @@ _RUNNER = textwrap.dedent(
     """
     import json, sys
     import fastworkflow
-    from fastworkflow.command_executor import CommandExecutor
+    from fastworkflow.engine.command_executor import CommandExecutor
     from fastworkflow.experiment.runner import ExperimentHarness, ExperimentTask
 
     def invoke(cls, session, command):

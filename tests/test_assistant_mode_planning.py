@@ -2,7 +2,7 @@
 
 Assistant mode has no intent detection: an EXACTLY named planning command runs there when it is
 mechanical, and is refused with the 3.4 message, extended by the reasons, when it needs the agent.
-The classifier (``fastworkflow.planning_needs_agent``) is tested here on the library's real planning
+The classifier (``fastworkflow.planning.planning_needs_agent``) is tested here on the library's real planning
 commands and on copies with a mechanical and a needs-agent command added.
 
 The end-to-end dispatch tests run the real executor: a mechanical planning command runs by its exact
@@ -16,9 +16,9 @@ import uuid
 import pytest
 
 import fastworkflow
-from fastworkflow.command_executor import CommandExecutor
-from fastworkflow.planning_needs_agent import planning_command_needs_agent, refusal_message
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.command_executor import CommandExecutor
+from fastworkflow.planning.planning_needs_agent import planning_command_needs_agent, refusal_message
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 from tests.test_planning_command_code_steps import Model
 from tests.test_step_helpers import (
     LibraryRunner,
@@ -192,7 +192,8 @@ def test_copy_verify_parameter_is_a_reason(tmp_path):
     needs, reasons = planning_command_needs_agent(folder, "Library/count_members_checked")
     assert needs is True
     assert len(reasons) == 1
-    assert reasons[0].startswith("field 'recent' carries verify: a classifier model decides it")
+    assert reasons[0] == ("field 'recent' carries classifier_confirms: a classifier model decides it from the request "
+                          "(a parameter the request states outright, with no classifier option)")
 
 
 # ---------------------------------------------------------------- the refusal text
@@ -214,14 +215,14 @@ def test_refusal_keeps_the_3_4_sentence_and_adds_the_reasons():
 def initialized_fastworkflow():
     fastworkflow.init({})
     yield
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     RoutingRegistry.clear_registry()
 
 
 def _assistant_ctx(tmp_path, monkeypatch, name: str, text: str):
     """(ctx, folder): an assistant-mode context on a library copy holding the planning command *name*."""
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     folder = _copy_with(tmp_path, name, text)
     RoutingRegistry.clear_registry()
@@ -231,12 +232,15 @@ def _assistant_ctx(tmp_path, monkeypatch, name: str, text: str):
     ctx.bind_app_workflow(wf)
     ctx.push_active_workflow(wf)
     LibraryRunner(wf)(ctx, "startup")
-    ctx._cme_workflow.context["is_assistant_mode_command"] = True
+    ctx.start_round()
     script_command_extraction(monkeypatch, wf)
     return ctx, folder
 
 
 def test_assistant_mode_runs_a_mechanical_planning_command_by_exact_name(tmp_path, monkeypatch):
+    # An agent model is configured: the agent loop builds its LM from LLM_AGENT, and every call it makes is scripted.
+    # Before, a developer's .env that litellm loaded into the process named one.
+    monkeypatch.setitem(fastworkflow._env_vars, "LLM_AGENT", "test/agent-model")
     ctx, _ = _assistant_ctx(tmp_path, monkeypatch, "Library/count_members",
                             MECHANICAL_COUNT_MEMBERS)
     # Its phases are code steps: the scripted model only closes each phase (no step is asked for).

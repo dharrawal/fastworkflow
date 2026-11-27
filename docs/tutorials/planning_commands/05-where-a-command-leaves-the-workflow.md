@@ -22,14 +22,17 @@ class Signature:
     class Input(BaseModel):
         book_uid: str = Field(
             description="the uid of the book to open",
+            examples=["b1", "b3", "b2"],
             json_schema_extra={"from_command_output": "find_book.book_uids"},
             pattern=r"^b[0-9]+$",
         )
 
     class Output(BaseModel):
-        book_uid: str = Field(description="the uid of the book now open")
-        title: str = Field(description="the book's title")
-        author: str = Field(description="the book's author")
+        book_uid: str = Field(description="the uid of the book now open, such as b1",
+                              examples=["b1", "b3"])
+        title: str = Field(description="the book's title", examples=["Dune", "Emma"])
+        author: str = Field(description="the book's author",
+                            examples=["Frank Herbert", "Jane Austen"])
         copies: int = Field(description="how many copies the library owns")
 
     plain_utterances = [
@@ -66,9 +69,12 @@ class ResponseGenerator:
   the agent is shown the way into a context it is not in, the list it plans from (page 14)
   uses these declarations to reach the commands of contexts a plan has not entered yet, and
   code checks each plan against them, so a step planned in a context the plan never enters
-  gets a note. A command that moves the workflow into a context it does not declare gets a
-  warning the first time it does it, naming the command and the context, so a missing
-  `@descends_to` shows up in the first run.
+  gets a note. A command may move the workflow only onto a context it declares (or one that
+  inherits from it): a move onto any other context fails the command, naming the decorator to
+  write, and the workflow stays where it was, so a missing `@descends_to` shows up in the first run.
+  The target is checked when the workflow loads too: its `parents` (below) must name the
+  command's context or a context it inherits, so `Book`'s `parents = ["Library"]` is what lets
+  `Library/open_book` load.
 - **`json_schema_extra={"from_command_output": "find_book.book_uids"}`** points this field at
   another command's `Output` field: the place its value comes from. On an `Input` field,
   `from_command_output` is a **producer** hint: "call `find_book` first; one of its `book_uids` is this value". The
@@ -89,10 +95,19 @@ class ResponseGenerator:
 
 <!-- file: fastworkflow/examples/library/_commands/Book/_Book.py -->
 ```python
+from typing import Any
+
+import fastworkflow
+
 from ...application.library import Book, Library
 
 
 class Context:
+    inherits = ["Record"]
+    parents = ["Library"]
+
+    state_version = 1
+
     @classmethod
     def get_parent(cls, record: Book) -> Library:
         return record.library
@@ -100,10 +115,27 @@ class Context:
     @classmethod
     def get_displayname(cls, record: Book) -> str:
         return f"Book: {record.title} ({record.uid})"
+
+    @classmethod
+    def get_state(cls, record: Book) -> dict[str, Any]:
+        """A book is only ever reached through its library, so the snapshot is the library plus the book's uid."""
+        return {"library": record.library.to_state_dict(), "uid": record.uid}
+
+    @classmethod
+    def from_state(cls, state: dict[str, Any], workflow: fastworkflow.Workflow,
+                   *, state_version: int) -> Book:
+        if state_version != cls.state_version:
+            raise fastworkflow.UnsupportedStateVersion(state_version)
+        return Library.from_state_dict(state["library"]).books[state["uid"]]
 ```
 
-`_Book.py` describes the `Book` context's object. `get_parent` is the record that encloses a
-book, the library; `get_displayname` is how a book is named to the agent. The context class
+`_Book.py` describes the `Book` context's object. `inherits` gives a book the commands of
+`Record`. `get_parent` is the record that encloses a book, the library, and `parents` names the
+contexts whose records `get_parent` returns; the two go together, and the workflow does not load
+with one and not the other. Both declarations are lists of context names written as strings,
+read as written. `get_displayname` is how a book is named to the agent. `get_state` and `from_state` are the serialization hooks: they let the server save a session standing on a
+book and restore it, so the session can be evicted instead of held in memory for good (a context class without
+`get_state` pins its session). The context class
 says nothing about how to enter it: that is the navigation command's `@descends_to`. And here
 is one of the book's own commands:
 
@@ -122,11 +154,16 @@ class Signature:
     """List the loans of the open book: each borrower and the due date."""
 
     class Input(BaseModel):
-        start: Optional[int] = Field(default=None, description="the first row of the page")
+        start: Optional[int] = Field(default=None, ge=0, description="the first row of the page")
 
     class Output(BaseModel):
-        borrowers: list[str] = Field(description="each borrower's name, in row order")
-        due_dates: list[str] = Field(description="each loan's due date, in row order")
+        borrowers: list[str] = Field(description="each borrower's name, in row order",
+                                     examples=[["Ann Lee", "Raj Patel"], ["Mia Chen"]],
+                                     json_schema_extra={"ui": {"table": "loans"}})
+        due_dates: list[str] = Field(description="each loan's due date as an ISO date "
+                                                 "(YYYY-MM-DD), in row order",
+                                     examples=[["2026-11-02", "2026-10-20"], ["2026-10-18"]],
+                                     json_schema_extra={"ui": {"table": "loans"}})
         total: int = Field(description="how many loans the book has, on every page")
 
     plain_utterances = [
@@ -154,6 +191,7 @@ class ResponseGenerator:
 `list_loans` takes no `book_uid`. It reads the book it acts on from
 `workflow.record`: the book the workflow stands on. It is
 also **paged**, by its integer `start`; page 7 says what that asks of its `Output`.
+The `ui` `table` hint on `borrowers` and `due_dates` only tells the chat page to show the two lists as the columns of one table named `loans`; it does not change what the command returns.
 
 ## Every command leaves the workflow where it ends
 

@@ -16,13 +16,13 @@ import pytest
 from collections import Counter
 from pathlib import Path
 
-from fastworkflow.model_pipeline_training import (
+from fastworkflow.train.model_pipeline_training import (
     TrainingDataError,
     _score_heldout_context,
     split_training_data,
 )
 from fastworkflow.utils.logging import logger as fastworkflow_logger
-from fastworkflow.nlu_labels import WILDCARD_LABEL
+from fastworkflow.intent.nlu_labels import WILDCARD_LABEL
 from fastworkflow.train.selective_training import _recompute_heldout_totals
 from fastworkflow.train.heldout_evaluation import (
     REPORT_SCHEMA_VERSION,

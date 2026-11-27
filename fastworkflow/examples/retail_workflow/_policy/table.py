@@ -2,7 +2,7 @@
 
 The rules here are RETAIL CONTENT - an example of what a table compiled from
 distillation looks like, not part of the framework. The engine
-(``fastworkflow.policy_decision``) knows no workflow; this file is what a
+(``fastworkflow.policy.policy_decision``) knows no workflow; this file is what a
 workflow supplies. It is on because it is here, at ``_policy/table.py`` in the
 workflow folder; there is no setting.
 
@@ -38,7 +38,7 @@ from __future__ import annotations
 import json
 import re
 
-from fastworkflow.policy_decision import (
+from fastworkflow.policy.policy_decision import (
     USER_MESSAGE,
     USER_UTTERANCES,
     ContractFacts,
@@ -59,17 +59,6 @@ _BEFORE_FINISH = frozenset({DecisionPhase.BEFORE_FINISH})
 # ---------------------------------------------------------------------------
 # declared workflow facts
 # ---------------------------------------------------------------------------
-
-#: Commands that change the store. Declared, not inferred.
-WRITE_COMMANDS = frozenset({
-    "cancel_pending_order",
-    "modify_pending_order_address",
-    "modify_pending_order_items",
-    "modify_pending_order_payment",
-    "modify_user_address",
-    "return_delivered_order_items",
-    "exchange_delivered_order_items",
-})
 
 ORDER_ID = r"#W\d+"
 NUMERIC_ID = r"\d{6,}"  # item, product and payment ids
@@ -176,7 +165,6 @@ CONFIRM_DETAILS = {
 }
 
 FACTS = ContractFacts(
-    write_commands=WRITE_COMMANDS,
     id_patterns=(ORDER_ID, NUMERIC_ID),
     enum_arguments=ENUM_ARGUMENTS,
     intent_operations=INTENT_OPERATIONS,

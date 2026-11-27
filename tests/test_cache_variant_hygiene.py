@@ -108,7 +108,7 @@ def _fingerprint(**overrides):
         "num_personas": 2,
         "utterances_per_persona": 2,
         "personas_per_batch": 1,
-        "model": MODEL,
+        "completion_backend": MODEL,
     }
     kwargs |= overrides
     return compute_fingerprint(**kwargs)
@@ -122,7 +122,7 @@ def _param_fingerprint(**overrides):
         "num_examples": 3,
         "validation_threshold": 0.3,
         "temperature": 0.9,
-        "model": MODEL,
+        "completion_backend": MODEL,
     }
     kwargs |= overrides
     return param_compute_fingerprint(**kwargs)
@@ -162,7 +162,7 @@ def test_a_seed_utterance_edit_is_named_as_the_reason_for_the_miss(
 @pytest.mark.parametrize(
     ("override", "expected_key"),
     [
-        pytest.param({"model": "openai/gpt-4o-mini"}, "model", id="model"),
+        pytest.param({"completion_backend": "openai/gpt-4o-mini"}, "completion_backend", id="completion-backend"),
         pytest.param({"num_personas": 9}, "num_personas", id="num-personas"),
         pytest.param(
             {"utterances_per_persona": 9},
@@ -196,7 +196,7 @@ def test_the_report_shows_the_old_value_and_the_new_one(workflow_dir, log_sink):
     assert cache.store(_fingerprint(), 42, ["the original draw"])
     log_sink.records.clear()
 
-    assert cache.lookup(_fingerprint(model="openai/gpt-4o-mini"), 42) is None
+    assert cache.lookup(_fingerprint(completion_backend="openai/gpt-4o-mini"), 42) is None
     message = log_sink.messages(logging.INFO)[0]
     assert MODEL in message
     assert "openai/gpt-4o-mini" in message
@@ -214,12 +214,12 @@ def test_the_report_compares_against_the_closest_variant_not_the_newest(
     """
     cache = UtteranceCache(workflow_dir)
     # Far away in three inputs, and written LAST so recency and closeness disagree.
-    assert cache.store(_fingerprint(model="openai/gpt-4o-mini"), 42, ["one"])
+    assert cache.store(_fingerprint(completion_backend="openai/gpt-4o-mini"), 42, ["one"])
     assert cache.store(_fingerprint(), 42, ["two"])
     time.sleep(0.01)
     assert cache.store(
         _fingerprint(
-            model="anthropic/claude", num_personas=99, utterances_per_persona=99
+            completion_backend="anthropic/claude", num_personas=99, utterances_per_persona=99
         ),
         42,
         ["three"],
@@ -313,7 +313,7 @@ def _store_distinct_variants(cache, count: int) -> None:
     """Write *count* variants of one command, each a different model string."""
     for index in range(count):
         assert cache.store(
-            _fingerprint(model=f"test/model-{index}"), 42, [f"draw {index}"]
+            _fingerprint(completion_backend=f"test/model-{index}"), 42, [f"draw {index}"]
         )
         # Coarse mtime granularity would otherwise make "most recent" ambiguous.
         time.sleep(0.01)
@@ -333,7 +333,7 @@ def test_the_variant_just_written_always_survives(workflow_dir):
     cache = UtteranceCache(workflow_dir)
     _store_distinct_variants(cache, MAX_VARIANTS_PER_COMMAND + 2)
 
-    newest = _fingerprint(model="test/model-newest")
+    newest = _fingerprint(completion_backend="test/model-newest")
     assert cache.store(newest, 42, ["the newest draw"])
     assert UtteranceCache(workflow_dir).lookup(newest, 42) is not None
 
@@ -347,7 +347,7 @@ def test_the_most_recent_variants_are_the_ones_kept(workflow_dir):
     kept = [
         index
         for index in range(MAX_VARIANTS_PER_COMMAND + 2)
-        if reader.lookup(_fingerprint(model=f"test/model-{index}"), 42) is not None
+        if reader.lookup(_fingerprint(completion_backend=f"test/model-{index}"), 42) is not None
     ]
     assert kept == list(
         range(2, MAX_VARIANTS_PER_COMMAND + 2)
@@ -360,7 +360,7 @@ def test_a_write_reports_what_it_collected(workflow_dir, log_sink):
     _store_distinct_variants(cache, MAX_VARIANTS_PER_COMMAND)
     log_sink.records.clear()
 
-    assert cache.store(_fingerprint(model="test/model-extra"), 42, ["extra"])
+    assert cache.store(_fingerprint(completion_backend="test/model-extra"), 42, ["extra"])
     pruning = [m for m in log_sink.messages(logging.INFO) if "Pruned" in m]
     assert len(pruning) == 1, pruning
     assert COMMAND_NAME in pruning[0]
@@ -422,7 +422,7 @@ def test_a_slug_collision_cannot_delete_the_colliding_commands_data(workflow_dir
     assert cache.store(victim, 42, ["the colliding command's draw"])
     for index in range(MAX_VARIANTS_PER_COMMAND + 2):
         assert cache.store(
-            _fingerprint(command_name=first, model=f"test/model-{index}"),
+            _fingerprint(command_name=first, completion_backend=f"test/model-{index}"),
             42,
             [f"draw {index}"],
         )
@@ -455,7 +455,7 @@ def test_the_readme_and_foreign_files_are_never_collected(workflow_dir):
 def test_an_unparsable_variant_file_is_left_alone(workflow_dir):
     """Deleting a file nobody could read would destroy the evidence of why."""
     cache = UtteranceCache(workflow_dir)
-    corrupt = _fingerprint(model="test/model-corrupt")
+    corrupt = _fingerprint(completion_backend="test/model-corrupt")
     assert cache.store(corrupt, 42, ["will be corrupted"])
     with open(cache.entry_path(corrupt), "w", encoding="utf-8") as f:
         f.write("{ not json at all")
@@ -525,7 +525,7 @@ def test_a_surviving_variant_is_still_readable_after_a_prune(workflow_dir):
     cache = UtteranceCache(workflow_dir)
     _store_distinct_variants(cache, MAX_VARIANTS_PER_COMMAND + 2)
 
-    survivor = _fingerprint(model=f"test/model-{MAX_VARIANTS_PER_COMMAND + 1}")
+    survivor = _fingerprint(completion_backend=f"test/model-{MAX_VARIANTS_PER_COMMAND + 1}")
     with open(cache.entry_path(survivor), encoding="utf-8") as f:
         payload = json.load(f)
     assert payload["entries"]["42"]["generated_utterances"] == [

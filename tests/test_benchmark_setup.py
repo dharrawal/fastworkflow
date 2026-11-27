@@ -7,7 +7,7 @@ import sqlite3
 
 import pytest
 
-from fastworkflow import state_paths
+from fastworkflow.session import state_paths
 from fastworkflow.benchmark import setup as setup
 from fastworkflow.observability import store as obs
 from fastworkflow.benchmark.catalog import (

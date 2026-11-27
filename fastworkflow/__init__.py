@@ -1,4 +1,26 @@
+import os as _os
 import sys as _sys
+
+
+def _stop_litellm_loading_a_dotenv_file() -> None:
+    """litellm, when imported, copies the first ``.env`` it finds searching upward from its own installed file into
+    ``os.environ``, unless ``LITELLM_MODE`` is ``PRODUCTION``: that is the variable's only effect in litellm. Under the
+    precedence rule (the process environment beats the env files) such a file would silently override the workflow's
+    own env files, so fastworkflow turns that load off. A ``LITELLM_MODE`` the user set is left as it is; when litellm
+    was imported before fastworkflow, its load has already happened and this can only say so."""
+    _os.environ.setdefault("LITELLM_MODE", "PRODUCTION")
+    litellm = _sys.modules.get("litellm")
+    # litellm records the mode it was imported under; anything but PRODUCTION means it ran its .env load.
+    if litellm is not None and getattr(litellm, "litellm_mode", "DEV") != "PRODUCTION":
+        import logging
+        logging.getLogger("fastWorkflow").warning(
+            "litellm was imported before fastworkflow, so it may already have loaded a .env file into the process "
+            "environment, where its values beat the workflow's env files. Import fastworkflow first, or set "
+            "LITELLM_MODE=PRODUCTION before litellm is imported.")
+
+
+_stop_litellm_loading_a_dotenv_file()
+
 # dspy imported first leaves a lazy `openai` stand-in that breaks litellm's import;
 # touching it loads the real package. Only then, so `import fastworkflow` stays light.
 if "dspy" in _sys.modules and "openai" in _sys.modules:
@@ -16,16 +38,9 @@ from pydantic import BaseModel, model_validator
 import mmh3
 
 
-class NLUPipelineStage(Enum):
-    """Specifies the stages of the NLU Pipeline processing."""
-    INTENT_DETECTION = 0
-    INTENT_AMBIGUITY_CLARIFICATION = 1
-    INTENT_MISUNDERSTANDING_CLARIFICATION = 2
-    PARAMETER_EXTRACTION = 3
-
 class Action(BaseModel):
     command_name: str
-    command: str = ""   # only use is to display autocomplete item in the UI
+    command: str = ""   # the request text: the command text the checks and the ResponseGenerator are given
     parameters: dict[str, Optional[Union[str, bool, int, float, BaseModel]]] = {}
     workflow_id: Optional[int] = None    # when creating a new action, this is set by the workflow
 
@@ -50,6 +65,48 @@ def load_startup_action(value: str) -> "Action":
             ) from None
     return Action(**data)
 
+_STARTUP_ACTION_FILE = "startup_action.json"
+
+
+def workflow_startup_action(workflow_folder: str) -> Optional["Action"]:
+    """The startup Action in ``<workflow_folder>/startup_action.json``, or None when the folder has no such file.
+
+    A file that exists but is not a JSON object holding a valid Action is a ValueError naming the file: it is
+    never skipped silently. The one reader of the workflow's own startup file, for every entry point.
+    """
+    path = os.path.join(workflow_folder, _STARTUP_ACTION_FILE)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as file:
+            data = json.load(file)
+        if not isinstance(data, dict):
+            raise ValueError("it must hold one JSON object")
+        if unknown := sorted(set(data) - set(Action.model_fields)):
+            import difflib
+
+            close = difflib.get_close_matches(unknown[0], list(Action.model_fields), n=1)
+            raise ValueError(f"unknown key {unknown[0]!r}{f'; did you mean {close[0]!r}?' if close else ''} (its "
+                             f"keys: {', '.join(Action.model_fields)})")
+        return Action(**data)
+    except (ValueError, TypeError) as error:   # json errors and pydantic's ValidationError are ValueErrors
+        raise ValueError(f"startup action file {path!r} is not valid: {error}") from None
+
+
+def resolve_startup_action(
+    workflow_folder: str, startup_command: Optional[str], startup_action: Optional[str]
+) -> Optional["Action"]:
+    """The startup Action a process starts with: the ``--startup_action`` value when given, nothing when only
+    ``--startup_command`` was given, else the workflow folder's ``startup_action.json`` when it has one.
+    Used by the entry points (``run``, the server); a caller that builds a session directly gets no startup.
+    """
+    if startup_action:
+        return load_startup_action(startup_action)
+    if startup_command:
+        return None
+    return workflow_startup_action(workflow_folder)
+
+
 class Recommendation(BaseModel):
     summary: str
     suggested_actions: list[Action] = []
@@ -62,8 +119,8 @@ class CommandResponse(BaseModel):
     recommendations: list[Recommendation] = []
     #: The command's ``Signature.Output`` instance, when the command built one.
     #: Optional and appended (arch §12.2): a command that does not set it behaves
-    #: exactly as before. It never reaches the agent's prompt -- the agent reads
-    #: ``response`` -- but the observation archive stores it as JSON beside the
+    #: exactly as before. The agent reads ``response``, which for an ``Output`` the command
+    #: returns directly is that Output as JSON; the observation archive also stores it as JSON beside the
     #: text (``RuntimeHandleArchive.command_runs``), so later code can read exact
     #: ids, labels and counts without parsing ``response``. A pydantic model in
     #: memory; a dict once a record has been dumped and read back.
@@ -113,8 +170,9 @@ class Refused(ValueError):
     missing, keeps the others, and asks the user for those fields again, with the message
     (the targeted re-ask a ``db_lookup`` rejection gave before it was retired). Raised from
     a model validator of the command's ``Input`` (``@model_validator``), it is a refusal of the arguments; raised from
-    a ``ResponseGenerator.__call__``, it is the call's answer. A ``ValueError``, so code
-    that caught ``ValueError`` around a command's helpers keeps catching it.
+    a ``ResponseGenerator.__call__`` or a planning command's ``__result__``, it is the call's answer: the command has
+    run, so nothing is asked again, and ``field`` is named on the failed answer as its artifact ``refused_fields``
+    (``as_output``). A ``ValueError``, so code that caught ``ValueError`` around a command's helpers keeps catching it.
     """
 
     def __init__(self, message: str = "", field=None):
@@ -130,7 +188,10 @@ class Refused(ValueError):
         self.fields: tuple[str, ...] = names
 
     def as_output(self) -> "CommandOutput":
-        return CommandOutput(command_response=CommandResponse(response=str(self), success=False))
+        """The failed answer of a call that refused from its body: the message, and the fields it named as the
+        artifact ``refused_fields`` (none named: no artifact)."""
+        artifacts = {"refused_fields": list(self.fields)} if self.fields else {}
+        return CommandOutput(command_response=CommandResponse(response=str(self), success=False, artifacts=artifacts))
 
 
 class CommandOutput(BaseModel):
@@ -178,6 +239,21 @@ class CommandOutput(BaseModel):
     # scope and ``ran_in_context_clause`` is "" for a root with no printable identity.
     ran_in_context_name: Optional[str] = None
     ran_in_context_clause: Optional[str] = None
+    # True when the command is the framework's own (a file of ``fastworkflow/review/commands``, the
+    # metadata's ``framework`` flag): machinery the framework runs for itself, such as the plan and
+    # sub-task reviews, not an application result. A semantic fact about the command, set from its
+    # metadata when the output is recorded on the turn; it says nothing about how any client shows
+    # it. Optional with a default for the same §12.2 reason as ``ask_user_entry``: None means "written
+    # before this field existed" (a hand-built output, an old record), True and False are authoritative.
+    framework: Optional[bool] = None
+    # The request part this output was produced for: the 1-based number of the sub-task the framework
+    # executed it under, the same number the turn's answer gives that part in its ``### N.`` heading. Nested
+    # planning-command outputs carry the number of the sub-task that called them. None when the turn was not
+    # split into several sub-tasks, for outputs that belong to no part (the plan and sub-task reviews) and for
+    # records written before the field existed. A semantic fact about the execution, not a display instruction.
+    # A sub-task that itself covers several items is one part. Set when the output is recorded on the turn,
+    # never parsed from text; a value already set is kept.
+    sub_task: Optional[int] = None
 
     @model_validator(mode="before")
     @classmethod
@@ -337,17 +413,17 @@ def init(env_vars: dict):
     global _env_vars, CommandContextModel, RoutingDefinition, RoutingRegistry, ModelPipelineRegistry
     _env_vars = env_vars
 
-    # Reconfigure log level from env_vars (dotenv files) if LOG_LEVEL is specified
-    # This allows LOG_LEVEL to be set in fastworkflow.env files, not just OS environment
-    if log_level := env_vars.get("LOG_LEVEL"):
+    # The import-time LOG_LEVEL could see only the process environment; now that the env files are loaded, the one
+    # rule (``get_env_var``: process, then the files) applies to it too.
+    if log_level := raw_env_var("LOG_LEVEL"):
         from .utils.logging import reconfigure_log_level
         reconfigure_log_level(log_level)
 
     # init before importing other modules so env vars are available
-    from .command_context_model import CommandContextModel as CommandContextModelClass
-    from .command_routing import RoutingDefinition as RoutingDefinitionClass
-    from .command_routing import RoutingRegistry as RoutingRegistryClass
-    from .model_pipeline_training import ModelPipeline
+    from fastworkflow.core.command_context_model import CommandContextModel as CommandContextModelClass
+    from fastworkflow.core.command_routing import RoutingDefinition as RoutingDefinitionClass
+    from fastworkflow.core.command_routing import RoutingRegistry as RoutingRegistryClass
+    from fastworkflow.intent.router import ModelPipeline
 
     # Assign to global variables
     CommandContextModel = CommandContextModelClass
@@ -370,15 +446,39 @@ def init(env_vars: dict):
     with contextlib.suppress(Exception):
         import datasets  # noqa: F401 – pre-load Hugging Face datasets
 
-def get_env_var(var_name: str, var_type: type = str, default: Optional[Union[str, int, float, bool]] = None) -> Union[str, int, float, bool]:
-    """The value of *var_name*, converted to *var_type*: from the env files
-    ``fastworkflow.init`` loaded, else the process environment, else *default*
-    (returned as given)."""
-    global _env_vars
+#: Where a setting's value came from (``env_source``).
+SOURCE_PROCESS = "process environment"
+SOURCE_ENV_FILE = "workflow env file"
 
-    value = _env_vars.get(var_name)
+
+def env_source(var_name: str) -> Optional[str]:
+    """Which layer holds *var_name* under the one precedence rule (``get_env_var``): ``SOURCE_PROCESS``,
+    ``SOURCE_ENV_FILE``, or None when neither sets it."""
+    if var_name in os.environ:
+        return SOURCE_PROCESS
+    if _env_vars.get(var_name) is not None:
+        return SOURCE_ENV_FILE
+    return None
+
+
+def raw_env_var(var_name: str) -> Optional[str]:
+    """The text of *var_name* under the one precedence rule, or None when unset; no conversion and no warning.
+
+    The rule: the process environment (a shell export, a container or CI variable) wins over the env files
+    ``fastworkflow.init`` loaded, and the env files win over the code default. A process value that is the empty
+    string counts as set, as ``os.environ`` has it: it hides the env file's value.
+    """
+    value = os.environ.get(var_name)
     if value is None:
-        value = os.getenv(var_name)
+        value = _env_vars.get(var_name)
+    return None if value is None else str(value)
+
+
+def get_env_var(var_name: str, var_type: type = str, default: Optional[Union[str, int, float, bool]] = None) -> Union[str, int, float, bool]:
+    """The value of *var_name*, converted to *var_type*: from the process environment, else the env files
+    ``fastworkflow.init`` loaded, else *default* (returned as given). The one precedence rule of every setting
+    (``raw_env_var``)."""
+    value = raw_env_var(var_name)
     if value is None and default is not None:
         return default
 
@@ -429,17 +529,17 @@ def get_internal_workflow_path(workflow_name: str) -> str:
 def get_workflow_id(workflow_id_str: str) -> int:
     return int(mmh3.hash(workflow_id_str))
 
-from .active_workflow import (
+from fastworkflow.engine.active_workflow import (
     get_active_workflow,
     push_active_workflow,
     pop_active_workflow,
     clear_workflow_stack,
 )
 
-# Turn-level result types (fastworkflow.turn). Imported here — after
+# Turn-level result types (fastworkflow.core.turn). Imported here — after
 # CommandResponse and CommandOutput are defined — so the forward references
 # inside TurnResult can be resolved against this module's types.
-from fastworkflow.turn import (
+from fastworkflow.core.turn import (
     TurnResult,
     TurnOutput,
     TurnStatus,
@@ -455,29 +555,27 @@ _turn_types_namespace = {
 TurnOutput.model_rebuild(_types_namespace=_turn_types_namespace)
 TurnResult.model_rebuild(_types_namespace=_turn_types_namespace)
 
-# Observability sinks (fastworkflow.tracing / fastworkflow.metrics, both
+# Observability sinks (fastworkflow.observability.tracing / fastworkflow.observability.metrics, both
 # stdlib-only). Embedders implement TraceSink/MetricsSink and wire them via
 # WorkflowExecutionContext (observability design §3.1).
-from fastworkflow.tracing import (
+from fastworkflow.observability.tracing import (
     Span as Span,
     TraceSink as TraceSink,
     NoOpTraceSink as NoOpTraceSink,
 )
-from fastworkflow.metrics import (
+from fastworkflow.observability.metrics import (
     MetricsSink as MetricsSink,
     NoOpMetricsSink as NoOpMetricsSink,
     LoggingMetricsSink as LoggingMetricsSink,
 )
 
-# The ChatSessionDescriptor instance used to occupy this name until the eager
-# `from .chat_session import ChatSession` replaced it with the submodule.
-# Leave the name unbound so attribute access loads that submodule on demand
-# instead of publishing the descriptor, which is not the public object.
-del chat_session
+# The process's ChatSession, set by the CLI and the server (`fastworkflow.chat_session = ChatSession(...)`) and None
+# until then. The session module itself is fastworkflow.engine.chat_session, so the name no longer doubles as it.
+chat_session: Optional["ChatSession"] = None
 
-# Command class declarations (fastworkflow.command_declarations): the decorators a
+# Command class declarations (fastworkflow.core.command_declarations): the decorators a
 # ResponseGenerator or PlanGenerator carries. Stdlib-only, so imported eagerly.
-from fastworkflow.command_declarations import (
+from fastworkflow.core.command_declarations import (
     UserApproval,
     descends_to,
     user_approval_for_execution,
@@ -487,20 +585,21 @@ from fastworkflow.command_declarations import (
 # First-use re-exports. Workflow pulls numpy via kvstore; ChatSession and
 # WorkflowExecutionContext pull dspy, litellm, fastapi, and starlette.
 _LAZY_ATTRS = {
-    "Workflow": ("fastworkflow.workflow", "Workflow"),
-    "ChatSession": ("fastworkflow.chat_session", "ChatSession"),
+    "Workflow": ("fastworkflow.core.workflow", "Workflow"),
+    "ChatSession": ("fastworkflow.engine.chat_session", "ChatSession"),
     "WorkflowExecutionContext": (
-        "fastworkflow.workflow_execution_context",
+        "fastworkflow.engine.workflow_execution_context",
         "WorkflowExecutionContext",
     ),
     "CommandCancelledError": (
-        "fastworkflow.workflow_execution_context",
+        "fastworkflow.engine.workflow_execution_context",
         "CommandCancelledError",
     ),
-    "FieldOptions": ("fastworkflow.field_options", "FieldOptions"),
-    "CopiedOptions": ("fastworkflow.field_options", "CopiedOptions"),
-    "RecordNamedOptions": ("fastworkflow.field_options", "RecordNamedOptions"),
-    "ConfirmsOptions": ("fastworkflow.field_options", "ConfirmsOptions"),
+    "FieldOptions": ("fastworkflow.parameters.field_options", "FieldOptions"),
+    "CopiedOptions": ("fastworkflow.parameters.field_options", "CopiedOptions"),
+    "RecordNamedOptions": ("fastworkflow.parameters.field_options", "RecordNamedOptions"),
+    "ConfirmsOptions": ("fastworkflow.parameters.field_options", "ConfirmsOptions"),
+    "UiOptions": ("fastworkflow.parameters.field_options", "UiOptions"),
 }
 
 __all__ = (
@@ -509,6 +608,7 @@ __all__ = (
     "BaseModel",
     "ChatSession",
     "ChatSessionDescriptor",
+    "chat_session",
     "CommandCancelledError",
     "CommandContextModel",
     "CommandOutput",
@@ -525,7 +625,6 @@ __all__ = (
     "MetricsSink",
     "ModelPipelineRegistry",
     "ModuleType",
-    "NLUPipelineStage",
     "NoOpMetricsSink",
     "NoOpTraceSink",
     "Optional",
@@ -545,10 +644,7 @@ __all__ = (
     "user_approval_for_execution",
     "writes",
     "WorkflowExecutionContext",
-    "active_workflow",
-    "chat_session",
     "clear_workflow_stack",
-    "context_budget",
     "contextlib",
     "dataclass",
     "datetime",
@@ -556,14 +652,13 @@ __all__ = (
     "CopiedOptions",
     "RecordNamedOptions",
     "ConfirmsOptions",
+    "UiOptions",
     "get_active_workflow",
     "get_env_var",
     "get_fastworkflow_package_path",
     "get_internal_workflow_path",
     "get_workflow_id",
     "init",
-    "kvstore",
-    "metrics",
     "mint_turn_key",
     "mmh3",
     "model_validator",
@@ -571,16 +666,9 @@ __all__ = (
     "os",
     "pop_active_workflow",
     "push_active_workflow",
-    "session_state_store",
-    "state_paths",
-    "state_serialization",
-    "storage_keys",
     "time",
-    "tracing",
-    "turn",
     "utils",
-    "workflow",
-    "workflow_execution_context",
+    
 )
 
 

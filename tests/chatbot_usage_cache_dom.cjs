@@ -136,7 +136,7 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
   assert.equal(w.cacheStateOf(llm('a', {cache_hit: true})), 'hit');
   assert.equal(w.cacheStateOf(llm('b', {cache_hit: false})), 'miss');
   assert.equal(w.cacheStateOf(llm('c', {})), 'unknown');
-  assert.equal(w.cacheStateOf({name: 'fw.command.execute', attributes: {}}), '',
+  assert.equal(w.cacheStateOf({name: 'fw.command', attributes: {}}), '',
     'a span that is not an LLM call has no cache state at all');
 
   // The per-call detail rows say what each state means, and a hit is not
@@ -204,7 +204,7 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
      them: the page charged both while the server charged one
      (shared-response-cost). Both stay visible as calls; the money and tokens
      are counted once, under the earlier of the two. */
-  const step = {span_id: 'step', parent_span_id: null, name: 'fw.agent.step',
+  const step = {span_id: 'step', parent_span_id: null, name: 'fw.step',
                 kind: 'internal', status: 'ok', start_ns: 900, end_ns: 3000,
                 attributes: {}};
   const first = llm('first', {usage: shared, cost: 0.25, cache_hit: true,

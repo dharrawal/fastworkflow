@@ -31,8 +31,8 @@ is a JSON string too) — the `/initialize` handler accepts a request-body `star
 (takes precedence) or reads `ARGS.startup_action` as a JSON FILE path (`__main__.py`, initialize
 handler: `with open(ARGS.startup_action)`).
 
-Startup order caveat: `jwt_keys/` and `SPEEDDICT_FOLDERNAME` resolution are CWD/relative-path
-sensitive — always launch from the same working directory.
+Startup order caveat: `jwt_keys/` resolution is CWD/relative-path sensitive — always launch from
+the same working directory (persistent state is under `FASTWORKFLOW_STATE_ROOT`).
 
 Interactive docs once running: `http://localhost:<port>/docs` (Swagger, persists the Bearer
 token) and `/redoc`.
@@ -169,7 +169,7 @@ Kubernetes-style probes; a middleware suppresses access logs for 200 responses.
 
 ### POST /admin/dump_all_conversations (UNAUTHENTICATED)
 Body includes `output_folder`; scans ALL `.rdb` files under
-`SPEEDDICT_FOLDERNAME/channel_conversations` (active or not) and writes
+the workflow's conversation folder under `FASTWORKFLOW_STATE_ROOT` (active or not) and writes
 `all_conversations_<ts>.jsonl`. Returns `{"file_path": ...}`.
 
 ### POST /admin/generate_mcp_token (UNAUTHENTICATED)
@@ -193,9 +193,9 @@ Lifespan shutdown waits up to 30 s for active turns (`wait_for_active_turns_to_c
 __main__.py:340), finalizes conversations, stops chat sessions. Anything still running after
 30 s is lost (Step 3 durability unbuilt).
 
-## Related but different: fastworkflow/mcp_server.py
+## Related but different: fastworkflow/run_fastapi_mcp/mcp_server.py
 
-`fastworkflow/mcp_server.py` is NOT this server. It is a library-level example wrapper
+`fastworkflow/run_fastapi_mcp/mcp_server.py` is NOT this server. It is a library-level example wrapper
 (`FastWorkflowMCPServer`) exposing per-command JSON-RPC 2.0 `tools/list` / `tools/call` directly
 over `CommandExecutor.perform_mcp_tool_call`; it also fails fast if the workflow is untrained.
 The FastAPI server's MCP surface is the coarse invoke_agent/invoke_assistant tool set above.

@@ -25,9 +25,9 @@ from io import StringIO
 import pytest
 
 import fastworkflow
-from fastworkflow.command_directory import CommandDirectory
-from fastworkflow.command_routing import RoutingDefinition
-from fastworkflow.nlu_labels import (
+from fastworkflow.intent import router as intent_router
+from fastworkflow.core.command_directory import CommandDirectory
+from fastworkflow.intent.nlu_labels import (
     ESCALATION_LABELS,
     NON_ROUTABLE_LABELS,
     PARAMETER_VALUE_LABEL,
@@ -78,19 +78,6 @@ def wildcard_generated_utterances(cme_command_directory) -> list[str]:
     # Signature.generate_utterances ignores its workflow argument; the trainer
     # passes a real Workflow, but constructing one is not needed to exercise it.
     return generate(None, "wildcard")
-
-
-@pytest.fixture(scope="module")
-def command_name_dict() -> dict[str, str]:
-    """A real short-name -> fully-qualified-name map, built as `predict` builds it."""
-    workflow_path = os.path.join(os.path.dirname(__file__), "hello_world_workflow")
-    routing_definition = RoutingDefinition.build(workflow_path)
-    valid_command_names = set(routing_definition.get_command_names("*"))
-    assert valid_command_names, "hello_world_workflow exposes no commands in '*'"
-    return {
-        fully_qualified.split("/")[-1]: fully_qualified
-        for fully_qualified in valid_command_names
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -154,34 +141,24 @@ def test_wildcard_plain_utterances_still_expose_the_placeholders(cme_command_dir
 
 
 @pytest.mark.parametrize("label", sorted(NON_ROUTABLE_LABELS))
-def test_non_routable_label_resolves_to_none_without_keyerror(label, command_name_dict):
-    """A `parameter_value` prediction must not be looked up as a command name."""
-    assert label not in command_name_dict  # precondition: a lookup would raise
-    resolved = CommandNamePrediction.resolve_fully_qualified_command_name(
-        label, command_name_dict
-    )
-    assert resolved is None
+def test_non_routable_label_is_never_a_candidate(label):
+    """A reserved label is not looked up as a command and never offered as one (the intent loop's filter)."""
+    from fastworkflow.intent import intent_loop
 
-
-def test_missing_prediction_resolves_to_none(command_name_dict):
-    assert CommandNamePrediction.resolve_fully_qualified_command_name(
-        None, command_name_dict) is None
-    assert CommandNamePrediction.resolve_fully_qualified_command_name(
-        "", command_name_dict) is None
-
-
-def test_real_command_still_resolves(command_name_dict):
-    """Positive control: routable names are unaffected by the guard."""
-    short_name = next(iter(command_name_dict))
-    resolved = CommandNamePrediction.resolve_fully_qualified_command_name(
-        short_name, command_name_dict
-    )
-    assert resolved == command_name_dict[short_name]
+    assert intent_loop._usable([label, "Todo/add_item"], set()) == ["Todo/add_item"]
+    assert intent_loop._usable([label], set()) == []
 
 
 # ---------------------------------------------------------------------------
 # R7.1 — no reserved label may ever be offered to a user
 # ---------------------------------------------------------------------------
+
+
+def _question_for(labels, *, for_agent):
+    from fastworkflow.intent import intent_clarification, intent_loop
+
+    choices = [{"name": name, "description": "", "closest": True} for name in intent_loop._usable(labels, set())]
+    return intent_clarification.plan_choice_question("approve all", choices, ambiguous=True, for_agent=for_agent)
 
 
 def test_ambiguity_message_hides_every_non_routable_label():
@@ -191,9 +168,7 @@ def test_ambiguity_message_hides_every_non_routable_label():
         "ReviewTicket/certify_approve",
         "ReviewTicket/show_review_item",
     ]
-    message = CommandNamePrediction._formulate_ambiguous_command_error_message(
-        predictions, run_as_agent=False
-    )
+    message = _question_for(predictions, for_agent=False)
     for label in NON_ROUTABLE_LABELS:
         assert label not in message, f"non-routable label '{label}' offered as a command"
     assert "certify_approve" in message
@@ -202,15 +177,10 @@ def test_ambiguity_message_hides_every_non_routable_label():
 
 @pytest.mark.parametrize("run_as_agent", [True, False])
 def test_ambiguity_message_lists_only_local_candidates(run_as_agent):
-    message = CommandNamePrediction._formulate_ambiguous_command_error_message(
-        ESCALATION_FAILURE_TOPK, run_as_agent=run_as_agent
-    )
-    listed = [
-        line.strip()
-        for line in message.splitlines()
-        if line.strip() in {"certify_approve", "show_review_item", WILDCARD_LABEL}
-    ]
+    message = _question_for(ESCALATION_FAILURE_TOPK, for_agent=run_as_agent)
+    listed = [line.split(". ", 1)[1].split("/")[-1] for line in message.splitlines() if line[:2] in {"1.", "2.", "3."}]
     assert listed == ["certify_approve", "show_review_item"]
+    assert WILDCARD_LABEL not in message
 
 
 # ---------------------------------------------------------------------------
@@ -222,6 +192,55 @@ def test_ambiguity_message_lists_only_local_candidates(run_as_agent):
 # ---------------------------------------------------------------------------
 
 
+def _fake_heads(app_workflow, *contexts):
+    """A trained-looking head for each context: the router double answers for it."""
+    from fastworkflow.intent import intent_detector
+
+    for context in contexts:
+        folder = intent_detector.head_folder(app_workflow.folderpath, context)
+        os.makedirs(os.path.join(folder, "tinymodel.pth"), exist_ok=True)
+        for name in ("label_encoder.pkl", "threshold.json"):
+            with open(os.path.join(folder, name), "w") as marker:
+                marker.write("{}")
+
+
+def _todo_pair(tmp_path):
+    workflow_path = tmp_path / "todo_list_workflow"
+    shutil.copytree(
+        os.path.join(os.path.dirname(__file__), "todo_list_workflow"),
+        workflow_path,
+        ignore=shutil.ignore_patterns("___command_info", "___workflow_contexts", "___convo_info", "__pycache__"),
+    )
+    app_workflow = fastworkflow.Workflow.create(
+        workflow_folderpath=str(workflow_path),
+        workflow_id_str=f"wildcard-predict-{tmp_path.name}",
+    )
+    cme_workflow = fastworkflow.Workflow.create(
+        workflow_folderpath=fastworkflow.get_internal_workflow_path("command_metadata_extraction"),
+        parent_workflow_id=app_workflow.id,
+        workflow_context={"app_workflow": app_workflow},
+    )
+    return app_workflow, cme_workflow
+
+
+class _PredictingRouter:
+    labels: list = []
+
+    def __init__(self, model_artifact_path):
+        self.modelpipeline = self
+
+    def predict(self, command):
+        return self.predict_with_details(command)[0]
+
+    def predict_with_details(self, command):
+        # The details stay empty because this seam injects labels rather than deriving them from a confidence the
+        # double does not have.
+        return list(type(self).labels), {}
+
+
+# With the planner key an unsure local answer goes to the remote decision model (the chain, fix-o5wi.2);
+# this asserts what happens without one.
+@pytest.mark.usefixtures("no_planner_key")
 def test_predict_mixed_topk_logs_suppressed_escalation_and_prompts_locally(
     tmp_path, monkeypatch, setup_test_environment
 ):
@@ -234,75 +253,46 @@ def test_predict_mixed_topk_logs_suppressed_escalation_and_prompts_locally(
     per-workflow policy. A top-k ``parameter_value`` likewise carries no
     evidence that an ancestor can help.
     """
-    workflow_path = tmp_path / "todo_list_workflow"
-    shutil.copytree(
-        os.path.join(os.path.dirname(__file__), "todo_list_workflow"),
-        workflow_path,
-        ignore=shutil.ignore_patterns(
-            "___command_info",
-            "___workflow_contexts",
-            "___convo_info",
-            "__pycache__",
-        ),
-    )
-    app_workflow = fastworkflow.Workflow.create(
-        workflow_folderpath=str(workflow_path),
-        workflow_id_str=f"wildcard-predict-{tmp_path.name}",
-    )
-    cme_workflow = fastworkflow.Workflow.create(
-        workflow_folderpath=fastworkflow.get_internal_workflow_path(
-            "command_metadata_extraction"
-        ),
-        parent_workflow_id=app_workflow.id,
-        workflow_context={"app_workflow": app_workflow},
-    )
+    app_workflow, cme_workflow = _todo_pair(tmp_path)
+    _fake_heads(app_workflow, app_workflow._current_command_context_name, "*")
 
-    predictions = [
-        WILDCARD_LABEL,
-        "TodoList/add_child_todoitem",
-        "TodoList/get_properties",
-    ]
+    class Router(_PredictingRouter):
+        labels = [WILDCARD_LABEL, "TodoList/add_child_todoitem", "TodoList/get_properties"]
 
-    class PredictingRouter:
-        def __init__(self, model_artifact_path):
-            self.modelpipeline = self
-
-        def predict(self, command):
-            return self.predict_with_details(command)[0]
-
-        def predict_with_details(self, command):
-            # Same shape as the double in test_intent_detection_fuzzy_tie.py:
-            # predict delegates so the two cannot drift, and the details stay
-            # empty because this seam injects labels rather than deriving them
-            # from a confidence the double does not have.
-            return predictions, {}
-
-    monkeypatch.setattr(intent_detection, "CommandRouter", PredictingRouter)
+    monkeypatch.setattr(intent_router, "CommandRouter", Router)
     prediction = CommandNamePrediction(cme_workflow)
     log_output = StringIO()
     log_handler = logging.StreamHandler(log_output)
     intent_detection.logger.addHandler(log_handler)
     try:
-        result = prediction.predict(
-            "TodoList",
-            "approve everything from this app at once",
-            fastworkflow.NLUPipelineStage.INTENT_DETECTION,
-        )
+        result = prediction.predict("approve everything from this app at once")
     finally:
         intent_detection.logger.removeHandler(log_handler)
 
-    assert result.command_name is None
-    assert result.error_msg is not None
-    listed = [
-        line.strip()
-        for line in result.error_msg.splitlines()
-        if line.strip()
-        in {"add_child_todoitem", "get_properties", WILDCARD_LABEL}
-    ]
-    assert listed == ["add_child_todoitem", "get_properties"]
+    assert result.command is None
+    assert result.outcome == "ambiguous"
+    assert list(result.ambiguous) == ["TodoList/add_child_todoitem", "TodoList/get_properties"]
     warning = log_output.getvalue()
     assert "Top-k escalation signal discarded" in warning
     assert "suppressed=['wildcard']" in warning
+    assert prediction.trace["escalation_labels_discarded"] == [WILDCARD_LABEL]
+
+
+@pytest.mark.usefixtures("no_planner_key")
+@pytest.mark.parametrize("label", sorted(NON_ROUTABLE_LABELS))
+def test_a_reserved_label_from_the_head_resolves_to_no_command(tmp_path, monkeypatch, setup_test_environment, label):
+    """The head's reserved answer (the escalation signal, a bare value) is never looked up as a command: the decision
+    names no command, and a bare value is reported as one."""
+    app_workflow, cme_workflow = _todo_pair(tmp_path)
+    _fake_heads(app_workflow, app_workflow._current_command_context_name, "*")
+
+    class Router(_PredictingRouter):
+        labels = [label]
+
+    monkeypatch.setattr(intent_router, "CommandRouter", Router)
+    intent = CommandNamePrediction(cme_workflow).predict("france")
+    assert intent.command is None and intent.outcome == "none"
+    assert intent.bare_value is (label == PARAMETER_VALUE_LABEL)
 
 
 def test_escalation_signals_are_reported_for_diagnostics():

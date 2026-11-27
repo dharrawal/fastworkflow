@@ -13,8 +13,8 @@ Depth: 1 (lower bound; open steps name no command)
 
 | input | type | default | sample | classifier_confirms / classifier_decides | copied_from_command_text / record_named_in_command_text | description |
 |---|---|---|---|---|---|---|
-| `member` | str | required | `<member>` |  | yes | the member's name |
-| `text` | str | required | `<text>` |  | yes | what the note says, without the request around it (to note that someone called: 'someone called') |
+| `member` | str | required | `Raj Patel` |  | yes | the member's name |
+| `text` | str | required | `prefers email reminders` |  | yes | what the note says, without the request around it (to note that someone called: 'someone called') |
 
 - `member` must be written in the command text (`copied_from_command_text`).
 - `text` must be written in the command text (`copied_from_command_text`).
@@ -34,7 +34,7 @@ Depth: 1 (lower bound; open steps name no command)
 
 For the sample inputs; no input changes them.
 
-1. `find_member query=<member>`
-2. `open_member with the uid of the <member> match`
-3. `add_note text=<text>`
+1. `find_member query="Raj Patel"`
+2. `open_member with the uid of the "Raj Patel" match`
+3. `add_note text="prefers email reminders"`
 4. `say whose record the note was added to`

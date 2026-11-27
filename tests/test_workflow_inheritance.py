@@ -5,8 +5,8 @@ import tempfile
 import os
 import json
 from pathlib import Path
-from fastworkflow.command_directory import CommandDirectory
-from fastworkflow.workflow_inheritance_model import WorkflowInheritanceModel, WorkflowInheritanceModelValidationError
+from fastworkflow.core.command_directory import CommandDirectory
+from fastworkflow.core.workflow_inheritance_model import WorkflowInheritanceModel, WorkflowInheritanceModelValidationError
 
 
 class TestWorkflowInheritanceModel:

@@ -16,8 +16,8 @@ import pytest
 from dotenv import dotenv_values
 from pydantic import BaseModel, Field
 
-from fastworkflow import planning_commands as pc
-from fastworkflow.utils.signatures import InputForParamExtraction
+from fastworkflow.planning import planning_commands as pc
+from fastworkflow.parameters.signatures import InputForParamExtraction
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -61,7 +61,7 @@ def test_another_verify_word_is_still_a_load_error():
     class Bad(BaseModel):
         flag: bool = Field(default=False, description="a flag", json_schema_extra={"verify": "only"})
 
-    with pytest.raises(pc.PlanningCommandFormatError, match='verify: "only" is removed: write'):
+    with pytest.raises(pc.PlanningCommandFormatError, match='verify: "only" is removed: leave the key out'):
         pc.option_params(Bad, "bad")
 
 
@@ -107,7 +107,7 @@ def test_a_plain_verify_field_keeps_the_planner_filled_value_until_a_sure_verdic
 
 
 def test_the_preview_marks_a_verify_alone_field():
-    from fastworkflow import command_preview
+    from fastworkflow.planning import command_preview
     rows = command_preview._inputs_section(_command())
     assert any(r.startswith("| `leave_out_author` |") and "| decides |" in r for r in rows), rows
     assert any(r.startswith("| `loans` |") and "| yes |" in r for r in rows), rows

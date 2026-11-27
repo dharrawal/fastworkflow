@@ -1,10 +1,9 @@
 """Integration tests for the live-session cap and checkpoint retention (Release C).
 
 `MAX_LIVE_SESSIONS` is an operator control, and an operator control whose
-documented default outranks the container override is not one. `get_env_var`
-reads the workflow env file *before* `os.environ`, so a resolver built on it alone
-would let the env file outrank the container variable — the value would
-silently be whatever the workflow env file said.
+documented default outranks the container override is not one. The one
+precedence rule (`fastworkflow.get_env_var`) has the process environment win
+over the workflow env file, so the container variable is the one that counts.
 
 Lowering the cap is also what makes eviction routine, which is what makes
 checkpoint retention necessary: a unique-channel workload writes a snapshot per
@@ -37,16 +36,6 @@ def hello_world_workflow_path():
     if not os.path.isdir(workflow_path):
         pytest.skip(f"hello_world workflow not found at {workflow_path}")
     return workflow_path
-
-
-@pytest.fixture
-def env_files():
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    env_file = os.path.join(project_root, "env", ".env")
-    passwords_file = os.path.join(project_root, "passwords", ".env")
-    if not os.path.isfile(env_file) or not os.path.isfile(passwords_file):
-        pytest.skip("env files missing for FastAPI tests")
-    return env_file, passwords_file
 
 
 @pytest.fixture
@@ -94,11 +83,7 @@ def test_the_default_is_the_lowered_cap():
 
 
 def test_the_process_environment_wins(monkeypatch):
-    """The container variable must be reachable, which is the reason for the resolver.
-
-    get_env_var reads the workflow env file before os.environ, so a resolver
-    written the obvious way would let the file outrank this.
-    """
+    """The container variable must be reachable: the process environment wins over the env file."""
     monkeypatch.setenv("MAX_LIVE_SESSIONS", "137")
 
     value, source = resolve_max_live_sessions()
@@ -192,7 +177,7 @@ def test_retention_never_reclaims_a_channel_the_process_still_holds(app_module):
         assert manager.checkpoint_for_shutdown([]) >= 1
 
         # Retain nothing by age or count, so only the protection can spare it.
-        from fastworkflow.checkpoint_store import RetentionPolicy
+        from fastworkflow.session.checkpoint_store import RetentionPolicy
 
         report = manager.reap_checkpoints(
             RetentionPolicy(max_age_seconds=1e-6, max_channels=0)

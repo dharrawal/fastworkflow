@@ -27,7 +27,7 @@ const d = w.document;
 assert.equal(typeof w.buildRecordedStepNode, 'function');
 
 function rendered(attributes) {
-  const span = {span_id: 's1', name: 'fw.agent.step', status: 'ok', start_ns: 1,
+  const span = {span_id: 's1', name: 'fw.step', status: 'ok', start_ns: 1,
                 end_ns: 2, attributes: attributes};
   const node = w.buildRecordedStepNode(span, 1, 'earlier result', {}, {s1: span});
   const box = d.createElement('div');

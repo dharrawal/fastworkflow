@@ -16,19 +16,20 @@ from fastapi import HTTPException
 
 import fastworkflow
 from fastworkflow.observability import store as obs
-from fastworkflow import state_paths, tracing
-from fastworkflow.checkpoint_store import (
+from fastworkflow.session import state_paths
+from fastworkflow.observability import tracing
+from fastworkflow.session.checkpoint_store import (
     PROTOCOL_VERSION,
     ChannelCheckpointStore,
     CheckpointIdentity,
 )
-from fastworkflow.command_executor import CommandExecutor
+from fastworkflow.engine.command_executor import CommandExecutor
 from fastworkflow.experiment.runner import ExperimentController
 from fastworkflow.run_fastapi_mcp import checkpoint
 from fastworkflow.run_fastapi_mcp.utils import refuse_registered_token_reissue
-from fastworkflow.session_state_store import SCHEMA_VERSION as PENDING_SCHEMA_VERSION
-from fastworkflow.turn import TurnOutput, TurnResult, TurnStatus
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.session.session_state_store import SCHEMA_VERSION as PENDING_SCHEMA_VERSION
+from fastworkflow.core.turn import TurnOutput, TurnResult, TurnStatus
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 
 @pytest.fixture
@@ -375,7 +376,7 @@ def test_normal_and_suspended_checkpoint_round_trip_epoch(
     assert generation == 1
     assert runtime["experiment_claim"]["epoch"] == claim.epoch
     assert PROTOCOL_VERSION == 2
-    assert PENDING_SCHEMA_VERSION == 4
+    assert PENDING_SCHEMA_VERSION == 8
 
 
 def test_registered_reissue_refused_but_ordinary_runtime_is_unchanged(controller):

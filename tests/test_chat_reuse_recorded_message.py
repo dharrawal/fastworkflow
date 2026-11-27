@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pytest
 
-from fastworkflow import state_paths
+from fastworkflow.session import state_paths
 from fastworkflow.observability import store as obs
 from fastworkflow.run_chatbot import server as run_chatbot_server
 
@@ -40,7 +40,6 @@ from tests.test_chat_streaming_and_artifacts import (
 # under the name it is bound to either way, but a test taking `app_module` as a
 # parameter would be flagged as redefining an import (F811).
 hello_world_path = chat_fixtures.hello_world_path
-env_files = chat_fixtures.env_files
 app_module = chat_fixtures.app_module
 
 MULTILINE_TURN = "20260825T130000-reuse1"

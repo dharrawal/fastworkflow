@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import fastworkflow
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
-from fastworkflow.workflow_agent import core_command_names
+from fastworkflow.agent.workflow_agent import core_command_names
 
 
 class Signature:  # noqa: D101

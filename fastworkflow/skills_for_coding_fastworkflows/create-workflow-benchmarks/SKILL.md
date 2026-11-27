@@ -19,8 +19,8 @@ Use the printed authenticated local URL. Selecting a workflow normally starts it
 an existing session when only authoring or reviewing. Follow the project's runtime permissions.
 
 1. Choose **New benchmark**, enter a title and optional description, and add task rows.
-   Rows without a prompt are skipped on save. A benchmark saved with no tasks is a draft
-   that later saves update in place; it cannot have experiments until it has tasks.
+   Blank rows are skipped on save. A benchmark saved with no tasks is a draft that later
+   saves update in place; it cannot have experiments until it has tasks.
 2. **Save benchmark** assigns the benchmark ID, `v1`, and new task IDs. Keep those identities
    when adding execution code; do not derive task IDs from conversation topics.
 3. **Edit benchmark**: changing tasks saves a new version whose tasks are frozen. Existing task
@@ -28,15 +28,14 @@ an existing session when only authoring or reviewing. Follow the project's runti
    version. The title (one per benchmark) and each version's description stay editable,
    for older versions too; a save that changes only those updates the version in place.
 4. Select the intended version, then **New experiment**. Copy the generated experiment ID
-   and task IDs to the driver. This creates a registration, initially without an evidence store.
+   and task IDs to the driver. This creates a registration only; nothing runs. Its runs per
+   task (default 1) and user-simulator flag are fixed at registration (set them from Python or
+   HTTP, or change runs per task with **Duplicate this setup**); the runner takes both from it.
 5. Once the driver records execution, use **Open execution records** to inspect it.
 
-The left navigation is **benchmark → experiment → conversation**. Ad-hoc conversations appear
-under **ad-hoc conversations → UTC date → conversation**. Node clicks show details on the right
-and expand/collapse the left tree. Turns and trace components are inspected on the right;
-only the right pane shows the complete breadcrumb. Tasks are listed in benchmark/experiment
-details, not as another required left-tree level. Sidebar filters and the old Experiments/
-Benchmarks navigation buttons are no longer part of this flow.
+The left navigation is **benchmark → version → experiment → conversation**; conversations
+outside experiments appear under **ad-hoc conversations → UTC date → conversation**. Clicking a
+node shows its details on the right, where tasks, turns and trace components are inspected.
 
 ## Author the same objects from Python
 
@@ -51,7 +50,8 @@ version = benchmark_setup.save_benchmark(workflow_folderpath, {
     "tasks": [{"prompt": "Show the delivery status of my most recent order."}],
 })
 registration = benchmark_setup.create_experiment(
-    workflow_folderpath, version["benchmark_id"], version["version"]
+    workflow_folderpath, version["benchmark_id"], version["version"],
+    runs_per_task=1,        # optional; 1 to 100
 )
 experiment_id = registration["experiment_id"]
 task_ids = registration["task_ids"]
@@ -63,7 +63,8 @@ for new rows. A stale version raises `BenchmarkSetupConflict`: reload and reconc
 silently overwriting another edit. Existing descriptions and opaque payloads survive this editor;
 new simple-editor tasks have empty descriptions and payloads.
 
-For explicit IDs or richer driver data, use `fastworkflow.benchmark.catalog.write_version`:
+For explicit IDs or richer driver data, use `fastworkflow.benchmark.catalog.write_version`
+(`description` is required text; each task needs a `payload` object):
 
 ```python
 from fastworkflow.benchmark.catalog import write_version
@@ -92,19 +93,20 @@ or automatic graders. Use the conventions implemented by the application's runne
 
 | Object | Location / contract |
 |---|---|
-| Benchmark version | `benchmark_versions` row of the live `observability.sqlite3` (the only copy); schema `fastworkflow-benchmark/1`; tasks immutable once present. Title and per-version description live in `benchmark_titles` / `benchmark_version_descriptions` and are laid over the manifest by `load_version`; the digest is of the bytes first saved |
-| UI experiment registration | `experiment_registrations` table of the live `observability.sqlite3`; pin, task IDs, and bound/deleted state |
+| Benchmark version | `benchmark_versions` row of the live `observability.sqlite3` (the only copy); schema `fastworkflow-benchmark/1`; tasks immutable once present. Title and per-version description live in `benchmark_titles` / `benchmark_version_descriptions` and are laid over the manifest by `load_version`; the digest is of the stored manifest bytes |
+| Experiment registration | `experiment_registrations` table of the same DB; pin, task IDs, runs per task, user-simulator flag, and registered/bound/deleted state |
 | Execution evidence | `observability.sqlite3`; experiments, attempts, conversations, turns, spans and annotations |
 | Pre-run review, if used | `<workflow>/experiment_setups/reviews.sqlite3`; configuration revisions and review decisions |
 
 The manifest contains `schema`, `benchmark_id`, `version`, `description`, `tasks`, and optional
 `title`. Each task has a unique nonempty `task_id`, `description` (default empty), a required
-object `payload`, and optional text `prompt`. Tasks must be nonempty as a collection; a prompt
-may be empty. JSON values must be native and finite; convert dataclasses explicitly.
+object `payload`, and optional text `prompt`. An empty task list is a draft. JSON values must
+be native and finite; convert dataclasses explicitly.
 
 Use `load_version`, `list_benchmarks`, and `list_versions` to read the catalog. `load_version`
-returns `digest_sha256`, computed from the file bytes. Never edit or reformat a published version;
-write a new version instead. Benchmark task definitions stay in files, not evidence tables.
+returns `digest_sha256`, computed from the stored bytes. A version with tasks cannot be changed;
+write a new version instead. Task definitions live only in the catalog; evidence rows refer to them
+by task ID.
 
 The experiment pin is the complete triple `benchmark_id`, `benchmark_version`,
 `benchmark_digest_sha256`. Editing a benchmark never changes an existing experiment's pin.
@@ -116,8 +118,9 @@ when comparing results. Do not silently replace a pinned corpus with the latest 
 Read [runner-reference.md](runner-reference.md) when implementing execution or pre-run review.
 The driver supplies messages, fixtures, an outcome grader and any ask-user response policy;
 FastWorkflow does not interpret arbitrary `payload` keys or run a task just because it has a prompt.
-The controller validates the registered task set and pin and binds the registration to its real
-store when declaring attempts. One registration cannot be rebound to a different evidence store.
+When the runner declares the attempts, the controller checks the pin and that the declared task
+set is exactly the version's tasks, then marks the registration bound: from then on it cannot be
+deleted and its description cannot be edited.
 
 Use the app's existing HTTP collector when that is its measured execution path; use
 `ExperimentHarness` when in-process execution is appropriate. Do not switch transports merely

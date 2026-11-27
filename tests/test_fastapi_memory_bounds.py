@@ -31,7 +31,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import fastworkflow
-from fastworkflow.conversation_history_io import extract_turns_from_history
+from fastworkflow.session.conversation_history_io import extract_turns_from_history
 from fastworkflow.run_fastapi_mcp import server_memory
 from fastworkflow.run_fastapi_mcp.turns import TurnRegistry, submit_turn
 from fastworkflow.run_fastapi_mcp.utils import (
@@ -86,16 +86,6 @@ def hello_world_workflow_path():
     if not os.path.isdir(workflow_path):
         pytest.skip(f"hello_world workflow not found at {workflow_path}")
     return workflow_path
-
-
-@pytest.fixture
-def env_files():
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    env_file = os.path.join(project_root, "env", ".env")
-    passwords_file = os.path.join(project_root, "passwords", ".env")
-    if not os.path.isfile(env_file) or not os.path.isfile(passwords_file):
-        pytest.skip("env files missing for FastAPI tests")
-    return env_file, passwords_file
 
 
 @pytest.fixture
@@ -987,3 +977,42 @@ def test_readiness_probe_reports_memory_metrics_on_demand(app_module):
     }
     assert set(memory["conversations"]) == {"turns", "approx_bytes"}
     assert json.dumps(memory)
+
+
+def test_first_turn_warm_up_loads_the_heads_the_first_turn_classifies_with(app_module):
+    """fix-6jsz: after ``warm_first_turn`` the first classification of a turn builds no ``CommandRouter`` or
+    ``ModelPipeline``: the caches hold the same instances before and after it, under the keys the turn path uses."""
+    from pathlib import Path
+
+    import fastworkflow
+    from fastworkflow.intent.router import CommandRouter, ModelPipeline
+    from fastworkflow.agent.run_listing import head_answers
+
+    folder = str(Path(app_module.ARGS.workflow_path).resolve())
+    root = os.path.join(folder, "___command_info")
+    for cache in (CommandRouter._instances_cache, ModelPipeline._instances_cache):
+        for key in [k for k in cache if (k if isinstance(k, str) else k[0]).startswith(root)]:
+            del cache[key]   # start cold, whatever an earlier test loaded
+
+    app_module.warm_first_turn(app_module.ARGS.workflow_path)
+
+    routers = dict(CommandRouter._instances_cache)
+    pipelines = dict(ModelPipeline._instances_cache)
+    assert os.path.join(root, "global") in routers
+
+    workflow = fastworkflow.Workflow.create(
+        app_module.ARGS.workflow_path, workflow_id_str=f"warm_{uuid.uuid4().hex[:8]}", workflow_context={})
+    assert workflow.folderpath == folder
+    answers = head_answers(workflow, "add two numbers")
+    assert answers, "the first turn's classification found no trained head"
+    assert CommandRouter._instances_cache == routers
+    assert ModelPipeline._instances_cache == pipelines
+    assert all(CommandRouter._instances_cache[k] is v for k, v in routers.items())
+
+
+def test_first_turn_warm_up_never_raises(app_module, tmp_path):
+    (tmp_path / "___command_info" / "broken").mkdir(parents=True)
+    for name in ("tinymodel.pth", "label_encoder.pkl", "threshold.json"):
+        (tmp_path / "___command_info" / "broken" / name).write_text("not a model")
+    app_module.warm_first_turn(str(tmp_path))
+    app_module.warm_first_turn(str(tmp_path / "missing"))

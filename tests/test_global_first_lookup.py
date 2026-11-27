@@ -8,7 +8,7 @@ lookup (3.9) answers them first, nearest scope first.
 
 Each test runs on a COPY of the trained library example (``___command_info`` included), with real
 application objects. Nothing is trained. The classifier heads are the copy's own; a spy on
-``CommandNamePrediction.predict`` records which heads are asked, in order, and calls through.
+``intent_detector.engine_for`` records which heads are asked, in order, and calls through.
 
 Where a test needs a phrasing the trained head is confident on, the phrasing is found by probing the
 copy's real heads inside the test, not hard-coded. A probe that finds none skips the test with the
@@ -21,10 +21,8 @@ import shutil
 import pytest
 
 import fastworkflow
-from fastworkflow import NLUPipelineStage
-from fastworkflow._workflows.command_metadata_extraction import intent_detection
-from fastworkflow._workflows.command_metadata_extraction._commands import wildcard
-from fastworkflow.command_executor import CommandExecutor
+from fastworkflow.intent import intent_detector
+from fastworkflow.engine.command_executor import CommandExecutor
 from tests.test_turn_result_capture import (  # noqa: F401 - shared fixtures
     initialized_fastworkflow,
 )
@@ -69,28 +67,35 @@ UNSURE_CANDIDATES = [
 ]
 
 
-def _unsure_phrasing(cme, heads=("*", "Book")) -> str:
+def _answer_of(app, head: str, phrasing: str):
+    """What the copy's real head *head* answers for *phrasing* (the local model alone, no remote model)."""
+    engine = intent_detector.engine_for(app.folderpath, head, allow_matcher=False)
+    return engine.decide(phrasing)
+
+
+def _unsure_phrasing(app, heads=("*", "Book")) -> str:
     """A candidate that none of *heads* (the copy's real heads) is confident on, so it never reaches
     parameter extraction."""
-    predictor = intent_detection.CommandNamePrediction(cme)
     for phrasing in UNSURE_CANDIDATES:
-        if all(not (out.command_name and not out.error_msg)
-               for out in (predictor.predict(head, phrasing, NLUPipelineStage.INTENT_DETECTION)
-                           for head in heads)):
+        if all(_answer_of(app, head, phrasing).kind != intent_detector.MATCH for head in heads):
             return phrasing
     pytest.skip(f"no one of {len(UNSURE_CANDIDATES)} unsure candidates is unanswered by "
                 f"{', '.join(heads)} on this copy: nothing to route")
 
 
-#: Natural phrasings for the global command set_root_context (messaging_app_4), probed, not trusted.
-ROOT_PHRASINGS = [
-    "set the root context",
-    "set root context",
-    "set up the root context",
-    "make the root context",
-    "set the root",
-    "change the root context",
-]
+
+ROOM_STATUS = '''"""room_status: say which record a global command was bound to (test copy only)."""
+import fastworkflow
+
+
+class Signature:
+    """Say how the chat room stands."""
+
+
+class ResponseGenerator:
+    def __call__(self, workflow: fastworkflow.Workflow, command: str, input) -> str:
+        return f"room_status bound to {type(workflow.record).__name__}"
+'''
 
 
 @pytest.fixture
@@ -115,6 +120,9 @@ def messaging_on_a_user(tmp_path, initialized_fastworkflow, monkeypatch):
     if app.root is None:
         app.root = ChatRoom()
     root = app.root
+    # The copy's only global command, set_root_context, is its startup command: it has no Signature, so it runs only
+    # as the startup action and no name reaches it (bd fix-ftdl.7.5). A global command with a Signature, test copy only.
+    (folder / "_commands" / "room_status.py").write_text(ROOM_STATUS, encoding="utf-8")
     user = User(root, "alice")
     root.add_user(user)
     app.record = user
@@ -158,15 +166,24 @@ def library_on_a_book(tmp_path, initialized_fastworkflow, monkeypatch):
 
 
 def _heads_asked(monkeypatch) -> list[str]:
-    """Spy on ``CommandNamePrediction.predict``: record each head asked, in order, and call through."""
+    """Spy on the engines the decision asks: record each head asked, in order, and call through."""
     asked: list[str] = []
-    original = intent_detection.CommandNamePrediction.predict
+    original = intent_detector.engine_for
 
-    def spy(self, command_context_name, command, nlu_pipeline_stage):
-        asked.append(command_context_name)
-        return original(self, command_context_name, command, nlu_pipeline_stage)
+    def spy(workflow_folderpath, context_name, *args, **kwargs):
+        engine = original(workflow_folderpath, context_name, *args, **kwargs)
+        if engine is None:
+            return engine
+        decide = engine.decide
 
-    monkeypatch.setattr(intent_detection.CommandNamePrediction, "predict", spy)
+        def recording(utterance):
+            asked.append(context_name)
+            return decide(utterance)
+
+        engine.decide = recording
+        return engine
+
+    monkeypatch.setattr(intent_detector, "engine_for", spy)
     return asked
 
 
@@ -176,37 +193,33 @@ def _route(cme, text: str):
         cme, fastworkflow.Action(command_name="wildcard", command=text))
 
 
-def _probe(cme, candidates, head: str):
+def _probe(app, candidates, head: str):
     """The candidates the copy's real head *head* names confidently, as (phrasing, command) pairs."""
-    predictor = intent_detection.CommandNamePrediction(cme)
     hits = []
     for phrasing in candidates:
-        out = predictor.predict(head, phrasing, NLUPipelineStage.INTENT_DETECTION)
-        if out.command_name and not out.error_msg and not out.answered_bare_value and not out.is_cme_command:
-            hits.append((phrasing, out.command_name))
+        answer = _answer_of(app, head, phrasing)
+        if answer.kind == intent_detector.MATCH and answer.confident:
+            hits.append((phrasing, answer.labels[0]))
     return hits
 
 
-def test_a_global_command_is_run_from_a_user_record_bound_to_the_root_when_the_global_head_is_confident(
+def test_a_global_command_is_run_from_a_user_record_bound_to_the_root_when_the_global_scope_is_confident(
         messaging_on_a_user, monkeypatch, setup_test_environment):
     """Confident global first, on a workflow with a context below its root (messaging_app_4: the root
-    is the ChatRoom, the record a User). The global head names set_root_context confidently on the
-    probed phrasings; it is asked first, and the walk names it bound to the root. The routing is read
-    from the CME walk's artifacts: the command itself is not executed here (the root can be set once)."""
+    is the ChatRoom, the record a User). The global command is found in the global scope and bound to
+    the root. The routing is read from the CME walk's artifacts: the command itself is not executed here
+    (the root can be set once)."""
     app, cme, root, user = messaging_on_a_user
-    hits = [phrasing for phrasing, name in _probe(cme, ROOT_PHRASINGS, "*")
-            if name.split("/")[-1] == "set_root_context"]
-    if not hits:
-        pytest.skip(f"the copy's global head names set_root_context confidently on none of "
-                    f"{len(ROOT_PHRASINGS)} probed phrasings: nothing to route")
     asked = _heads_asked(monkeypatch)
 
-    out = _route(cme, hits[0])
+    out = _route(cme, "room status")
 
-    assert asked[0] == "*"
+    # "room status" is the global command's name in words, within the fuzzy bound: it is decided by name, in the
+    # global scope, before any head is asked (the intent loop's name layers come first).
+    assert asked == []
     artifacts = out.command_response.artifacts
-    assert artifacts["command_name"].split("/")[-1] == "set_root_context"
-    assert app.record is root
+    assert artifacts["command_name"].split("/")[-1] == "room_status"
+    assert app._command_context_for_response_generation is root
     assert artifacts["ran_on_context_name"] == "ChatRoom"
     assert app._current_command_context is user
     assert app.root is root
@@ -216,12 +229,10 @@ def test_an_own_command_phrasing_from_the_book_still_routes_to_the_book_command(
         library_on_a_book, monkeypatch, setup_test_environment):
     """The global head is asked first, is not confident here, and the Book head's command wins."""
     app, cme, library = library_on_a_book
-    hits = [(phrasing, name) for phrasing, name in _probe(cme, OWN_CANDIDATES, "Book")
-            if name.startswith("Book/")]
-    if not hits:
-        pytest.skip(f"the Book head names a Book command confidently on none of "
-                    f"{len(OWN_CANDIDATES)} probed phrasings")
-    phrasing, expected = hits[0]
+    from tests.conftest import script_matcher
+
+    phrasing, expected = OWN_CANDIDATES[1], "Book/show_book"
+    script_matcher(monkeypatch, {phrasing: {expected: 0.95, "none": 0.0}})
     asked = _heads_asked(monkeypatch)
 
     out = _route(cme, phrasing)
@@ -232,12 +243,15 @@ def test_an_own_command_phrasing_from_the_book_still_routes_to_the_book_command(
     assert app.record is app._current_command_context
 
 
+# With the planner key an unsure local answer goes to the remote decision model (the chain, fix-o5wi.2);
+# this asserts what happens without one.
+@pytest.mark.usefixtures("no_planner_key")
 def test_a_phrasing_the_global_head_is_unsure_about_falls_through_to_todays_flow(
         library_on_a_book, monkeypatch, setup_test_environment):
     """The global head answers ambiguous: its result is discarded, '*' is not asked again, and the
     current head and the climb are asked as today (Book, then its root Library)."""
     app, cme, library = library_on_a_book
-    unsure = _unsure_phrasing(cme)
+    unsure = _unsure_phrasing(app)
     asked = _heads_asked(monkeypatch)
 
     out = _route(cme, unsure)
@@ -249,6 +263,7 @@ def test_a_phrasing_the_global_head_is_unsure_about_falls_through_to_todays_flow
     assert artifacts.get("ran_on_context_name") != "Library" or "command_name" not in artifacts
 
 
+@pytest.mark.usefixtures("no_planner_key")   # with the key, a scope with no head is a matcher scope
 def test_without_a_trained_global_head_the_global_ask_is_skipped_silently(
         tmp_path, initialized_fastworkflow, monkeypatch, setup_test_environment):
     """A copy whose '*' head has no artifacts: the global ask is skipped, nothing is loaded for it,
@@ -262,10 +277,10 @@ def test_without_a_trained_global_head_the_global_ask_is_skipped_silently(
     )
     library = _root_library(app)
     app.record = library.books["b1"]
-    assert wildcard._global_head_trained(app) is False
+    assert intent_detector.global_head_trained(app) is False
     asked = _heads_asked(monkeypatch)
 
-    _route(cme, _unsure_phrasing(cme, heads=("Book",)))
+    _route(cme, _unsure_phrasing(app, heads=("Book",)))
 
     assert "*" not in asked
     assert asked[0] == "Book"
@@ -287,28 +302,34 @@ def test_an_exact_name_from_the_book_is_answered_nearest_first_and_skips_the_glo
     out = _route(cme, "list_branches")
     assert out.command_response.artifacts["command_name"] == "Library/list_branches"
     assert out.command_response.artifacts["ran_on_context_name"] == "Library"
-    assert app.record is library
-    # Its scope's own head answers the exact name (3.9); the global-first ask is not made.
-    assert asked == ["Library"]
+    assert app._command_context_for_response_generation is library
+    # A name typed exactly is decided by name (3.9), with no head asked at all.
+    assert asked == []
 
 
 # ----------------------------------------------------------------------------------------------
-# The rule itself, on real CommandNamePrediction outputs (no model, no mocks).
+# The rule itself, on the step answers the walk reads (no model, no mocks).
 # ----------------------------------------------------------------------------------------------
 
 def test_the_confident_global_rule_takes_only_a_confident_application_command():
-    from fastworkflow._workflows.command_metadata_extraction.intent_detection import CommandNamePrediction
+    import dataclasses
+    from typing import Optional
 
-    Output = CommandNamePrediction.Output
+    @dataclasses.dataclass
+    class Output:
+        command_name: Optional[str] = None
+        error_msg: Optional[str] = None
+        answered_bare_value: bool = False
+        is_cme_command: bool = False
+
+    confident = intent_detector.confident_application_command
     # Confident: one application command, no ambiguity, not a bare value, not a CME command.
-    assert wildcard._confident_global_command(Output(command_name="library_hours"))
+    assert confident(Output(command_name="library_hours"))
     # Unsure: the head answered ambiguous (error_msg set): discarded.
-    assert not wildcard._confident_global_command(
-        Output(command_name="library_hours", error_msg="Ambiguous intent error"))
-    assert not wildcard._confident_global_command(Output(command_name=None, error_msg="ambiguous"))
+    assert not confident(Output(command_name="library_hours", error_msg="Ambiguous intent error"))
+    assert not confident(Output(command_name=None, error_msg="ambiguous"))
     # Non-routable: a decline (wildcard resolves to no command), a bare value (parameter_value).
-    assert not wildcard._confident_global_command(Output(command_name=None))
-    assert not wildcard._confident_global_command(Output(command_name=None, answered_bare_value=True))
+    assert not confident(Output(command_name=None))
+    assert not confident(Output(command_name=None, answered_bare_value=True))
     # A framework command is never the global answer.
-    assert not wildcard._confident_global_command(
-        Output(command_name="IntentDetection/go_up", is_cme_command=True))
+    assert not confident(Output(command_name="IntentDetection/go_up", is_cme_command=True))

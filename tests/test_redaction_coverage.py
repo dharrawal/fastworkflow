@@ -42,7 +42,8 @@ import sqlite3
 import pytest
 
 import fastworkflow
-from fastworkflow import TurnStatus, tracing
+from fastworkflow import TurnStatus
+from fastworkflow.observability import tracing
 from fastworkflow.observability import feedback
 from fastworkflow.observability import store as obs
 
@@ -113,7 +114,7 @@ def _span(**overrides) -> tracing.Span:
     fields = {
         "span_id": "span-1",
         "trace_id": "20260828T000000.000000Z-aaaaaaaaaaaa",
-        "name": tracing.SPAN_COMMAND_EXECUTE,
+        "name": tracing.SPAN_COMMAND,
         "kind": tracing.KIND_INTERNAL,
         "channel_id": "chan-1",
         "command_name": "get_user_details",

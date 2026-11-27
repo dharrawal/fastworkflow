@@ -6,43 +6,54 @@ Companion to [SKILL.md](SKILL.md). Read when a specific number or a specific sym
 
 ### Surface of a context
 
-Own commands (the `.py` files in `_commands/<Context>/`, excluding leading-underscore files) plus
-the transitive closure over `base`. Files directly under `_commands/` are the global `*` context.
+Own commands (the `.py` files in `_commands/<Context>/`, excluding its `_<Context>.py` and `__init__.py`) plus
+the transitive closure over `inherits`, an own command hiding an inherited one with the same leaf name.
+Files directly under `_commands/` are the global `*` context.
 
 ```python
 def surface(ctx):
     out = set(own.get(ctx, []))
-    for b in inheritance.get(ctx, {}).get("base", []):
+    for b in inherits.get(ctx, []):   # each context's declared inherits
         out |= surface(b)
     return out
 ```
 
-Cross-check against the framework's own loader rather than trusting the hand computation — it
-validates the JSON at the same time:
+Cross-check against the framework's own loader rather than trusting the hand computation. It
+checks the declarations at the same time:
 
 ```python
-from fastworkflow.command_context_model import CommandContextModel
-m = CommandContextModel.load(workflow_path)
-m.commands(ctx)                  # effective surface, qualified names
-m.get_ancestor_contexts(ctx)     # enclosing contexts, from the live chain's get_parent
+import fastworkflow
+fastworkflow.init(env_vars={})
+crd = fastworkflow.RoutingRegistry.get_definition(workflow_path)
+crd.context_model.commands(ctx)                # surface: own and inherited execution commands
+crd.context_model.inherited_base_contexts(ctx) # its bases, transitively
+crd.get_command_names(ctx)                     # the surface plus the four core commands
+crd.get_planning_command_names(ctx)            # its planning commands, own and inherited
 ```
 
-### Label space of a context
+The enclosing contexts are each context's declared `parents` (`CommandContextModel.declared_parents(workflow_path)`);
+at run time they are whatever each `get_parent` returns for the live record, which must be one of them. The generated
+`_object_models/<workflow>.md` (`fastworkflow command preview`) shows both declarations and the entering commands.
 
-What its classifier must actually separate:
+### Label space and mask
+
+In the default `embedding` layout the one head separates every label of the workflow at once:
+every command, `parameter_value` and `wildcard`. A context's mask is what it may answer:
 
 ```
 len(surface(ctx))
++ its planning commands (own and inherited)
 + 4 core commands
-+ 1 for `wildcard` (the "not here" class, one seed per foreign command)
 ```
 
-Enclosing commands are not labels of the context; they are foreign commands, each with one seed in
-the "not here" class.
+that is, `crd.get_command_names(ctx)` plus `crd.get_planning_command_names(ctx)`. Enclosing and
+global commands are outside the mask: a request near one of them is handed on, not answered. The
+training report's cross-fit confused pairs are read over the whole workflow.
 
-Track the sum over enterable contexts as the headline size metric. Base-tier contexts are not
-enterable — nothing navigates into them — so exclude them from that sum. Note that they are still
-trained, which is wasted work worth flagging if the framework does not skip them.
+In the `per_context` layout each context's head has exactly these labels plus `wildcard`, its "not
+here" class with one seed per command outside the mask. There, track the sum of label counts over
+enterable contexts as the headline size metric (base-tier contexts are not enterable: nothing
+navigates into them).
 
 ### Deriving the containment graph
 
@@ -53,16 +64,17 @@ pat_ctx = re.compile(r"workflow\.record\s*=\s*(\w+)")
 pat_new = re.compile(r"(\w+)\s*=\s*(\w+)\(")   # resolve the local back to its class
 ```
 
-The result maps `Context/command -> entered class`. It shows which contexts each command can enter
-(`descends_to`). There is no hierarchy file to diff against: parents are whatever each `get_parent`
-returns for the live object.
+The result maps `Context/command -> entered class`. Each such command must declare that class
+with `@descends_to`; a move it does not declare fails the command at run time, and a target whose `parents` do not
+name the command's context fails the command's load. Diff the entered classes against the generated object model's
+"Entered by" column.
 
 ### Which producers a context needs
 
 Collect the producer edges declared by each context's own commands: the `"from_command_output": "<command>.<field>"`
-entries of `json_schema_extra` on their `Input` fields (`declare-parameter-producers`). Once `command preview` has resolved
-them they are stored as `json_schema_extra["available_from"]`, which is what a script reads from a
-loaded command, so a source scan looks for the `from_command_output` entries:
+entries of `json_schema_extra` on their `Input` fields (`declare-parameter-producers`). When a
+command loads they are resolved into `json_schema_extra["available_from"]`, which is what a script
+reads from a loaded command; a source scan looks for the `from_command_output` entries:
 
 ```python
 re.finditer(r"from_command_output\"\s*:\s*(\[[^\]]*\]|['\"][^'\"]*['\"])", src)
@@ -73,26 +85,25 @@ therefore the minimum base it can inherit.
 
 ## Failure-mode catalogue
 
-### Own commands lose to a lone `wildcard`
+### Own commands are handed on instead of answered
 
-**Symptom.** Several of a context's own commands come back as `wildcard`, so the runtime escalates
-and the user is told the request cannot be served here.
+**Symptom.** Requests for a context's own commands come back as a which-command question (or cost a
+remote-model call) although the right command is among the candidates. In the `per_context` layout
+the same cause shows as own commands coming back as a lone `wildcard`.
 
-**Cause.** The wildcard class is disproportionate — usually after a surface was narrowed without the
-foreign seeds in the "not here" class not shrinking — *and* a foreign command is lexically close. The commonest offender
-is a global navigation verb whose seeds describe what the user wants done rather than where they
-want to be.
+**Cause.** A command outside the mask is lexically close and ranks ahead, usually after a surface
+was narrowed (Rule 8). The commonest offender is a navigation verb, global or in an enclosing
+context, whose seeds describe what the user wants done rather than where they want to be.
 
-**Fix.** Make the ancestor's seeds strictly navigational (Rule 7). Verify by checking that the
+**Fix.** Make the navigation seeds strictly navigational (Rule 7). Verify by checking that the
 context's own commands recover, not just that the totals moved.
 
 ### A command absorbs phrasings belonging to a parent
 
-**Symptom.** A descendant command fires on utterances that name the parent's entity, and the
-escalation report shows those cases as "escalation label present but not alone".
+**Symptom.** A descendant command fires on utterances that name the parent's entity.
 
-**Cause.** The parent's command arrives as a wildcard negative and its seeds are unanchored, so the
-descendant's own seeds are the closer match for anything vague.
+**Cause.** The parent's seeds are unanchored, so the descendant's own seeds are the closer match for
+anything vague.
 
 **Fix.** Anchor the ancestor side to its entity noun (Rule 6). Leave the descendant's pronouns alone.
 
@@ -114,10 +125,11 @@ clarify an enum parameter value before proposing the merge.
 
 ### A context routes well but never escalates
 
-**Symptom.** High routing accuracy, low escalation recall.
+**Symptom.** High routing accuracy, but requests for an enclosing record's commands never run
+there: the commands are not among the candidates, or run on the wrong record.
 
 **Cause.** The enclosing record is not on the live chain: `get_parent` returns `None` or an object
-other than the record that holds the current one. The walk never reaches that record's commands.
+other than the record that holds the current one. That record's commands are off the lookup path.
 
 **Fix.** Check `get_parent` against the live object (Rule 1). No seed work reaches a scope the walk
 does not visit.
@@ -127,7 +139,8 @@ does not visit.
 **Symptom.** A context nobody touched moves several points; a framework command such as `go_up`
 swings from near-perfect to near-zero.
 
-**Cause.** Training variance.
+**Cause.** The retrain itself: the one head is refitted over every command on any change, and a
+fine-tuned layout adds training variance.
 
 **Fix.** Nothing. Confirm by checking whether the moved cases are reachable from the change at all,
 and report them as churn.
@@ -135,17 +148,18 @@ and report them as churn.
 ## Near-duplicate separability
 
 A pairwise separability score below the report's overlap threshold means a classifier restricted to
-just those two commands barely beats chance — the pair is unresolvable by any amount of context.
+just those two commands barely beats chance: the pair is unresolvable by any amount of context.
 Treat that report as the primary design signal, ahead of accuracy: accuracy tells you a context is
 struggling, separability tells you which two labels to fix.
 
 Read three fields together:
 
-- `separability` — how badly they collide.
-- `shared_contexts` — whether they collide on a surface. Empty does **not** mean safe: they may still
-  collide through a foreign command's seed in the wildcard set, which this field does not show. Check
-the foreign seeds recorded in the head's training signature.
-- `terms_only_in_a` / `terms_only_in_b` / `shared_terms` — the shared terms are what the seeds must
+- `separability`: how badly they collide.
+- `shared_contexts`: whether both are in one context's mask. Empty does **not** mean safe: in the
+  `embedding` layout every command is a label of the one head, so a command outside the mask still
+  competes (it makes the context's own command be handed on); in `per_context`, through its seed in
+  the "not here" class. The training report's cross-fit confused pairs show the head's own view.
+- `terms_only_in_a` / `terms_only_in_b` / `shared_terms`: the shared terms are what the seeds must
   stop relying on; the exclusive terms are what they must lean on.
 
 ## What to update when a command moves between contexts
@@ -154,13 +168,13 @@ A command's qualified name is `<Folder>/<command>`, so moving it is a rename. Up
 
 - the module's location on disk, and the scaffold or generator that emits it
 - every `from_command_output` producer edge naming it (`"from_command_output": "<Context>/<command>..."`)
-- the seed-utterance table keyed by `(context, command)`
-- the inheritance model, and any `inherits:` prose in generated docs
+- every import of its module by path (a planning command's `from ..Book.list_loans import Signature`)
+- any `inherits = [...]` or `parents = [...]` naming its context (when the folder itself moves), and the regenerated object model
 - benchmark and end-to-end case tables
 - navigation docs and command maps
 
 Then retrain. Cached generated utterances are fingerprinted on the seed list *and* the command
-name, so a rename invalidates exactly the moved commands and reuses the rest — prefer a plain
+name, so a rename invalidates exactly the moved commands and reuses the rest. Prefer a plain
 retrain over forcing full regeneration, which is slower and discards reproducibility for
 untouched commands. The full list of fingerprint inputs, and what forces a full retrain anyway, is
 in the `train-and-publish-models` skill.

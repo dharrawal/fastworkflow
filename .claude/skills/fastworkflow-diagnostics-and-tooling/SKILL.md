@@ -77,7 +77,7 @@ walkthroughs: [references/observed-outputs.md](references/observed-outputs.md).
 | `check_cache_freshness.py <wf>` | will the JSON snapshots be trusted or rebuilt, and why — recomputes the v2.22.1 fingerprint, prints verdict + the 5 most recently modified command sources (the usual culprit) | ~7 s (imports fastworkflow) |
 | `trace_turn.py {turns,turn,response,explain}` | list recorded turns / print one turn's span tree + artifacts from `observability.sqlite3`; read a saved server turn-response body; `explain` prints the capture recipes per topology | instant (stdlib only) |
 | `collect_model_metrics.py <wf> [--context C]` | per-command top-1 accuracy, confusion pairs, ambiguity rate, DistilBERT-fallback rate of a TRAINED context, scored on stored seed utterances with the exact runtime decision rule | ~10–60 s/context (loads 2 transformer models, CPU ok) |
-| `replay_code_steps.py <wf> --db PATH [--experiment ID]` | which stored `fw.skill.phase` plan steps code would run (fix-6llp): counts per reason, phases mechanical end to end, leading-run length, page-1 runs, every dropped note; DB opened read-only, nothing runs | ~10 s (imports fastworkflow and the workflow's commands) |
+| `replay_code_steps.py <wf> --db PATH [--experiment ID]` | which stored `fw.phase` plan steps code would run (fix-6llp): counts per reason, phases mechanical end to end, leading-run length, page-1 runs, every dropped note; DB opened read-only, nothing runs | ~10 s (imports fastworkflow and the workflow's commands) |
 
 Copy-paste smoke test (works offline, no API keys, uses the bundled internal
 workflow which is trained on any machine that has ever run `fastworkflow
@@ -201,7 +201,7 @@ question (candidate work item for the tau2 program).
 
 ### Live CLI traces (agent mode)
 
-`fastworkflow run` renders CommandTraceEvents while the spinner runs — dim
+`fastworkflow run_cli` renders CommandTraceEvents while the spinner runs — dim
 yellow `Agent >` (raw command), dim yellow/green `Workflow >` (resolved
 command + response), dim orange for failed steps. Methodology and event model:
 `docs/agent_mode_live_command_traces.md` — the design doc for this feature;
@@ -211,7 +211,7 @@ override were never implemented (traces are always on; verified by grep), and
 action-log records are appended by `workflow_agent.py`, not
 `command_executor.py` as §5 claims (§5 also describes the action.jsonl mirror,
 retired in Phase 7). Consumer loop:
-`fastworkflow/run/__main__.py:229-267`.
+`fastworkflow/run_cli/__main__.py:229-267`.
 Known open bug fix-5fv (code-reading evidence only, never reproduced): the CLI
 spinner may hang on agent-mode ask_user because the clarification is enqueued
 without the trace sentinel.
@@ -288,16 +288,16 @@ Re-verification one-liners for volatile facts:
 
 | Fact | Re-verify with |
 |---|---|
-| fingerprint fields/coverage | `sed -n '603,655p' fastworkflow/command_directory.py` |
-| freshness gate | `sed -n '384,407p' fastworkflow/command_routing.py` |
+| fingerprint fields/coverage | `sed -n '603,655p' fastworkflow/core/command_directory.py` |
+| freshness gate | `sed -n '384,407p' fastworkflow/core/command_routing.py` |
 | snapshot JSON keys | `python -c "import json;print(list(json.load(open('tests/example_workflow/___command_info/command_directory.json'))))"` |
 | model artifact filenames per context | `ls fastworkflow/_workflows/command_metadata_extraction/___command_info/global/` |
 | param_labeled naming | `grep -n "param_labeled" fastworkflow/train/__main__.py` |
-| CommandRouter decision rule / thresholds | `sed -n '289,335p' fastworkflow/model_pipeline_training.py` |
-| trained-check semantics | `grep -n "def is_workflow_trained" -A 15 fastworkflow/model_pipeline_training.py` |
+| CommandRouter decision rule / thresholds | `sed -n '289,335p' fastworkflow/train/model_pipeline_training.py` |
+| trained-check semantics | `grep -n "def is_workflow_trained" -A 15 fastworkflow/train/model_pipeline_training.py` |
 | action-log lifecycle + clear points | `grep -rn "clear_action_log\|append_action_log" fastworkflow/*.py` |
-| observability DB path + schema | `grep -n "def observability_db" -A 8 fastworkflow/state_paths.py; grep -n "_SCHEMA_STATEMENTS" -A 45 fastworkflow/observability/store.py` |
-| trace event emission sites | `grep -n "CommandTraceEvent" fastworkflow/workflow_agent.py fastworkflow/workflow_execution_context.py` |
+| observability DB path + schema | `grep -n "def observability_db" -A 8 fastworkflow/session/state_paths.py; grep -n "_SCHEMA_STATEMENTS" -A 45 fastworkflow/observability/store.py` |
+| trace event emission sites | `grep -n "CommandTraceEvent" fastworkflow/agent/workflow_agent.py fastworkflow/engine/workflow_execution_context.py` |
 | server trace dict keys | `grep -n "_format_trace_event" -A 14 fastworkflow/run_fastapi_mcp/utils.py` |
 | turn response body keys | `grep -n "def render_turn_response" -A 40 fastworkflow/run_fastapi_mcp/turns.py` |
 | destructive drain still unfixed | `grep -n "Destructive trace drain" fastworkflow/run_fastapi_mcp/turns.py` |

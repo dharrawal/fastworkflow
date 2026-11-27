@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 import fastworkflow
 from fastworkflow import ModuleType
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import ParameterExtraction
-from fastworkflow.utils.signatures import InputForParamExtraction
+from fastworkflow.parameters.signatures import InputForParamExtraction
 
 ONE_HOOK = Path(__file__).parent / "one_hook_workflow"
 

@@ -28,7 +28,7 @@ pass^k mean and how tau-bench runs work, see `fastworkflow-taubench-reference`.
 | 7 | RLM memory-layer results: 15 enriched τ²-retail tasks, baseline 2/15 → 5/15 post-mitigation; the 2 original passes NOT among the 5; ~10 min/task | Article PDFs, tau2 plan | TEAM-PRIVATE | Also methodologically fragile per the plan's own critical review (unmeasured pre-memory baseline, bundled mitigations, disjoint pass sets = variance). Raw traces are already public (github.com/Programiz-007/fastworkflow_RLM_Traces) but the analysis is not. E19 (publish fork + artifacts) is the path to citability |
 | 8 | Everything in the tau2 plan / RSI report / Forge spec (E0–E25, Option N v2, pass^3 gates, "RSI for reliability" novelty claim) | untracked docs/ | TEAM-PRIVATE | The novelty claim ("no treatment of determinism/variance/pass^k in Weng 2026's cited RSI systems") is a literature-gap assertion, not yet a result |
 | 9 | Any pass^k / reliability number for fastWorkflow | nowhere yet | (none exists) | E0 harness is unbuilt (no `eval/`); until it exists no reliability number may be stated, even internally-measured ones |
-| 10 | "1-shot adaptation from intent-detection mistakes… corrections can be persisted" | README.md:373 | BACKED (mechanism), unaudited (extent) | Implemented: `fastworkflow/cache_matching.py:53 store_utterance_cache` persists utterance→label corrections with frequency; consumed by the CME intent pipeline. Test coverage of the cross-session persistence claim unaudited — don't elaborate beyond the README sentence |
+| 10 | (retired) "1-shot adaptation from intent-detection mistakes" | README | REMOVED | The similarity cache was removed (fix-o5wi.8); the README now says learning from corrections is planned. |
 | 11 | "Your application code is never modified" | README.md:61, 186, 407 | BACKED | Architecture invariant AND marketing promise — breaking it is a positioning event, not just a code change |
 | 12 | integrate-chat-agent skill is "the fastest path for a non-trivial app" | README.md:179, 407 | BACKED (as recommendation) | A deliberate June 2026 repositioning (commit 1d3a6aa) of hand-authored commands over `fastworkflow build`. Whether Forge supersedes both is an open strategy question |
 
@@ -71,4 +71,3 @@ pass^k mean and how tau-bench runs work, see `fastworkflow-taubench-reference`.
 | Plan errata still open | `grep -n -e "verify the single correct ACM DOI" -e 2512.24601 docs/tau2_retail_reliability_implementation_plan.md` |
 | Trace repo still the only public RLM artifact | `grep -rn "recall_from_memory" fastworkflow/` (expect empty) |
 | E0 harness existence | `ls eval/ docs/experiments/ 2>&1` |
-| cache_matching backing for claim 10 | `grep -n "def store_utterance_cache" fastworkflow/cache_matching.py` |

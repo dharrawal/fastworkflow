@@ -2,6 +2,7 @@
 how the planner's template renders unknown facts (and the tests made on them), the load-time
 step check, fastworkflow.Refused and the default generate_utterances. Offline,
 workflow-neutral."""
+import functools
 import inspect
 import shutil
 import types
@@ -12,14 +13,16 @@ import pytest
 from pydantic import BaseModel, Field, model_validator
 
 import fastworkflow
-from fastworkflow import command_directory, planning_commands, workflow_agent
-from fastworkflow.command_executor import call_response_generator
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.core import command_directory
+from fastworkflow.agent import workflow_agent
+from fastworkflow.planning import planning_commands
+from fastworkflow.engine.command_executor import call_response_generator
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 from fastworkflow.planning import (StepFormError, command_inputs_for_steps, count,
                                 count_and_names_read, phase, planned, planning_command_parts, run)
-from fastworkflow.planning_phases import (Placeholder, check_bindings, concatenated_steps,
+from fastworkflow.planning.planning_phases import (Placeholder, check_bindings, concatenated_steps,
                                        phase_steps, runs_now, stops_after)
-from tests.test_planning_commands import HOURS_RECIPE, _match_only, recipe_env  # noqa: F401 - recipe_env is a fixture
+from tests.test_planning_commands import HOURS_RECIPE, recipe_env  # noqa: F401 - recipe_env is a fixture
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401 - shared fixture
 
 
@@ -96,7 +99,7 @@ def test_run_named_writes_the_id_or_the_match_wording():
         "open_item_by_uid with the uid of the Dune match"
     # Without a row id declared (checked in test_run_step_helper.py), named= needs the id input.
     with command_inputs_for_steps({"open_x": types.SimpleNamespace(
-            Input=type("I", (BaseModel,), {"__annotations__": {"x_uid": int}}))}):
+            Input=type("I", (BaseModel,), {"__annotations__": {"x_ref": int}}))}):
         with pytest.raises(StepFormError):
             run("open_x", named="Dune")
     with pytest.raises(StepFormError):
@@ -117,7 +120,7 @@ def test_filters():
 
 
 def test_a_placeholder_reads_as_where_the_fact_comes_from_and_every_test_on_it_is_true():
-    from fastworkflow.planning_phases import tests_noted
+    from fastworkflow.planning.planning_phases import tests_noted
 
     p = Placeholder("find")
     assert str(p.uids[0]) == "<find.uids[0]>" and str(p.only_uid("A")) == "<find.only_uid()>"
@@ -174,7 +177,7 @@ def test_return_empty_is_decided_when_the_phase_is_reached_calling_the_method_on
 
 
 def test_a_method_that_fails_at_run_time_fails_its_phase():
-    from fastworkflow.planning_phases import PhaseError
+    from fastworkflow.planning.planning_phases import PhaseError
 
     class Broken:
         def find(self, input) -> Found:
@@ -465,7 +468,7 @@ def test_a_subclass_that_adds_phases_writes_call_with_the_order():
                 return []
             return ["list_parts (full list)"]
 
-    from fastworkflow.planning_phases import PhaseError
+    from fastworkflow.planning.planning_phases import PhaseError
 
     with pytest.raises(PhaseError, match=r"Parts adds the phase\(s\) parts to those of "
                        r"test_planning_command_plan.Lookup: write __phases__\(self, input\) returning the phases a call "
@@ -561,7 +564,7 @@ def test_call_cannot_return_a_base_method_the_class_overrides():
         def item(self, input, find):
             return []
 
-    from fastworkflow.planning_phases import PhaseError
+    from fastworkflow.planning.planning_phases import PhaseError
 
     with pytest.raises(PhaseError, match=r"returns a base's item that the class overrides: "
                                          r"return self.item"):
@@ -595,14 +598,14 @@ def test_phases_from_several_bases_need_call():
     class Both(Lookup, Other):
         pass
 
-    from fastworkflow.planning_phases import PhaseError
+    from fastworkflow.planning.planning_phases import PhaseError
 
     with pytest.raises(PhaseError, match=r"Both has phases from test_planning_command_plan.Lookup, test_planning_command_plan.*Other: write __phases__"):
         planned(Both)
 
 
 def test_output_and_a_return_annotation_on_one_phase_is_a_load_error():
-    from fastworkflow.planning_phases import PhaseError
+    from fastworkflow.planning.planning_phases import PhaseError
 
     class Both:
         @phase(output=lambda input: Found)
@@ -612,6 +615,68 @@ def test_output_and_a_return_annotation_on_one_phase_is_a_load_error():
     with pytest.raises(PhaseError, match=r"phase 'find' of .*Both has both @phase\(output=\.\.\.\) and a "
                                          r"return annotation: use the return annotation"):
         planned(Both)
+
+
+def test_a_fixed_output_model_is_a_load_error_that_says_what_output_takes():
+    from fastworkflow.planning.planning_phases import PhaseError
+
+    class Fixed:
+        @phase(output=Found)
+        def find(self, input):
+            return ["find it"]
+
+    with pytest.raises(PhaseError, match=r"phase 'find' of .*Fixed: @phase\(output=\.\.\.\) takes a "
+                                         r"function of input \(lambda input: \.\.\.\), got Found"):
+        planned(Fixed)
+
+
+def test_a_fixed_output_model_is_refused_beside_other_options_too():
+    from fastworkflow.planning.planning_phases import PhaseError
+
+    class Fixed:
+        def find(self, input) -> Found:
+            return ["find it"]
+
+        @phase(over="find.uids", output=Found)
+        def opened(self, uid):
+            return ["open it"]
+
+    with pytest.raises(PhaseError, match=r"phase 'opened' of .*Fixed: @phase\(output=\.\.\.\) takes a function of input"):
+        planned(Fixed)
+
+
+def _found_of_input(input):
+    return Found
+
+
+def _found_of_kind(kind, input):
+    return Found
+
+
+@pytest.mark.parametrize("value", [Found, Found.model_construct(), None, "Found", lambda: Found, lambda x: Found,
+                                   lambda input, other: Found,
+                                   functools.partial(_found_of_kind)])
+def test_output_that_is_not_a_function_of_input_alone_is_a_load_error(value):
+    from fastworkflow.planning.planning_phases import PhaseError
+
+    class Bad:
+        @phase(output=value)
+        def find(self, input):
+            return ["find it"]
+
+    with pytest.raises(PhaseError, match=r"phase 'find' of .*Bad: @phase\(output=\.\.\.\) takes a function of input"):
+        planned(Bad)
+
+
+@pytest.mark.parametrize("value", [lambda input: Found, _found_of_input,
+                                   functools.partial(_found_of_kind, "book")])
+def test_output_that_is_a_function_of_input_alone_loads(value):
+    class Good:
+        @phase(output=value)
+        def find(self, input):
+            return ["find it"]
+
+    assert [p.name for p in planned(Good)(_input())] == ["find"]
 
 
 def test_output_alone_and_a_return_annotation_alone_both_load():
@@ -694,16 +759,15 @@ def test_a_no_input_phased_planning_command_call_has_no_arguments():
     assert call.args == {} and call.plan == "" and [p.name for p in call.phases] == ["sections", "late"]
 
 
-def test_planner_keeps_instructions_and_the_adapt_template(request, monkeypatch):
+def test_planner_keeps_instructions_and_the_adapt_template(request):
     assert workflow_agent.PLANNER_INSTRUCTIONS.strip().startswith("Carefully review the user_query")
 
     folder = request.getfixturevalue("recipe_env").wf.folderpath
-    _match_only(monkeypatch, "", HOURS_RECIPE)
-    template, command = workflow_agent.planner_planning_command_for("When are the branches open?", folder)
+    command = workflow_agent.load_planning_command_map(folder)[HOURS_RECIPE]
+    template = workflow_agent._template_text(command.template)
     assert template == (
         "A job like this is usually done as:\n- library_hours\n- say when the branches are open\n"
         "Adapt this to the request: drop steps it does not need and add steps it asks for.")
-    assert command is workflow_agent.load_planning_command_map(folder)[HOURS_RECIPE]
 
 
 EXAMPLE_TODO = str(Path(__file__).resolve().parent / "example_workflow")

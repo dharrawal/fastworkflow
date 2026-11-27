@@ -2,10 +2,10 @@
 from pydantic import ConfigDict
 
 import fastworkflow
-from fastworkflow.workflow import Workflow
-from fastworkflow.utils.signatures import InputForParamExtraction
+from fastworkflow.core.workflow import Workflow
+from fastworkflow.parameters.signatures import InputForParamExtraction
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
-from fastworkflow.utils.context_utils import list_context_names
+from fastworkflow.core.context_utils import list_context_names
 from typing import Any, Dict, Optional
 from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Optional, Union
@@ -46,6 +46,7 @@ class Signature:
             command_name.split('/')[-1].lower().replace('_', ' ')
         ] + generate_diverse_utterances(Signature.plain_utterances, command_name)
 
+@fastworkflow.descends_to("TodoItem")
 class ResponseGenerator:
     def _process_command(self, workflow: Workflow, input: Signature.Input) -> Signature.Output:
         """Add a new TodoItem as a child to this TodoList."""

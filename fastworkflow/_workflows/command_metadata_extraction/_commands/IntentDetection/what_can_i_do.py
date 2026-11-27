@@ -8,8 +8,8 @@ import json
 
 import fastworkflow
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
-from fastworkflow.command_context_model import get_workflow_info
-from fastworkflow.command_metadata_api import CommandMetadataAPI
+from fastworkflow.core.command_context_model import get_workflow_info
+from fastworkflow.core.command_metadata_api import CommandMetadataAPI
 
 class Signature:
     """List all the commands available in the current context along with their metadata"""
@@ -68,7 +68,7 @@ class ResponseGenerator:
     #                 containment_data = json.load(f)
     #                 context_info["containment"] = containment_data.get(context_info["name"], [])
 
-    #     from fastworkflow.command_metadata_api import CommandMetadataAPI
+    #     from fastworkflow.core.command_metadata_api import CommandMetadataAPI
 
     #     meta = CommandMetadataAPI.get_enhanced_command_info(
     #         subject_workflow_path=app_workflow.folderpath,
@@ -156,10 +156,8 @@ class ResponseGenerator:
         
         response = f"{workflow_def_text}\n\n{commands_text}"
 
-        nlu_pipeline_stage = workflow.context.get(
-            "NLU_Pipeline_Stage", 
-            fastworkflow.NLUPipelineStage.INTENT_DETECTION)
-        success = nlu_pipeline_stage == fastworkflow.NLUPipelineStage.INTENT_DETECTION
-        if not success:
+        from fastworkflow.intent import intent_loop
+
+        if intent_loop.waiting_for(workflow.context) is not None:
             raise fastworkflow.Refused(response)
         return response 

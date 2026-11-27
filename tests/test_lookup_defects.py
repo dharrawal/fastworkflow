@@ -21,11 +21,12 @@ import shutil
 import pytest
 
 import fastworkflow
+from fastworkflow.intent import router as intent_router
 from fastworkflow._workflows.command_metadata_extraction import intent_detection
 from fastworkflow._workflows.command_metadata_extraction._commands import wildcard
-from fastworkflow.command_executor import CommandExecutor
-from fastworkflow.command_metadata_api import CommandMetadataAPI
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.command_executor import CommandExecutor
+from fastworkflow.core.command_metadata_api import CommandMetadataAPI
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 from tests.todo_list_workflow.application.todo_item import TodoItem
 from tests.todo_list_workflow.application.todo_list import TodoList
 from tests.todo_list_workflow.application.todo_manager import TodoListManager
@@ -62,13 +63,25 @@ def todo_chain(tmp_path):
     return app, cme, item, todo_list, manager
 
 
+def _fake_heads(app, *contexts: str) -> None:
+    """A trained-looking head for each context: the router double answers for it (a scope with no head has no engine)."""
+    from fastworkflow.intent import intent_detector
+
+    for context in contexts:
+        folder = intent_detector.head_folder(app.folderpath, context)
+        os.makedirs(os.path.join(folder, "tinymodel.pth"), exist_ok=True)
+        for name in ("label_encoder.pkl", "threshold.json"):
+            with open(os.path.join(folder, name), "w") as marker:
+                marker.write("{}")
+
+
 def _labelling_router(labels_by_context: dict, consulted: list):
     """A classifier double that answers with the labels named per context folder."""
 
     class LabellingRouter:
         def __init__(self, model_artifact_path):
             self.context_name = model_artifact_path.rstrip("/").split("/")[-1]
-            self.modelpipeline = None  # keeps the embedding cache off, as in the other tests
+            self.modelpipeline = None
 
         def predict(self, command):
             return self.predict_with_details(command)[0]
@@ -98,15 +111,17 @@ def _refusing_router():
 # Defect 1: parameter_value does not start the climb
 # ---------------------------------------------------------------------------
 
+@pytest.mark.usefixtures("no_planner_key")
 def test_a_bare_value_answer_stops_the_climb_where_it_is_given(
         todo_chain, monkeypatch, setup_test_environment):
     """TodoItem answers parameter_value. TodoList would answer a real command: it must not be asked."""
     app, cme, *_ = todo_chain
+    _fake_heads(app, "TodoItem", "TodoList", "TodoListManager")
     consulted: list[str] = []
-    monkeypatch.setattr(intent_detection, "CommandRouter", _labelling_router(
+    monkeypatch.setattr(intent_router, "CommandRouter", _labelling_router(
         {"TodoItem": ["parameter_value"],
-         "TodoList": ["get_all_children"],
-         "TodoListManager": ["list_todo_lists"]},
+         "TodoList": ["TodoList/get_all_children"],
+         "TodoListManager": ["TodoListManager/list_todo_lists"]},
         consulted))
 
     output = wildcard.ResponseGenerator()(cme, "3", None)
@@ -117,15 +132,17 @@ def test_a_bare_value_answer_stops_the_climb_where_it_is_given(
     assert output.command_name is None
 
 
+@pytest.mark.usefixtures("no_planner_key")
 def test_a_bare_value_at_an_ancestor_does_not_climb_further(
         todo_chain, monkeypatch, setup_test_environment):
     """TodoItem declines (wildcard), TodoList answers parameter_value: the walk stops at TodoList."""
     app, cme, *_ = todo_chain
+    _fake_heads(app, "TodoItem", "TodoList", "TodoListManager")
     consulted: list[str] = []
-    monkeypatch.setattr(intent_detection, "CommandRouter", _labelling_router(
+    monkeypatch.setattr(intent_router, "CommandRouter", _labelling_router(
         {"TodoItem": ["wildcard"],
          "TodoList": ["parameter_value"],
-         "TodoListManager": ["list_todo_lists"]},
+         "TodoListManager": ["TodoListManager/list_todo_lists"]},
         consulted))
 
     output = wildcard.ResponseGenerator()(cme, "3", None)
@@ -135,15 +152,17 @@ def test_a_bare_value_at_an_ancestor_does_not_climb_further(
     assert output.command_name is None
 
 
+@pytest.mark.usefixtures("no_planner_key")
 def test_a_decline_still_climbs_to_the_ancestor_that_answers(
         todo_chain, monkeypatch, setup_test_environment):
     """The fix must not disable the climb itself: a decline followed by a command still resolves."""
     app, cme, *_ = todo_chain
+    _fake_heads(app, "TodoItem", "TodoList", "TodoListManager")
     consulted: list[str] = []
-    monkeypatch.setattr(intent_detection, "CommandRouter", _labelling_router(
+    monkeypatch.setattr(intent_router, "CommandRouter", _labelling_router(
         {"TodoItem": ["wildcard"],
-         "TodoList": ["get_all_children"],
-         "TodoListManager": ["list_todo_lists"]},
+         "TodoList": ["TodoList/get_all_children"],
+         "TodoListManager": ["TodoListManager/list_todo_lists"]},
         consulted))
 
     wildcard.ResponseGenerator()(cme, "show the children", None)
@@ -195,7 +214,7 @@ def test_a_run_on_an_enclosing_record_is_filed_under_that_record(
     # The name is an exact command of TodoList, not of TodoItem: the foreign-name
     # guard declines it in TodoItem and the climb resolves it in TodoList, so no
     # classifier is consulted anywhere on this path.
-    monkeypatch.setattr(intent_detection, "CommandRouter", _refusing_router())
+    monkeypatch.setattr(intent_router, "CommandRouter", _refusing_router())
     ctx = WorkflowExecutionContext(run_as_agent=True)
     ctx.bind_app_workflow(app)
     ctx.push_active_workflow(app)
@@ -211,7 +230,7 @@ def test_a_run_on_an_enclosing_record_is_filed_under_that_record(
     assert output.ran_in_context_name == "TodoList"
     assert output.ran_in_context_clause == "TodoList"
     # The turn's held run for this step names the same record.
-    from fastworkflow.workflow_agent import _held_context
+    from fastworkflow.agent.workflow_agent import _held_context
     assert _held_context(ctx, output, "TodoItem", "TodoItem") == ("TodoList", "TodoList")
 
 
@@ -219,7 +238,7 @@ def test_a_run_on_the_current_record_is_still_filed_under_it(
         todo_chain, monkeypatch, setup_test_environment):
     """No climb, no change: a command of the current context keeps the current context."""
     app, *_ = todo_chain
-    monkeypatch.setattr(intent_detection, "CommandRouter", _refusing_router())
+    monkeypatch.setattr(intent_router, "CommandRouter", _refusing_router())
     ctx = WorkflowExecutionContext(run_as_agent=True)
     ctx.bind_app_workflow(app)
     ctx.push_active_workflow(app)
@@ -232,19 +251,21 @@ def test_a_run_on_the_current_record_is_still_filed_under_it(
     assert getattr(output, "ran_in_context_name", None) in (None, "")
 
 
+@pytest.mark.usefixtures("no_planner_key")
 def test_the_step_that_ran_on_an_enclosing_record_holds_that_record(
         todo_chain, monkeypatch, setup_test_environment):
     """The agent step's held run and its run state both name the enclosing record."""
     from types import SimpleNamespace
 
-    from fastworkflow.workflow_agent import _execute_workflow_query
+    from fastworkflow.agent.workflow_agent import _execute_workflow_query
 
     app, *_ = todo_chain
+    _fake_heads(app, "TodoItem", "TodoList", "TodoListManager")
     # Free text, not a command name: the agent tool refuses a name this context does not
     # offer before the walk, so a climb in agent mode is reached through the classifier.
     consulted: list[str] = []
-    monkeypatch.setattr(intent_detection, "CommandRouter", _labelling_router(
-        {"TodoItem": ["wildcard"], "TodoList": ["get_all_children"]}, consulted))
+    monkeypatch.setattr(intent_router, "CommandRouter", _labelling_router(
+        {"TodoItem": ["wildcard"], "TodoList": ["TodoList/get_all_children"]}, consulted))
     ctx = WorkflowExecutionContext(run_as_agent=True)
     ctx.bind_app_workflow(app)
     ctx.push_active_workflow(app)

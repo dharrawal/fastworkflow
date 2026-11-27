@@ -85,8 +85,6 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from pydantic import BaseModel, ValidationError
 
-from fastworkflow.plan_frame import runs_outside_ranges
-
 
 class FactsError(ValueError):
     """A facts model could not be filled."""
@@ -185,7 +183,7 @@ def workflow_signatures(workflow_folderpath: str) -> dict[str, Any]:
     Commands without a ``Signature`` are left out.
     """
     import fastworkflow
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     routing = RoutingRegistry.get_definition(workflow_folderpath)
     names = {name for commands in routing.contexts.values() for name in commands}
@@ -202,7 +200,7 @@ def workflow_signatures(workflow_folderpath: str) -> dict[str, Any]:
 
 
 def _not_given_sentinels() -> tuple[Any, ...]:
-    from fastworkflow.utils.signatures import INVALID_FLOAT_VALUE, INVALID_INT_VALUE, NOT_FOUND
+    from fastworkflow.parameters.signatures import INVALID_FLOAT_VALUE, INVALID_INT_VALUE, NOT_FOUND
 
     return (NOT_FOUND, INVALID_INT_VALUE, INVALID_FLOAT_VALUE)
 
@@ -254,8 +252,10 @@ def _same(value: Any, other: Any) -> bool:
         return False
 
 
-def _join_list(found: list[tuple[str, str, int, Any, Any]]) -> list[Any]:
-    """Join the values of *found* ``(query, page, query_size, value, output)``, in run order."""
+def _join_list(found: list[tuple[str, str, int, Any, Any]]) -> list[Any] | None:
+    """Join the values of *found* ``(query, page, query_size, value, output)``, in run order.
+
+    A refused run's None is not a value: it is skipped, and None is returned when every run gave None."""
     pages = [item for item in found if isinstance(item[3], (list, tuple))]
     query = None
     if pages:
@@ -268,10 +268,14 @@ def _join_list(found: list[tuple[str, str, int, Any, Any]]) -> list[Any]:
         by_key[(run_query, run_page)] = value
     joined: list[Any] = []
     for value in by_key.values():
+        if value is None:
+            continue
         if isinstance(value, (list, tuple)):
             joined.extend(value)
         else:
             joined.append(value)
+    if by_key and all(value is None for value in by_key.values()):
+        return None
     return joined
 
 
@@ -360,7 +364,7 @@ def facts_text(facts: Any, *, fields: Optional[Iterable[str]] = None, sep: str =
     answer to name a list must give it whole.
 
     The text is plain data: a phase that writes its answer from earlier facts (an
-    answer-only phase, see ``fastworkflow.planning_phases``) reads the values as given.
+    answer-only phase, see ``fastworkflow.planning.planning_phases``) reads the values as given.
     """
     if isinstance(facts, (list, tuple)):
         return ", ".join(f"({facts_text(item, fields=fields, sep=sep, max_items=max_items)})"

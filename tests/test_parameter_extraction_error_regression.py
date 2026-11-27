@@ -1,10 +1,10 @@
 import pytest
 import os
 import fastworkflow
-from fastworkflow import Workflow, NLUPipelineStage
-from fastworkflow.utils.signatures import InputForParamExtraction
+from fastworkflow import Workflow
+from fastworkflow.parameters.signatures import InputForParamExtraction
 from fastworkflow._workflows.command_metadata_extraction._commands.wildcard import ParameterExtraction
-from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import NOT_FOUND
+from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import NOT_FOUND, park
 from pydantic import BaseModel, Field
 from unittest.mock import patch, MagicMock
 
@@ -28,32 +28,16 @@ class TestParameterExtractionErrorRegression:
         # Set up the context to simulate parameter extraction error state
         cme_workflow.context = {
             "app_workflow": app_workflow,
-            "NLU_Pipeline_Stage": NLUPipelineStage.PARAMETER_EXTRACTION
         }
         
-        # Create a stored parameter with missing field
-        stored_params = MockCommandParameters.model_construct(user_name=NOT_FOUND)
-        cme_workflow.context["stored_parameters"] = stored_params
+        # The pending parameter loop a failed extraction left, with the missing field
+        command_name = "ChatRoom/set_current_user"
+        mock_routing_registry.get_definition.return_value.get_command_class.return_value = MockCommandParameters
+        park(cme_workflow, command_name, MockCommandParameters.model_construct(user_name=NOT_FOUND))
         
         # Create the parameter extractor with a direct parameter value
-        command_name = "ChatRoom/set_current_user"
         command_value = "nundini"  # This is the direct parameter value
         extractor = ParameterExtraction(cme_workflow, app_workflow, command_name, command_value)
-        
-        # Mock the necessary methods
-        extractor._extract_missing_fields = MagicMock(
-            return_value=(False, "Missing parameter values: user_name", {}, ["user_name"])
-        )
-        
-        # Create a mock for _apply_missing_fields that returns the expected result
-        def mock_apply_missing_fields(command, default_params, missing_fields):
-            # Apply the parameter value
-            params = default_params.model_copy()
-            if missing_fields and hasattr(params, missing_fields[0]):
-                setattr(params, missing_fields[0], command)
-            return params
-            
-        extractor._apply_missing_fields = mock_apply_missing_fields
         
         # Mock validate_parameters to return valid (returns 4 values: is_valid, error_msg, suggestions, missing_fields)
         mock_input_instance = MagicMock()
@@ -61,9 +45,7 @@ class TestParameterExtractionErrorRegression:
         mock_input_for_param_extraction.create.return_value = mock_input_instance
         
         # Execute the extraction
-        with patch.object(extractor, '_store_parameters'):
-            with patch.object(extractor, '_clear_parameters'):
-                result = extractor.extract()
+        result = extractor.extract()
         
         # Verify the result
         assert result.parameters_are_valid is True
@@ -72,19 +54,8 @@ class TestParameterExtractionErrorRegression:
         assert result.cmd_parameters.user_name == command_value
     
     def test_direct_parameter_extraction(self):
-        """Test that the _apply_missing_fields method correctly extracts parameters."""
-        
-        # Create the parameter extractor with mocked workflows
-        cme_workflow = MagicMock()
-        app_workflow = MagicMock()
-        extractor = ParameterExtraction(cme_workflow, app_workflow, "test_command", "test_value")
-        
-        # Test single parameter extraction
-        params = MockCommandParameters.model_construct(user_name=NOT_FOUND)
-        result = extractor._apply_missing_fields("john_doe", params, ["user_name"])
-        assert result.user_name == "john_doe"
-        
-        # Test comma-separated values
-        params = MockCommandParameters.model_construct(user_name=NOT_FOUND)
-        result = extractor._apply_missing_fields("jane_doe", params, ["user_name"])
-        assert result.user_name == "jane_doe"
+        """The reply merge (the one the CME uses for the open field) fills the asked parameter from a bare value."""
+        for value in ("john_doe", "jane_doe"):
+            params = MockCommandParameters.model_construct(user_name=NOT_FOUND)
+            result = ParameterExtraction._extract_and_merge_missing_parameters(params, value)
+            assert result.user_name == value

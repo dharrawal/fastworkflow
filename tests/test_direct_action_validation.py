@@ -15,8 +15,8 @@ import pytest
 from pydantic import ValidationError
 
 import fastworkflow
-from fastworkflow.command_executor import CommandExecutor
-from fastworkflow.utils.signatures import InputForParamExtraction
+from fastworkflow.engine.command_executor import CommandExecutor
+from fastworkflow.parameters.signatures import InputForParamExtraction
 
 from tests.direct_action_validation_workflow._commands.check_ready import (
     HOOK_NOT_READY,

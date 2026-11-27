@@ -16,15 +16,15 @@ prepared comparison inputs, and clearly identify which claims remain unmeasured.
 
 ## Find the evidence in run_chatbot
 
-Select the application workflow and use **benchmark → experiment → conversation** on the left.
-For ordinary chats use **ad-hoc conversations → UTC date → conversation**. Inspect turns and
-then planning, execution steps and individual calls on the right. The right breadcrumb retains
-the entire drill-down path; the left tree ends at conversations.
+Select the application workflow and use **benchmark → version → experiment → conversation →
+turn** on the left. For ordinary chats use **ad-hoc conversations → UTC date → conversation →
+turn**. The left tree ends at the turn; inspect its planning, execution steps and individual
+calls on the right, whose breadcrumb keeps the whole drill-down path.
 
 Record the evidence store identity/path, benchmark version/digest, experiment ID, task ID,
 attempt, channel/conversation, turn key and relevant span IDs. Conversation IDs alone are not
-unique across channels or recordings. Follow the selected experiment's bound store; do not assume
-all results are in the currently selected workflow's default database.
+unique across channels or recordings. A sealed experiment's turns are read from its archive file
+(`archives/` beside the observability database), not from the live database.
 
 Use [debug-workflow-conversations](../debug-workflow-conversations/SKILL.md) for trace reads and
 stage-specific diagnosis. Before interpreting a missing call, inspect writer health and
@@ -33,11 +33,12 @@ Do not rerun a workflow merely to obtain an answer already present in its record
 
 ## Use human feedback precisely
 
-The **Feedback** box on a turn, phase, step or span appends a timestamped comment, categorized
-with one of three categories and its two subcategories: **Observations / Analysis**
+The **Feedback** box on a turn, phase, step or span (or a whole task, as a task summary)
+appends a timestamped comment, categorized with one of three categories and its two subcategories: **Observations / Analysis**
 (`observation`, `analysis`), **Conclusions** (`what_went_right`, `what_went_wrong`) and
 **Recommendations** (`what_to_do`, `what_not_to_do`). The comment itself is free text and no
-heading in it is parsed. Comment on the narrowest component with recorded spans that explains the
+heading in it is parsed. A coding agent records the same row with `POST /post_feedback` (taxonomy
+at `GET /feedback_taxonomy`). Comment on the narrowest component with recorded spans that explains the
 problem; if the component has no span anchor, comment on the turn. Useful comments state:
 
 - What the user expected and what was observed.
@@ -56,15 +57,9 @@ Comments written before the taxonomy read back with no category and are shown as
 do not guess which of the six they would have been. Preserve original comments; record an agent's
 interpretation in analysis rather than inventing or overwriting a human judgment.
 
-Keep three mechanisms distinct:
-
-| Mechanism | Meaning |
-|---|---|
-| `human_feedback` | Developer/operator annotations attached to recorded evidence; no automatic retraining, prompt injection or score change |
-| The agent-memory `feedback` table | Removed with its `dspy.History` injection (fix-9eg.16). Recorded comments are never replayed into a prompt |
-
-Comments are recorded in the workflow's live database. Never modify an archived experiment to insert
-feedback.
+Comments are annotations on recorded evidence only: they never retrain anything, are never
+replayed into a prompt and never change a score. They are recorded in the workflow's live
+database; never modify an archived experiment to insert feedback.
 
 ## Diagnose and choose the smallest useful change
 
@@ -73,10 +68,12 @@ command, extracted parameters, command response and final answer. Typical eviden
 
 | Evidence | Candidate change |
 |---|---|
-| Wrong command or repeated ambiguity | Context reachability, duplicate capabilities, seeds; use the routing companion skills |
-| Missing handle or unnecessary request for an ID | Producer edges (`from_command_output`) and lookup visibility |
-| Valid entity rejected or wrong fuzzy correction | the validation hook's `fuzzy_match` candidates and thresholds (see `resolve-parameter-values`) |
-| Unusable values reach business logic | Validation hook and actionable correction messages |
+| Wrong command, or the same which-command question asked again | The training report's `LOCAL INTENT MODEL` section lists the most confused command pairs: add seed utterances that tell a pair apart, or merge commands users cannot tell apart ([detect-duplicate-capabilities](../detect-duplicate-capabilities/SKILL.md)); check where the commands live ([design-context-models](../design-context-models/SKILL.md)); measure with [evaluate-intent-routing](../evaluate-intent-routing/SKILL.md) and retrain with [train-and-publish-models](../train-and-publish-models/SKILL.md) |
+| Users keep confirming the same command for the same wording | Learning from use: confirmed picks and accepted reviews are recorded (`INTENT_LEARNING_RECORD`, on by default). `fastworkflow learn <workflow>` (`--dry-run` to only see the gate) refits the local head with them behind a cross-fit gate and can lower its commit threshold once enough confirmed rows exist; by default the refit also runs in the background every 25 new confirmed rows. Review or delete wrong confirmations with `fastworkflow learned list --confirmed`, `learned remove <workflow> <ids>` and `learned stats` |
+| Missing handle or unnecessary request for an ID | Producer edges (`from_command_output`, [declare-parameter-producers](../declare-parameter-producers/SKILL.md)) and lookup visibility |
+| Valid entity rejected or wrong fuzzy correction | `DatabaseValidator.fuzzy_match` candidates and thresholds in a model validator ([validate-command-parameters](../validate-command-parameters/SKILL.md), "Resolve a value against live keys") |
+| Unusable values reach business logic, or a vague parameter question | A model validator on the command's `Input` that refuses with `fastworkflow.Refused(message, field=...)` ([validate-command-parameters](../validate-command-parameters/SKILL.md)); the parameter question then names that field with your message |
+| The agent plans the same multi-command job differently or wrongly | A planning command whose steps code runs ([author-planning-commands](../author-planning-commands/SKILL.md)) |
 | Correct tools but missing/incorrect final information | Response content, presentation requirements, output limits |
 | Long latency/high cost | Identify costly LLM calls, repeated tools or waits before changing models or budgets |
 | A rule is answered but asked again | Context/state retention and use of prior answers; distinguish invalid prior answers from forgotten valid ones |
@@ -84,7 +81,8 @@ command, extracted parameters, command response and final answer. Typical eviden
 A successful command is not proof of a satisfied task; check the actual application state or
 other designated outcome evidence. A model's assertion of completion is not independent evidence.
 Likewise an honest clarification can be correct behavior. Distinguish necessary clarification,
-redundant confirmation, repeated questions after valid answers, and retries after invalid answers.
+redundant confirmation, repeated questions after valid answers, and retries after invalid answers
+(a parameter question stops after two replies in a row that fill or fix nothing).
 
 ## Preserve the regression and comparison
 
@@ -99,7 +97,11 @@ Freeze the test input before comparing the existing and changed workflows. Keep 
 fixtures, responder policy, repetitions, model routes, cache policy and budgets matched except
 for the variable under study. If the corpus must change, create a new version and compare both
 implementations on that version; do not call a task-set change an implementation improvement.
-Keep tuning cases separate from held-out checks. Do not copy evaluation wording into training seeds.
+Keep tuning cases separate from held-out checks. Do not copy evaluation wording into training
+seeds, and do not let it in through learning from use: the experiment harness forces `INTENT_LEARNING_REFIT=off` for both
+arms of a measured comparison (outside it, set it by hand; a background refit publishes a new head that a running server
+loads within seconds), and remove benchmark-run rows with `fastworkflow learned remove` before a
+`fastworkflow learn`.
 
 Create a new experiment identity for the candidate. Record the hypothesis/control/change and
 baseline identity; use the project's pre-run setup review when it is part of the workflow. The
@@ -138,9 +140,9 @@ not business-success grades. Missing cost/usage is unknown, not zero. Total LLM 
 `fw.llm.call` records, so do not sum the rows or the parent roll-ups yourself. A completion equal to `max_tokens`
 is a cutoff clue, not by itself proof that the answer is incomplete.
 
-Write per-run conclusions in **experiment notes** and cross-run synthesis in **benchmark
-analysis**. Benchmark analysis can hold prose or structured JSON; notes are free text. They do
-not compute scores. Include evidence identifiers, the change, observed differences, counterexamples
+Write per-run conclusions in **experiment notes** (free text; they compute no score), a remark
+about a pair of executions as feedback written from the comparison row (anchored to both), and a
+whole-task conclusion as a task summary comment. Include evidence identifiers, the change, observed differences, counterexamples
 and limitations. Recommend adoption, revision or another investigation based on those observations;
 retain the original recordings.
 The handoff should distinguish locally tested changes from measured improvements and identify any
