@@ -9,6 +9,20 @@ from fastworkflow.observability import tracing
 from fastworkflow.engine.command_executor import CommandExecutor, CommandNotFoundError
 
 
+#: A placeholder workflow folder for these tests (they patch the routing registry, so it holds nothing). It must not be
+#: the fastworkflow package: that is not a workflow, and loading it writes artefacts into the installed package.
+_WORKFLOW_FOLDER = ""
+
+
+@pytest.fixture(autouse=True)
+def _placeholder_workflow_folder(tmp_path):
+    global _WORKFLOW_FOLDER
+    folder = tmp_path / "errs_workflow"
+    folder.mkdir()
+    _WORKFLOW_FOLDER = str(folder)
+    yield
+
+
 # ---------------------------------------------------------------------------
 # Helpers to monkeypatch registry and extractor
 # ---------------------------------------------------------------------------
@@ -57,7 +71,7 @@ def test_perform_action_wraps_error(monkeypatch):
     _monkey_registry(monkeypatch)
 
     workflow = fastworkflow.Workflow.create(
-        workflow_folderpath=fastworkflow.get_fastworkflow_package_path(),
+        workflow_folderpath=_WORKFLOW_FOLDER,
         workflow_id_str="errs_pa",
     )
 
@@ -123,7 +137,7 @@ def test_invoke_command_wraps_error(monkeypatch):
     monkeypatch.setattr(CommandExecutor, "perform_action", _stub_cme)
 
     app_workflow = fastworkflow.Workflow.create(
-        workflow_folderpath=fastworkflow.get_fastworkflow_package_path(),
+        workflow_folderpath=_WORKFLOW_FOLDER,
         workflow_id_str="err_ivk",
     )
     ctx = WorkflowExecutionContext(run_as_agent=False, session_key="err_ivk")
@@ -230,7 +244,7 @@ def _failing_ctx(monkeypatch, exc_factory):
     )
 
     app_workflow = fastworkflow.Workflow.create(
-        workflow_folderpath=fastworkflow.get_fastworkflow_package_path(),
+        workflow_folderpath=_WORKFLOW_FOLDER,
         workflow_id_str=f"err_identity_{uuid.uuid4().hex}",
     )
     sink = RecordingTraceSink()
@@ -425,7 +439,7 @@ def _perform_action_registry(monkeypatch, *, with_parameters_class):
 def _perform_action_workflow():
     fastworkflow.init({})
     return fastworkflow.Workflow.create(
-        workflow_folderpath=fastworkflow.get_fastworkflow_package_path(),
+        workflow_folderpath=_WORKFLOW_FOLDER,
         workflow_id_str=f"pa_identity_{uuid.uuid4().hex}",
     )
 
@@ -528,7 +542,7 @@ def test_a_cme_hop_failure_reaches_the_failure_output_and_the_error_span(monkeyp
     )
 
     app_workflow = fastworkflow.Workflow.create(
-        workflow_folderpath=fastworkflow.get_fastworkflow_package_path(),
+        workflow_folderpath=_WORKFLOW_FOLDER,
         workflow_id_str=f"pa_cme_{uuid.uuid4().hex}",
     )
     sink = RecordingTraceSink()
