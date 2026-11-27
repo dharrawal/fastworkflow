@@ -33,7 +33,7 @@ import pytest
 
 import fastworkflow
 from fastworkflow.intent import intent_loop
-from fastworkflow.train import model_pipeline_training
+from fastworkflow.intent import router as intent_router
 from fastworkflow._workflows.command_metadata_extraction._commands import (
     wildcard as wildcard_module,
 )
@@ -414,7 +414,7 @@ def test_real_workflow_foreign_name_returns_no_command(item_below_a_list_root, m
     """`create_todo_list` belongs to TodoListManager, which is not on this chain: it may not be answered here."""
     _, cme_workflow = item_below_a_list_root
     consulted: list[str] = []
-    monkeypatch.setattr(model_pipeline_training, "CommandRouter", _refusing_router(consulted))
+    monkeypatch.setattr(intent_router, "CommandRouter", _refusing_router(consulted))
     predictor = CommandNamePrediction(cme_workflow)
 
     result = predictor.predict("create_todo_list my list")
@@ -432,7 +432,7 @@ def test_real_workflow_a_name_on_the_chain_is_found_in_the_scope_that_owns_it(
     (what the old walk found by climbing from the item)."""
     app_workflow, cme_workflow = todolist_workflows
     consulted: list[str] = []
-    monkeypatch.setattr(model_pipeline_training, "CommandRouter", _refusing_router(consulted))
+    monkeypatch.setattr(intent_router, "CommandRouter", _refusing_router(consulted))
 
     result = CommandNamePrediction(cme_workflow).predict("create_todo_list my list")
 
@@ -448,7 +448,7 @@ def test_real_workflow_owning_context_still_resolves_by_exact_prefix(
     _, cme_workflow = _workflows_at(
         _copy_of_the_todo_workflow(tmp_path), f"foreign-owner-{tmp_path.name}", root=manager, record=manager)
     consulted: list[str] = []
-    monkeypatch.setattr(model_pipeline_training, "CommandRouter", _refusing_router(consulted))
+    monkeypatch.setattr(intent_router, "CommandRouter", _refusing_router(consulted))
 
     predictor = CommandNamePrediction(cme_workflow)
     result = predictor.predict("create_todo_list my list")
@@ -465,7 +465,7 @@ def test_real_workflow_inherited_name_is_not_foreign(todolist_workflows, monkeyp
     foreign.
     """
     app_workflow, cme_workflow = todolist_workflows
-    monkeypatch.setattr(model_pipeline_training, "CommandRouter", _refusing_router([]))
+    monkeypatch.setattr(intent_router, "CommandRouter", _refusing_router([]))
     app_workflow.record = app_workflow.get_parent(app_workflow._current_command_context)   # stand on the list
 
     result = CommandNamePrediction(cme_workflow).predict("assign_to bob")
@@ -638,7 +638,7 @@ class TestTheHintIsComposedAndRecorded:
         """There is no auto-navigation setting for the routing event to carry, so the guard's own record says only what
         the guard did: it declined, at the known-name foreign-context layer."""
         _, cme_workflow = item_below_a_list_root
-        monkeypatch.setattr(model_pipeline_training, "CommandRouter", _refusing_router([]))
+        monkeypatch.setattr(intent_router, "CommandRouter", _refusing_router([]))
         predictor = CommandNamePrediction(cme_workflow)
         output = predictor.predict("create_todo_list")
 
@@ -650,7 +650,7 @@ class TestTheHintIsComposedAndRecorded:
     def test_a_resolved_prediction_carries_no_hint(self, todolist_workflows, monkeypatch, setup_test_environment):
         """A command of the path is reached by the exact layer and needs no hint at all."""
         _, cme_workflow = todolist_workflows
-        monkeypatch.setattr(model_pipeline_training, "CommandRouter", _refusing_router([]))
+        monkeypatch.setattr(intent_router, "CommandRouter", _refusing_router([]))
         predictor = CommandNamePrediction(cme_workflow)
         output = predictor.predict("create_todo_list my list")
 
@@ -679,7 +679,7 @@ class TestTheDeclaredEnteringCommandIsRead:
         self, declared_workflows, monkeypatch, setup_test_environment
     ):
         app_workflow, cme_workflow = declared_workflows
-        monkeypatch.setattr(model_pipeline_training, "CommandRouter", _refusing_router([]))
+        monkeypatch.setattr(intent_router, "CommandRouter", _refusing_router([]))
         from fastworkflow.core.context_navigation import entering_commands
 
         assert entering_commands(app_workflow.folderpath, "TodoList") == ["get_todo_list <id>"]
@@ -853,7 +853,7 @@ class TestTheHintPathOnARealWorkflow:
         self, workflows, monkeypatch, setup_test_environment
     ):
         app_workflow, cme_workflow = workflows
-        monkeypatch.setattr(model_pipeline_training, "CommandRouter", _refusing_router([]))
+        monkeypatch.setattr(intent_router, "CommandRouter", _refusing_router([]))
 
         output = wildcard_module.ResponseGenerator()(cme_workflow, "get_properties", None)
 
@@ -879,7 +879,7 @@ class TestTheHintPathOnARealWorkflow:
         `you_misunderstood` runs. A reply that matches nothing in the question is asked again, and the second ends it
         with the listing instead of raising."""
         app_workflow, cme_workflow = workflows
-        monkeypatch.setattr(model_pipeline_training, "CommandRouter", _labelling_router("wildcard"))
+        monkeypatch.setattr(intent_router, "CommandRouter", _labelling_router("wildcard"))
 
         output = wildcard_module.ResponseGenerator()(cme_workflow, "tell me a joke", None)
 
@@ -902,11 +902,11 @@ class TestTheHintPathOnARealWorkflow:
         """Free text puts the workflow in the misunderstanding question; the reply is a real command owned off the
         chain. The reply ends with the hint and the question closed, instead of a list of this context's commands."""
         app_workflow, cme_workflow = workflows
-        monkeypatch.setattr(model_pipeline_training, "CommandRouter", _labelling_router("wildcard"))
+        monkeypatch.setattr(intent_router, "CommandRouter", _labelling_router("wildcard"))
         wildcard_module.ResponseGenerator()(cme_workflow, "tell me a joke", None)
         assert intent_loop.pending_record(cme_workflow.context)["misunderstood"] is True
 
-        monkeypatch.setattr(model_pipeline_training, "CommandRouter", _refusing_router([]))
+        monkeypatch.setattr(intent_router, "CommandRouter", _refusing_router([]))
         output = wildcard_module.ResponseGenerator()(cme_workflow, "get_properties", None)
 
         response = output.response

@@ -21,7 +21,7 @@ import pytest
 from pydantic import BaseModel, Field
 
 import fastworkflow
-from fastworkflow.train import model_pipeline_training
+from fastworkflow.intent import router as intent_router
 from fastworkflow.planning import planning_commands
 from fastworkflow._workflows.command_metadata_extraction import intent_detection
 from fastworkflow.engine.command_executor import CommandExecutor
@@ -108,7 +108,7 @@ def literal_env(tmp_path, initialized_fastworkflow, monkeypatch):
     ctx.push_active_workflow(wf)
     LibraryRunner(wf)(ctx, "startup")
     consulted: list[str] = []
-    monkeypatch.setattr(model_pipeline_training, "CommandRouter", refusing_router(consulted))
+    monkeypatch.setattr(intent_router, "CommandRouter", refusing_router(consulted))
     yield SimpleNamespace(ctx=ctx, wf=wf, folder=folder, consulted=consulted)
     ctx.pop_active_workflow()
     RoutingRegistry.clear_registry()

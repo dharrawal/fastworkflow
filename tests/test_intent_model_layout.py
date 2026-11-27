@@ -626,7 +626,7 @@ def test_the_trainer_refuses_a_selection_of_contexts_in_the_workflow_layout(tmp_
 @pytest.fixture
 def clean_router_cache():
     """`CommandRouter` remembers an instance per folder, also one whose loading failed."""
-    from fastworkflow.train.model_pipeline_training import CommandRouter
+    from fastworkflow.intent.router import CommandRouter
 
     before = set(CommandRouter._instances_cache)
     yield
@@ -638,7 +638,7 @@ def test_the_router_reads_the_layout_from_the_marker_in_the_folder(tmp_path, cle
     """With the marker, the workflow's model folder is what gets opened; without it, the
     context's own files. Both folders are empty of weights, so each fails on the first file of
     the layout it chose, which is what tells the two apart without loading a model."""
-    from fastworkflow.train.model_pipeline_training import CommandRouter
+    from fastworkflow.intent.router import CommandRouter
 
     vdir = _workflow_layout_version(tmp_path, "v1", ["Book"])
     with pytest.raises(Exception) as workflow_error:
@@ -674,14 +674,14 @@ def published_experiment_model(tmp_path_factory):
     artifact_versioning.write_manifest(str(workflow), "v1", seed=SEED)
     artifact_versioning.publish_version(str(workflow), "v1")
     yield str(workflow), scopes
-    from fastworkflow.train.model_pipeline_training import CommandRouter
+    from fastworkflow.intent.router import CommandRouter
 
     for key in [key for key in CommandRouter._instances_cache if key.startswith(str(workflow))]:
         CommandRouter._instances_cache.pop(key, None)
 
 
 def _router(workflow: str, scope: str):
-    from fastworkflow.train.model_pipeline_training import CommandRouter
+    from fastworkflow.intent.router import CommandRouter
 
     return CommandRouter(intent_detector.head_folder(workflow, scope))
 
@@ -691,7 +691,7 @@ DETAIL_KEYS = {"model_tier", "confidence", "ambiguous_threshold", "confident", "
 
 
 def test_every_scope_of_a_version_shares_one_loaded_model(published_experiment_model):
-    from fastworkflow.train.model_pipeline_training import CommandRouter
+    from fastworkflow.intent.router import CommandRouter
     from fastworkflow.train import workflow_model
 
     workflow, scopes = published_experiment_model
@@ -770,7 +770,7 @@ def test_the_detector_contract_reads_the_layout_without_change(published_experim
 
 
 def test_warm_up_loads_every_context_of_the_layout(published_experiment_model):
-    from fastworkflow.train.model_pipeline_training import warm_intent_heads
+    from fastworkflow.intent.router import warm_intent_heads
 
     workflow, scopes = published_experiment_model
 

@@ -985,7 +985,7 @@ def test_first_turn_warm_up_loads_the_heads_the_first_turn_classifies_with(app_m
     from pathlib import Path
 
     import fastworkflow
-    from fastworkflow.train.model_pipeline_training import CommandRouter, ModelPipeline
+    from fastworkflow.intent.router import CommandRouter, ModelPipeline
     from fastworkflow.agent.run_listing import head_answers
 
     folder = str(Path(app_module.ARGS.workflow_path).resolve())

@@ -23,7 +23,7 @@ import fastworkflow
 from fastworkflow import ModuleType
 from fastworkflow.observability import tracing
 from fastworkflow.utils.logging import logger
-from fastworkflow.train.model_pipeline_training import get_route_layer_filepath_model
+from fastworkflow.intent.router import get_route_layer_filepath_model
 from fastworkflow.utils.fuzzy_match import (
     best_window_distance, find_best_matches, normalize_text, normalized_levenshtein_distance,
 )

@@ -239,7 +239,7 @@ def cache_report(folder: str) -> dict:
     """
     import math
 
-    from fastworkflow.train.model_pipeline_training import get_route_layer_filepath_model
+    from fastworkflow.intent.router import get_route_layer_filepath_model
     from fastworkflow.train import generate_synthetic as gs
     from fastworkflow.train import param_example_cache as pc
     from fastworkflow.train import utterance_cache as uc

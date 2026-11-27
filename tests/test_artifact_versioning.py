@@ -78,7 +78,7 @@ def workflow(tmp_path: Path) -> Path:
 
 def test_global_context_folder_matches_model_pipeline_training():
     """The '*' -> folder mapping is duplicated, not imported; prove it agrees."""
-    from fastworkflow.train.model_pipeline_training import GLOBAL_CONTEXT_FOLDER
+    from fastworkflow.intent.router import GLOBAL_CONTEXT_FOLDER
 
     assert av.GLOBAL_CONTEXT_FOLDER == GLOBAL_CONTEXT_FOLDER
     assert av.context_folder_name("*") == GLOBAL_CONTEXT_FOLDER
@@ -819,7 +819,7 @@ def test_is_workflow_trained_accepts_a_migrated_versioned_workflow(workflow: Pat
     threshold.json off the top level. Both must keep working after migration —
     otherwise `fastworkflow run_cli` and the MCP server refuse to start.
     """
-    from fastworkflow.train.model_pipeline_training import is_workflow_trained
+    from fastworkflow.intent.router import is_workflow_trained
 
     _build_legacy_tree(workflow)
     assert is_workflow_trained(str(workflow))[0] is True, "precondition"

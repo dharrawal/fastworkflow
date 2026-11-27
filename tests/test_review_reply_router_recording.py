@@ -12,7 +12,7 @@ import json
 
 import pytest
 
-from fastworkflow.train.model_pipeline_training import CommandRouter
+from fastworkflow.intent.router import CommandRouter
 from tests import plan_head as head
 from tests import recorded_router
 from tests.recorded_router import RecordedRouter, UnrecordedUtterance, installed, load_recording

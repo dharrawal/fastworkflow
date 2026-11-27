@@ -169,7 +169,7 @@ from tests.test_plan_reply_policy import (  # noqa: E402,F401  (fixtures the rea
 def _head_has_wildcard_class() -> bool:
     if not head_trained():
         return False
-    from fastworkflow.train.model_pipeline_training import CommandRouter
+    from fastworkflow.intent.router import CommandRouter
 
     router = CommandRouter(_HEAD_DIR)
     return any(

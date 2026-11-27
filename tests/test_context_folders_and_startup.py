@@ -92,7 +92,7 @@ def test_training_takes_a_context_with_no_execution_command(tmp_path, no_planner
     every "is it trained" gate says yes. No model is called (the copy's own caches, ``no_model_calls``)."""
     import importlib.util
 
-    from fastworkflow.train.model_pipeline_training import is_workflow_trained
+    from fastworkflow.intent.router import is_workflow_trained
     from fastworkflow.train import artifact_versioning, embedding_head, utterance_cache
     from fastworkflow.train import intent_model_layout as layout
     from tests.test_intent_model_layout_training import (

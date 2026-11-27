@@ -21,6 +21,7 @@ import pytest
 import fastworkflow
 from fastworkflow.intent import intent_detector
 from fastworkflow.train import model_pipeline_training as heads
+from fastworkflow.intent import router as intent_router
 from fastworkflow.core.command_routing import RoutingRegistry
 from fastworkflow.intent.nlu_labels import PARAMETER_VALUE_LABEL, PARAMETER_VALUE_PLACEHOLDERS, WILDCARD_LABEL
 from fastworkflow.train import artifact_versioning
@@ -259,12 +260,12 @@ def published_head(tmp_path_factory, encoder):
     artifact_versioning.write_manifest(workflow, version, seed=42)
     artifact_versioning.publish_version(workflow, version)
     yield workflow, vdir, fitted
-    for key in [key for key in heads.CommandRouter._instances_cache if key.startswith(workflow)]:
-        heads.CommandRouter._instances_cache.pop(key, None)
+    for key in [key for key in intent_router.CommandRouter._instances_cache if key.startswith(workflow)]:
+        intent_router.CommandRouter._instances_cache.pop(key, None)
 
 
 def _router(workflow: str, context: str):
-    return heads.CommandRouter(intent_detector.head_folder(workflow, context))
+    return intent_router.CommandRouter(intent_detector.head_folder(workflow, context))
 
 
 def test_the_rows_are_the_workflow_layouts_rows():
@@ -458,7 +459,7 @@ def test_the_detector_contract_and_the_gates_read_the_layout_without_change(publ
     assert vague.kind == intent_detector.NOT_MINE and not intent_detector.head_is_confident(vague)
     assert engine.decide(sorted(PARAMETER_VALUE_PLACEHOLDERS)[0]).kind == intent_detector.BARE_VALUE
 
-    assert sorted(heads.warm_intent_heads(workflow)) == ["Book", "Library", "global"]
+    assert sorted(intent_router.warm_intent_heads(workflow)) == ["Book", "Library", "global"]
     from fastworkflow._workflows.command_metadata_extraction import intent_detection
 
     assert intent_detection._classifier_signal_version(

@@ -19,7 +19,7 @@ import shutil
 import pytest
 
 import fastworkflow
-from fastworkflow.train import model_pipeline_training
+from fastworkflow.intent import router as intent_router
 from fastworkflow._workflows.command_metadata_extraction import intent_detection
 from fastworkflow.engine.command_executor import CommandExecutor, CommandNotFoundError, call_response_generator
 from fastworkflow.core.command_metadata_api import CommandMetadataAPI
@@ -105,7 +105,7 @@ def _run(app, cme, monkeypatch, command: str) -> Run:
     """Run *command* as the agent tool does: resolve it, let the CME walk bind and parse it, then
     run the target's response generator on the record the walk bound (the executor's own step).
     The classifier is never consulted."""
-    monkeypatch.setattr(model_pipeline_training, "CommandRouter", _RefusingRouter)
+    monkeypatch.setattr(intent_router, "CommandRouter", _RefusingRouter)
     resolved = _explicit_agent_command(command, app)
     walked = CommandExecutor.perform_action(
         cme, fastworkflow.Action(command_name="wildcard", command=resolved))
@@ -178,7 +178,7 @@ def test_a_qualified_name_off_the_path_gets_the_navigation_message(
     """From the root, TodoItem is neither enclosing nor a base: its command is not called here."""
     app, _, _, _, manager = chain
     app.record = manager
-    monkeypatch.setattr(model_pipeline_training, "CommandRouter", _RefusingRouter)
+    monkeypatch.setattr(intent_router, "CommandRouter", _RefusingRouter)
 
     with pytest.raises(CommandNotFoundError) as refused:
         _explicit_agent_command("TodoItem/status", app)

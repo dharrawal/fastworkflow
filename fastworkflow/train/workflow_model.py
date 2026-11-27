@@ -56,6 +56,7 @@ from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 import fastworkflow
 from fastworkflow.train import model_pipeline_training as heads
+from fastworkflow.intent import router as intent_router
 from fastworkflow.intent.nlu_labels import (
     PARAMETER_VALUE_LABEL,
     PARAMETER_VALUE_PLACEHOLDERS,
@@ -636,9 +637,9 @@ def _fit(model, tokenizer, examples, *, learning_rate: float, epochs: int, paire
     for epoch in range(epochs):
         total_loss = 0.0
         for encodings, labels in loader:
-            encodings = {name: tensor.to(heads.device) for name, tensor in encodings.items()}
+            encodings = {name: tensor.to(intent_router.device) for name, tensor in encodings.items()}
             optimizer.zero_grad()
-            loss = model(**encodings, labels=labels.to(heads.device)).loss
+            loss = model(**encodings, labels=labels.to(intent_router.device)).loss
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
@@ -658,7 +659,7 @@ def label_probabilities(
     for start in range(0, len(texts), 32):
         batch = list(texts[start:start + 32])
         encodings = _encode(tokenizer, batch, [scope_name] * len(batch) if scope_name else None)
-        encodings = {name: tensor.to(heads.device) for name, tensor in encodings.items()}
+        encodings = {name: tensor.to(intent_router.device) for name, tensor in encodings.items()}
         chunks.append(torch.softmax(model(**encodings).logits, dim=1).cpu().numpy())
     return np.concatenate(chunks) if chunks else np.zeros((0, model.config.num_labels))
 
@@ -1139,11 +1140,11 @@ def fit_workflow_model(
         # a seed draws the same initial classifier weights and batch order in both trainers.
         tiny_tokenizer = AutoTokenizer.from_pretrained(tiny_name)
         tiny_model = AutoModelForSequenceClassification.from_pretrained(
-            tiny_name, num_labels=len(labels)).to(heads.device)
+            tiny_name, num_labels=len(labels)).to(intent_router.device)
         tiers["tiny"] = (tiny_model, tiny_tokenizer)
     large_tokenizer = AutoTokenizer.from_pretrained(large_name)
     large_model = AutoModelForSequenceClassification.from_pretrained(
-        large_name, num_labels=len(labels)).to(heads.device)
+        large_name, num_labels=len(labels)).to(intent_router.device)
     tiers["large"] = (large_model, large_tokenizer)
 
     if not large_only:
@@ -1219,7 +1220,7 @@ class WorkflowModelPipeline:
 
     def __init__(self, model_dir: str):
         self.model_dir = model_dir
-        self.device = str(heads.device)
+        self.device = str(intent_router.device)
         with open(os.path.join(model_dir, SCOPES_FILENAME), "r", encoding="utf-8") as f:
             self.scopes_file = json.load(f)
         self.labels: list[str] = list(self.scopes_file["labels"])
@@ -1229,7 +1230,7 @@ class WorkflowModelPipeline:
         large_path = os.path.join(model_dir, LARGE_MODEL_DIRNAME)
         self.distil_tokenizer = AutoTokenizer.from_pretrained(large_path)
         self.distil_model = AutoModelForSequenceClassification.from_pretrained(
-            large_path).to(heads.device)
+            large_path).to(intent_router.device)
         self.distil_model.eval()
         self._tiny = None
 
@@ -1248,7 +1249,7 @@ class WorkflowModelPipeline:
             if self._tiny is None:
                 tiny_path = os.path.join(self.model_dir, TINY_MODEL_DIRNAME)
                 model = AutoModelForSequenceClassification.from_pretrained(
-                    tiny_path).to(heads.device)
+                    tiny_path).to(intent_router.device)
                 model.eval()
                 self._tiny = (model, AutoTokenizer.from_pretrained(tiny_path))
             return self._tiny
@@ -1618,7 +1619,7 @@ class LayoutTrainer:
             predict_labels = None
             if unseen or has_benchmark:
                 # The reader the runtime uses, found through the context folder as it will be.
-                router = heads.CommandRouter(context_dir)
+                router = intent_router.CommandRouter(context_dir)
 
                 def predict_labels(utterance: str, _router=router) -> list[str]:
                     return [str(label) for label in _router.predict(utterance)]

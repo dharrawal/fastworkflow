@@ -118,7 +118,7 @@ came in through a path without the guard (e.g. embedding WEC directly, or a test
 Quick check:
 ```bash
 source .venv/bin/activate && python -c "
-from fastworkflow.train.model_pipeline_training import is_workflow_trained
+from fastworkflow.intent.router import is_workflow_trained
 print(is_workflow_trained('<workflow_path>'))"
 ```
 

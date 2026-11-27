@@ -423,7 +423,7 @@ def init(env_vars: dict):
     from fastworkflow.core.command_context_model import CommandContextModel as CommandContextModelClass
     from fastworkflow.core.command_routing import RoutingDefinition as RoutingDefinitionClass
     from fastworkflow.core.command_routing import RoutingRegistry as RoutingRegistryClass
-    from fastworkflow.train.model_pipeline_training import ModelPipeline
+    from fastworkflow.intent.router import ModelPipeline
 
     # Assign to global variables
     CommandContextModel = CommandContextModelClass

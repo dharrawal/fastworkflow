@@ -766,7 +766,7 @@ class MissingHeadsError(ValueError):
 
 def discover_heads(version_folder: str) -> dict[str, str]:
     """Head name -> folder for every trained head in one version folder. ``global`` is ``*``."""
-    from fastworkflow.train.model_pipeline_training import GLOBAL_CONTEXT_FOLDER
+    from fastworkflow.intent.router import GLOBAL_CONTEXT_FOLDER
 
     heads: dict[str, str] = {}
     for folder in sorted(os.scandir(version_folder), key=lambda entry: entry.name):
@@ -818,7 +818,7 @@ def probe_rows(router: Any, utterances: Sequence[str]) -> list[dict]:
     Uses the same batch call and the same tier threshold as ``predict_with_details``. The labels
     are the top-3 (or top-2 with two classes), as ``predict_single_sentence`` ranks them.
     """
-    from fastworkflow.train.model_pipeline_training import get_label_encoder
+    from fastworkflow.intent.router import get_label_encoder
 
     encoder = get_label_encoder(router.label_encoder_path)
     n_classes = len(encoder.classes_)
@@ -847,7 +847,7 @@ def probe_workflow(workflow_folderpath: str, utterances: Sequence[str], verify_s
     Fails loudly (SystemExit) when no head is found, or when a head the layout's walks need is
     missing. With *layout* None the needed heads are the union of both layouts.
     """
-    from fastworkflow.train.model_pipeline_training import CommandRouter
+    from fastworkflow.intent.router import CommandRouter
     from fastworkflow.train import artifact_versioning
     from fastworkflow.train.score_not_here import training_rows_per_head
 

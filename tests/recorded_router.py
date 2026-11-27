@@ -36,7 +36,7 @@ from pathlib import Path
 import pytest
 from _pytest.stash import StashKey
 
-from fastworkflow.train.model_pipeline_training import GLOBAL_CONTEXT_FOLDER, CommandRouter
+from fastworkflow.intent.router import GLOBAL_CONTEXT_FOLDER, CommandRouter
 from tests import plan_head as head
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "review_reply_router_answers.json"

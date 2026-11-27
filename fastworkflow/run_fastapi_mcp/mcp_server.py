@@ -340,7 +340,7 @@ def create_mcp_server_for_workflow(workflow_path: str) -> FastWorkflowMCPServer:
     # Fail fast if the workflow has not been trained. Otherwise intent detection
     # crashes on the first command when CommandRouter cannot find the model
     # artifacts (e.g. ___command_info/global/threshold.json).
-    from fastworkflow.train.model_pipeline_training import is_workflow_trained
+    from fastworkflow.intent.router import is_workflow_trained
     trained, missing_contexts = is_workflow_trained(workflow_path)
     # A context with no trained head may run on the model matcher (intent_detector.startup_report decides).
     from fastworkflow.intent import intent_detector

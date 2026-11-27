@@ -965,7 +965,7 @@ class ExperimentHarness:
             from pathlib import Path
 
             from fastworkflow.core.command_routing import RoutingRegistry
-            from fastworkflow.train.model_pipeline_training import CommandRouter
+            from fastworkflow.intent.router import CommandRouter
 
             RoutingRegistry.get_definition(self.workflow_folderpath)
             with contextlib.suppress(Exception):

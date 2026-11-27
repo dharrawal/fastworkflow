@@ -103,7 +103,7 @@ INIT_ASSIGNED = {
     "CommandContextModel": "fastworkflow.core.command_context_model",
     "RoutingDefinition": "fastworkflow.core.command_routing",
     "RoutingRegistry": "fastworkflow.core.command_routing",
-    "ModelPipelineRegistry": "fastworkflow.train.model_pipeline_training",
+    "ModelPipelineRegistry": "fastworkflow.intent.router",
 }
 
 

@@ -18,7 +18,7 @@ from unittest.mock import patch
 import pytest
 
 import fastworkflow
-from fastworkflow.train import model_pipeline_training
+from fastworkflow.intent import router as intent_router
 from fastworkflow import CommandOutput
 from fastworkflow.intent import intent_loop
 from fastworkflow._workflows.command_metadata_extraction import intent_detection
@@ -242,7 +242,7 @@ def test_clarification_reply_matches_the_stored_candidates_without_classifying(t
     app, cme = todo_cme
     app.root = TodoListManager()
     app.record = app.root
-    monkeypatch.setattr(model_pipeline_training, "CommandRouter", _RouterThatMustNotClassify)
+    monkeypatch.setattr(intent_router, "CommandRouter", _RouterThatMustNotClassify)
     _RouterThatMustNotClassify.built = 0
     record = _pending_question(cme, SCOPE_CANDIDATES)
     predictor = CommandNamePrediction(cme)
@@ -261,7 +261,7 @@ def test_clarification_reply_naming_a_command_of_another_scope_is_picked_and_fou
     lives is the path's to say (``intent_loop.choose``): a command no scope of this workflow has is found nowhere,
     and the CME then says so instead of running anything."""
     _, cme = todo_cme
-    monkeypatch.setattr(model_pipeline_training, "CommandRouter", _RouterThatMustNotClassify)
+    monkeypatch.setattr(intent_router, "CommandRouter", _RouterThatMustNotClassify)
     record = _pending_question(cme, CANDIDATES)
 
     answered, chosen = CommandNamePrediction(cme).read_reply(record, reply)
@@ -306,7 +306,7 @@ def test_unmatched_clarification_reply_is_asked_once_more_and_then_ends_with_the
     from fastworkflow.intent import intent_loop
 
     _, cme = todo_cme
-    monkeypatch.setattr(model_pipeline_training, "CommandRouter", _RouterThatMustNotClassify)
+    monkeypatch.setattr(intent_router, "CommandRouter", _RouterThatMustNotClassify)
     _pending_question(cme, CANDIDATES)
 
     first = wildcard.ResponseGenerator()(cme, "zzzz qqqq nothing", None)
@@ -326,7 +326,7 @@ def test_unmatched_clarification_reply_is_asked_once_more_and_then_ends_with_the
 def test_slash_core_command_name_on_a_first_message_is_matched_exactly(todo_cme, monkeypatch):
     _, cme = todo_cme
     _RouterThatMustNotClassify.built = 0
-    monkeypatch.setattr(model_pipeline_training, "CommandRouter", _RouterThatMustNotClassify)
+    monkeypatch.setattr(intent_router, "CommandRouter", _RouterThatMustNotClassify)
     predictor = CommandNamePrediction(cme)
     result = predictor.predict("/what_can_i_do")
     assert result.command == "IntentDetection/what_can_i_do"
@@ -337,7 +337,7 @@ def test_slash_core_command_name_on_a_first_message_is_matched_exactly(todo_cme,
 def test_slash_name_owned_by_another_context_gets_the_routing_hint(todo_cme, monkeypatch):
     app, cme = todo_cme
     _RouterThatMustNotClassify.built = 0
-    monkeypatch.setattr(model_pipeline_training, "CommandRouter", _RouterThatMustNotClassify)
+    monkeypatch.setattr(intent_router, "CommandRouter", _RouterThatMustNotClassify)
     # Stand where the todo workflow's item context is: a name of the manager context is foreign to it and its parents.
     result = CommandNamePrediction(cme).predict("/create_todo_list my list")
     # (the todo workflow's current context owns it or reaches it; the guard only fires for a name no scope on the path owns)

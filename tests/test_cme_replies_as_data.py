@@ -11,7 +11,7 @@ from uuid import uuid4
 import pytest
 
 import fastworkflow
-from fastworkflow.train import model_pipeline_training
+from fastworkflow.intent import router as intent_router
 from fastworkflow._workflows.command_metadata_extraction import intent_detection
 from fastworkflow.agent.capability_answer import CapabilityListing
 from fastworkflow.engine.command_executor import CommandExecutor
@@ -34,7 +34,7 @@ class _RefusingRouter:
 @pytest.fixture
 def pair(setup_test_environment, monkeypatch):
     fastworkflow.init({})
-    monkeypatch.setattr(model_pipeline_training, "CommandRouter", _RefusingRouter)
+    monkeypatch.setattr(intent_router, "CommandRouter", _RefusingRouter)
     app = fastworkflow.Workflow.create(workflow_folderpath=TODO, workflow_id_str=f"cme-data-{uuid4()}")
     cme = fastworkflow.Workflow.create(
         workflow_folderpath=fastworkflow.get_internal_workflow_path(CME),

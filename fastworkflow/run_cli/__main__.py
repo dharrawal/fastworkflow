@@ -157,7 +157,7 @@ def run_main(args):
     # Fail fast if the workflow has not been trained. Otherwise intent detection
     # crashes on the first command when CommandRouter cannot find the model
     # artifacts (e.g. ___command_info/global/threshold.json).
-    from fastworkflow.train.model_pipeline_training import is_workflow_trained
+    from fastworkflow.intent.router import is_workflow_trained
     trained, missing_contexts = is_workflow_trained(args.workflow_path)
     # A context with no trained local model may run on the model matcher (JEV_API_KEY):
     # intent_detector.startup_report is the one decision, and it says in one line what the chain is.

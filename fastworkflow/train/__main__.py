@@ -19,15 +19,8 @@ from fastworkflow.utils import dspy_utils, python_utils
 from fastworkflow.parameters import workflow_vocabulary
 from fastworkflow import ModuleType
 from fastworkflow.train import model_pipeline_training
-from fastworkflow.train.model_pipeline_training import (
-    CommandRouter,
-    TrainingDataError,
-    preflight_benchmark,
-    train,
-    get_route_layer_filepath_model,
-    set_active_artifact_version,
-    GLOBAL_CONTEXT_FOLDER,
-)
+from fastworkflow.intent.router import CommandRouter, get_route_layer_filepath_model, GLOBAL_CONTEXT_FOLDER
+from fastworkflow.train.model_pipeline_training import TrainingDataError, preflight_benchmark, train, set_active_artifact_version
 from fastworkflow.train.generate_param_examples import generate_dspy_examples, missing_value_example
 from fastworkflow.core.command_directory import CommandDirectory, get_cached_command_directory
 from fastworkflow.core.command_routing import RoutingDefinition, RoutingRegistry

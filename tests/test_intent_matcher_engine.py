@@ -24,7 +24,7 @@ import pytest
 from dspy.utils import DummyLM
 
 import fastworkflow
-from fastworkflow.train import model_pipeline_training
+from fastworkflow.intent import router as intent_router
 from fastworkflow.intent import intent_detector
 from fastworkflow.agent import run_listing, workflow_agent
 from fastworkflow.core import turn_cache
@@ -609,7 +609,7 @@ def test_a_router_a_test_supplies_is_asked_and_the_matcher_is_not(on_a_book, mat
     model = matcher_model({"Book/list_loans": 0.9, "none": 0.1})
     _fake_head(os.path.join(app.folderpath, "___command_info", "Book"))
 
-    monkeypatch.setattr(model_pipeline_training, "CommandRouter", _router(["Book/show_book"]))
+    monkeypatch.setattr(intent_router, "CommandRouter", _router(["Book/show_book"]))
     predictor = CommandNamePrediction(cme)
     output = predictor.predict("what is out on loan")
     trace = predictor.trace
@@ -864,7 +864,7 @@ def _book_with_a_head(monkeypatch, cme, head_labels, head_details):
     """A Book head on disk that answers *head_labels* (the router behind the module's name)."""
     app = cme.context["app_workflow"]
     _fake_head(os.path.join(app.folderpath, "___command_info", "Book"))
-    monkeypatch.setattr(model_pipeline_training, "CommandRouter", _router(head_labels, head_details))
+    monkeypatch.setattr(intent_router, "CommandRouter", _router(head_labels, head_details))
     return CommandNamePrediction(cme)
 
 

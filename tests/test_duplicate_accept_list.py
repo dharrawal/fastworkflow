@@ -26,7 +26,7 @@ import pytest
 from dotenv import dotenv_values
 
 import fastworkflow
-from fastworkflow.train.model_pipeline_training import CommandRouter
+from fastworkflow.intent.router import CommandRouter
 from fastworkflow.train import artifact_versioning as av
 from fastworkflow.train import duplicate_detection as dd
 from fastworkflow.train.__main__ import (

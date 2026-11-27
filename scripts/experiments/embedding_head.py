@@ -201,6 +201,7 @@ def _product(args: argparse.Namespace) -> int:
     import single_intent_model as runner
     from fastworkflow.intent import intent_detector
     from fastworkflow.train import model_pipeline_training as heads
+    from fastworkflow.intent import router as intent_router
     from fastworkflow.train import artifact_versioning, determinism, embedding_head, utterance_cache
     from fastworkflow.train import intent_model_layout as layout
     from fastworkflow.train import workflow_model as wm
@@ -241,7 +242,7 @@ def _product(args: argparse.Namespace) -> int:
         with open(os.path.join(model_dir, layout.SCOPES_FILENAME), encoding="utf-8") as f:
             scopes_file = json.load(f)
         routers = {
-            context: heads.CommandRouter(
+            context: intent_router.CommandRouter(
                 os.path.join(info, artifact_versioning.context_folder_name(context)))
             for context in contexts
         }

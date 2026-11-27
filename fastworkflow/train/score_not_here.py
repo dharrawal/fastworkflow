@@ -367,7 +367,7 @@ def predict_cases(workflow_folderpath: str, cases: Sequence[dict], arm: Optional
     the artifacts were trained with.
     """
     from fastworkflow.train import artifact_versioning
-    from fastworkflow.train.model_pipeline_training import CommandRouter
+    from fastworkflow.intent.router import CommandRouter
 
     effective_arm = check_arm(workflow_folderpath, arm)
     version = artifact_versioning.resolve_current_version(workflow_folderpath)

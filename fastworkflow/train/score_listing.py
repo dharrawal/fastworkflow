@@ -569,7 +569,7 @@ def source_head_answers(source_folder: Path, utterances: Sequence[str]) -> dict[
     """
     import gc
 
-    from fastworkflow.train.model_pipeline_training import CommandRouter, ModelPipeline
+    from fastworkflow.intent.router import CommandRouter, ModelPipeline
     from fastworkflow.train import artifact_versioning
     from fastworkflow.train.score_lookup import discover_heads
 

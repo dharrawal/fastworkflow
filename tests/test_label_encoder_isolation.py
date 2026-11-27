@@ -12,10 +12,7 @@ import time
 
 from sklearn.preprocessing import LabelEncoder
 
-from fastworkflow.train.model_pipeline_training import (
-    get_label_encoder,
-    predict_single_sentence,
-)
+from fastworkflow.intent.router import get_label_encoder, predict_single_sentence
 
 
 def _write_encoder(path, classes):

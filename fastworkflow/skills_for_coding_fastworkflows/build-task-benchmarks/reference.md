@@ -226,7 +226,7 @@ as the runtime does (see `SKILL.md`). Never touches the backend or a remote mode
 
 ```python
 from fastworkflow.intent.intent_detector import handed_on
-from fastworkflow.train.model_pipeline_training import CommandRouter
+from fastworkflow.intent.router import CommandRouter
 from fastworkflow.intent.nlu_labels import PARAMETER_VALUE_LABEL, WILDCARD_LABEL
 
 

@@ -51,6 +51,7 @@ from typing import ClassVar, Mapping, Optional, Sequence
 import numpy as np
 
 from fastworkflow.train import model_pipeline_training as heads
+from fastworkflow.intent import router as intent_router
 from fastworkflow.intent.nlu_labels import PARAMETER_VALUE_LABEL, WILDCARD_LABEL
 from fastworkflow.train import heldout_evaluation, intent_model_layout, workflow_model
 from fastworkflow.train.intent_model_layout import HEAD_FILENAME, SCOPES_FILENAME
@@ -925,7 +926,7 @@ class EmbeddingLayoutTrainer(workflow_model.LayoutTrainer):
             predict_labels = None
             if unseen or has_benchmark:
                 # The reader the runtime uses, found through the context folder as it will be.
-                router = heads.CommandRouter(context_dir)
+                router = intent_router.CommandRouter(context_dir)
 
                 def predict_labels(utterance: str, _router=router) -> list[str]:
                     return [str(label) for label in _router.predict(utterance)]

@@ -447,7 +447,7 @@ def test_confusable_commands_on_the_real_retail_router(retail_seeds):
     reaches the default threshold, which is the model-side counterpart of the lexical
     stress test above.
     """
-    from fastworkflow.train.model_pipeline_training import CommandRouter
+    from fastworkflow.intent.router import CommandRouter
 
     with warnings.catch_warnings():
         # The committed label encoder was pickled by an older scikit-learn.

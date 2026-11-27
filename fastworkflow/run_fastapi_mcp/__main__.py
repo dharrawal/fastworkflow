@@ -424,7 +424,7 @@ def warm_first_turn(workflow_path: str) -> None:
 
         resolved = str(Path(workflow_path).resolve())
         started = time.time()
-        from fastworkflow.train.model_pipeline_training import warm_intent_heads
+        from fastworkflow.intent.router import warm_intent_heads
 
         warmed = warm_intent_heads(resolved)
         from fastworkflow.agent.workflow_agent import warm_planning_commands

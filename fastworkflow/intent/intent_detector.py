@@ -353,13 +353,13 @@ def refresh_stale_head(folder: str) -> None:
     (a retrain of them still needs a restart). A turn already running keeps the router it started with. Never raises."""
     import time
 
-    from fastworkflow.train import model_pipeline_training
+    from fastworkflow.intent import router as intent_router
     from fastworkflow.train import artifact_versioning
     from fastworkflow.utils.logging import logger
 
     try:
-        router_cache = model_pipeline_training.CommandRouter._instances_cache
-        key = folder.replace("*", model_pipeline_training.GLOBAL_CONTEXT_FOLDER)
+        router_cache = intent_router.CommandRouter._instances_cache
+        key = folder.replace("*", intent_router.GLOBAL_CONTEXT_FOLDER)
         inner = getattr(router_cache.get(key), "_workflow_router", None)
         if getattr(inner, "head_version", None) is None:
             return
@@ -371,7 +371,7 @@ def refresh_stale_head(folder: str) -> None:
         current = artifact_versioning.resolve_current_version(workflow)
         if current is None:
             return
-        with model_pipeline_training.CommandRouter._build_lock:
+        with intent_router.CommandRouter._build_lock:
             prefix = os.path.join(workflow, "___command_info") + os.sep
             for cached_key in [k for k, v in router_cache.items() if k.startswith(prefix)
                                and getattr(getattr(v, "_workflow_router", None), "head_version", current) != current]:
@@ -381,12 +381,12 @@ def refresh_stale_head(folder: str) -> None:
 
 
 def _command_router(folder: str):
-    # Looked up on the module at call time, so a caller that replaces the trainer's CommandRouter
+    # Looked up on the module at call time, so a caller that replaces fastworkflow.intent.router.CommandRouter
     # (or places an instance in its cache) is honoured here as it is everywhere else.
-    from fastworkflow.train import model_pipeline_training
+    from fastworkflow.intent import router as intent_router
 
     refresh_stale_head(folder)
-    return model_pipeline_training.CommandRouter(folder)
+    return intent_router.CommandRouter(folder)
 
 
 #: The setting that used to choose among engines. It is gone: the chain is the only behaviour. A value
@@ -957,7 +957,7 @@ def _untrained_report(
         from fastworkflow.train.artifact_versioning import context_folder_name
 
         if missing_contexts is None:
-            from fastworkflow.train.model_pipeline_training import is_workflow_trained
+            from fastworkflow.intent.router import is_workflow_trained
 
             missing_contexts = is_workflow_trained(workflow_folderpath)[1]
         missing = sorted(str(context) for context in missing_contexts)
@@ -1027,7 +1027,7 @@ def global_head_trained(workflow) -> bool:
     The model matcher does not change this: a workflow with no global head has no global-first step, and no
     extra matcher call is made for one. Where the step does run and the global head is not confident, '*' is
     on the matcher's scope path (``walk_path``), so its answer comes from the walk's one grouped call."""
-    from fastworkflow.train.model_pipeline_training import GLOBAL_CONTEXT_FOLDER
+    from fastworkflow.intent.router import GLOBAL_CONTEXT_FOLDER
 
     try:
         commands = fastworkflow.RoutingRegistry.get_definition(workflow.folderpath).get_command_names(GLOBAL_CONTEXT)

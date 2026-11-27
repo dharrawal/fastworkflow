@@ -25,7 +25,7 @@ from types import SimpleNamespace
 import pytest
 
 import fastworkflow
-from fastworkflow.train import model_pipeline_training
+from fastworkflow.intent import router as intent_router
 from fastworkflow._workflows.command_metadata_extraction import intent_detection
 from fastworkflow._workflows.command_metadata_extraction.intent_detection import (
     MATCHER_LAYER_KNOWN_NAME_FOREIGN_CONTEXT,
@@ -109,7 +109,7 @@ def planning_name_env(tmp_path, initialized_fastworkflow, monkeypatch):
 def classifier_consulted(planning_name_env, monkeypatch):
     """Route every classifier consultation to a double that records it and raises."""
     consulted: list[str] = []
-    monkeypatch.setattr(model_pipeline_training, "CommandRouter", refusing_router(consulted))
+    monkeypatch.setattr(intent_router, "CommandRouter", refusing_router(consulted))
     return consulted
 
 

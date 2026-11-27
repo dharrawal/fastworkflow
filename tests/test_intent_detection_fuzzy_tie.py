@@ -23,7 +23,7 @@ from io import StringIO
 import pytest
 
 import fastworkflow
-from fastworkflow.train import model_pipeline_training
+from fastworkflow.intent import router as intent_router
 from fastworkflow.core.command_routing import RoutingDefinition
 from fastworkflow.intent import intent_loop
 from fastworkflow._workflows.command_metadata_extraction import intent_detection
@@ -156,7 +156,7 @@ def test_tie_defers_to_the_classifier_rather_than_picking_one(
     is what must win."""
     _, cme_workflow = todolist_workflows
     monkeypatch.setattr(
-        model_pipeline_training, "CommandRouter",
+        intent_router, "CommandRouter",
         _router_returning(["TodoList/get_properties"]))
 
     result = CommandNamePrediction(cme_workflow).predict(TIED_PREFIX)
@@ -174,7 +174,7 @@ def test_tie_reaches_the_ambiguity_prompt_when_the_classifier_is_unsure(
     """Deferring restores the prompt that exists to ask which one was meant."""
     _, cme_workflow = todolist_workflows
     monkeypatch.setattr(
-        model_pipeline_training, "CommandRouter",
+        intent_router, "CommandRouter",
         _router_returning(
             ["TodoList/add_child_todoitem", "TodoList/add_child_todolist"]))
 
@@ -189,7 +189,7 @@ def test_tie_is_logged(todolist_workflows, monkeypatch, setup_test_environment):
     """The pre-guard behaviour was invisible; a discarded tie must not be."""
     _, cme_workflow = todolist_workflows
     monkeypatch.setattr(
-        model_pipeline_training, "CommandRouter",
+        intent_router, "CommandRouter",
         _router_returning(["TodoList/get_properties"]))
 
     log_output = StringIO()
@@ -218,7 +218,7 @@ def test_unique_fuzzy_match_still_routes_without_the_classifier(
     stub router would return a different command if it were consulted."""
     _, cme_workflow = todolist_workflows
     monkeypatch.setattr(
-        model_pipeline_training, "CommandRouter",
+        intent_router, "CommandRouter",
         _router_returning(["TodoList/get_properties"]))
 
     result = CommandNamePrediction(cme_workflow).predict("add_child_todoitm")
@@ -234,7 +234,7 @@ def test_exact_command_name_still_routes(
     reaches the fuzzy branch at all."""
     _, cme_workflow = todolist_workflows
     monkeypatch.setattr(
-        model_pipeline_training, "CommandRouter",
+        intent_router, "CommandRouter",
         _router_returning(["TodoList/get_properties"]))
 
     result = CommandNamePrediction(cme_workflow).predict("add_child_todolist")

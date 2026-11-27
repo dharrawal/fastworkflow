@@ -115,6 +115,7 @@ def cmd_local(args) -> int:
     fastworkflow.init(env_vars=env)
     from fastworkflow.intent import intent_detector as idt
     from fastworkflow.train import model_pipeline_training as heads
+    from fastworkflow.intent import router as intent_router
     from fastworkflow.agent import workflow_agent
     from fastworkflow.intent.nlu_labels import PARAMETER_VALUE_LABEL, is_escalation, label_of
     from fastworkflow.train import artifact_versioning
@@ -137,7 +138,7 @@ def cmd_local(args) -> int:
         folder = os.path.join(info, name)
         if os.path.isfile(os.path.join(folder, "threshold.json")):
             contexts[idt.GLOBAL_CONTEXT if name == "global" else name] = folder
-    routers = {context: heads.CommandRouter(folder) for context, folder in contexts.items()}
+    routers = {context: intent_router.CommandRouter(folder) for context, folder in contexts.items()}
     assert artifact_versioning.context_folder_name(GLOBAL) == "global"
 
     paths = {}

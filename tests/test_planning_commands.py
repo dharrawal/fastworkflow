@@ -1439,7 +1439,7 @@ def test_selective_training_fingerprints_exclude_planning_commands(library_train
 
 def test_param_example_training_list_excludes_planning_commands(library_training_workflow):
     from fastworkflow.core.command_directory import CommandDirectory
-    from fastworkflow.train.model_pipeline_training import get_route_layer_filepath_model
+    from fastworkflow.intent.router import get_route_layer_filepath_model
     from fastworkflow.train.__main__ import _get_commands_with_parameters
 
     cmd_dir = CommandDirectory.load(library_training_workflow)

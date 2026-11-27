@@ -25,7 +25,7 @@ from io import StringIO
 import pytest
 
 import fastworkflow
-from fastworkflow.train import model_pipeline_training
+from fastworkflow.intent import router as intent_router
 from fastworkflow.core.command_directory import CommandDirectory
 from fastworkflow.intent.nlu_labels import (
     ESCALATION_LABELS,
@@ -259,7 +259,7 @@ def test_predict_mixed_topk_logs_suppressed_escalation_and_prompts_locally(
     class Router(_PredictingRouter):
         labels = [WILDCARD_LABEL, "TodoList/add_child_todoitem", "TodoList/get_properties"]
 
-    monkeypatch.setattr(model_pipeline_training, "CommandRouter", Router)
+    monkeypatch.setattr(intent_router, "CommandRouter", Router)
     prediction = CommandNamePrediction(cme_workflow)
     log_output = StringIO()
     log_handler = logging.StreamHandler(log_output)
@@ -289,7 +289,7 @@ def test_a_reserved_label_from_the_head_resolves_to_no_command(tmp_path, monkeyp
     class Router(_PredictingRouter):
         labels = [label]
 
-    monkeypatch.setattr(model_pipeline_training, "CommandRouter", Router)
+    monkeypatch.setattr(intent_router, "CommandRouter", Router)
     intent = CommandNamePrediction(cme_workflow).predict("france")
     assert intent.command is None and intent.outcome == "none"
     assert intent.bare_value is (label == PARAMETER_VALUE_LABEL)

@@ -20,12 +20,8 @@ from dotenv import dotenv_values
 
 import fastworkflow
 from fastworkflow.core.command_routing import RoutingRegistry
-from fastworkflow.train.model_pipeline_training import (
-    BUILT_IN_VAGUE_REPLIES,
-    BUILT_IN_VAGUE_WEIGHT,
-    CommandRouter,
-    train,
-)
+from fastworkflow.intent.router import CommandRouter
+from fastworkflow.train.model_pipeline_training import BUILT_IN_VAGUE_REPLIES, BUILT_IN_VAGUE_WEIGHT, train
 from fastworkflow.train import determinism, intent_model_layout as layout, utterance_cache
 from fastworkflow.train import workflow_model as wm
 

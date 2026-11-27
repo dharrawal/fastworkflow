@@ -54,10 +54,7 @@ def load_labeled_utterances(info_dir: Path, context_commands: list[str]) -> list
 
 def evaluate_context(workflow_dir: Path, ctx_name: str, ctx_commands: list[str]) -> dict:
     # Import late: pulls in torch/transformers (slow).
-    from fastworkflow.train.model_pipeline_training import (
-        CommandRouter,
-        predict_single_sentence,
-    )
+    from fastworkflow.intent.router import CommandRouter, predict_single_sentence
 
     info_dir = workflow_dir / "___command_info"
     ctx_folder = GLOBAL_CONTEXT_FOLDER if ctx_name == "*" else ctx_name

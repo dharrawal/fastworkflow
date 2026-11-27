@@ -175,7 +175,7 @@ def test_direct_action_path_via_process_action_turn(
 def hello_initialized():
     # `is_workflow_trained`, not "___command_info exists": an untrained
     # scaffold already has that directory (3.3 port adaptation).
-    from fastworkflow.train.model_pipeline_training import is_workflow_trained
+    from fastworkflow.intent.router import is_workflow_trained
 
     if not is_workflow_trained(HELLO_WORLD)[0]:
         pytest.skip("hello_world is not trained on this machine")

@@ -129,7 +129,7 @@ def _heads(args) -> int:
 
 def _old(args) -> int:
     import fastworkflow
-    from fastworkflow.train.model_pipeline_training import CommandRouter
+    from fastworkflow.intent.router import CommandRouter
     from fastworkflow.train import artifact_versioning
     from fastworkflow.train import heldout_evaluation as he
 

@@ -111,7 +111,7 @@ VERSIONS_README_FILENAME: str = "README.md"
 # therefore the only thing that makes it safe to replace on the next publish.
 COMPAT_MARKER_FILENAME: str = ".fastworkflow_compat"
 
-# Must match fastworkflow.train.model_pipeline_training.GLOBAL_CONTEXT_FOLDER exactly. It is
+# Must match fastworkflow.intent.router.GLOBAL_CONTEXT_FOLDER exactly. It is
 # duplicated rather than imported because that module pulls in torch/transformers and
 # this one must stay cheap; `test_artifact_versioning.py` asserts the two agree.
 GLOBAL_CONTEXT_FOLDER: str = "global"

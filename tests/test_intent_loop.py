@@ -22,7 +22,7 @@ import pytest
 
 import fastworkflow
 from fastworkflow.intent import intent_clarification, intent_detector, intent_loop
-from fastworkflow.train import model_pipeline_training
+from fastworkflow.intent import router as intent_router
 from fastworkflow._workflows.command_metadata_extraction._commands import wildcard
 from fastworkflow._workflows.command_metadata_extraction.intent_detection import CommandNamePrediction
 from fastworkflow._workflows.plan_metadata_extraction import resolution
@@ -100,7 +100,7 @@ def chain_without_the_manager(tmp_path, setup_test_environment):
 ])
 def test_both_paths_decide_a_name_alike(chain, monkeypatch, text, decided_by):
     app, cme, *_ = chain
-    monkeypatch.setattr(model_pipeline_training, "CommandRouter", _router_by_context({}, []))
+    monkeypatch.setattr(intent_router, "CommandRouter", _router_by_context({}, []))
     plan_path = resolution.part_intent(app, text)
     cme_path = CommandNamePrediction(cme).predict(text)
     assert (plan_path.outcome, plan_path.decided_by) == ("match", decided_by)
@@ -115,7 +115,7 @@ def test_a_prefix_of_a_command_name_is_not_a_name_on_either_path(chain, monkeypa
     """bd fix-ftdl.9: the fuzzy name layer compares the WHOLE request with each whole name, so a request that only
     begins like a name (``get_all`` for ``get_all_children``) is not the user naming it: the chain decides."""
     app, cme, *_ = chain
-    monkeypatch.setattr(model_pipeline_training, "CommandRouter", _router_by_context({}, []))
+    monkeypatch.setattr(intent_router, "CommandRouter", _router_by_context({}, []))
     for decided in (resolution.part_intent(app, text), CommandNamePrediction(cme).predict(text)):
         assert decided.decided_by not in (intent_loop.BY_EXACT_NAME, intent_loop.BY_FUZZY_NAME), (text, decided)
 
@@ -133,7 +133,7 @@ def test_both_paths_refuse_a_foreign_name_with_the_same_hint_and_ask_no_model(ch
     to a model)."""
     app, cme, *_ = chain_without_the_manager
     asked: list = []
-    monkeypatch.setattr(model_pipeline_training, "CommandRouter", _router_by_context({}, asked))
+    monkeypatch.setattr(intent_router, "CommandRouter", _router_by_context({}, asked))
     plan_path = resolution.part_intent(app, "create_todo_list my list")
     cme_path = CommandNamePrediction(cme).predict("create_todo_list my list")
     assert plan_path.command is None and plan_path.decided_by == "foreign_name"
@@ -149,7 +149,7 @@ def test_the_local_model_decides_over_the_whole_walk_before_any_model_is_asked(c
     app, cme, *_ = chain
     _heads(app, "TodoItem", "TodoList", "TodoListManager")
     asked: list = []
-    monkeypatch.setattr(model_pipeline_training, "CommandRouter", _router_by_context(
+    monkeypatch.setattr(intent_router, "CommandRouter", _router_by_context(
         {"TodoItem": ["wildcard"], "TodoList": ["TodoList/get_all_children"], "TodoListManager": ["wildcard"]}, asked))
     remote = script_matcher(monkeypatch, {})          # a text the remote model is asked about would fail the call
 
@@ -321,7 +321,7 @@ def test_the_cme_pending_question_is_one_json_record_saved_with_the_session(tmp_
 @pytest.mark.usefixtures("no_planner_key")
 def test_difference_1_core_commands_are_answerable_on_the_cme_only(chain, monkeypatch):
     app, cme, *_ = chain
-    monkeypatch.setattr(model_pipeline_training, "CommandRouter", _router_by_context({}, []))
+    monkeypatch.setattr(intent_router, "CommandRouter", _router_by_context({}, []))
     for typed in ("what_can_i_do", "abort", "you_misunderstood", "go_up"):
         on_the_cme = intent_loop.resolve(app, typed, core=True)
         assert (on_the_cme.outcome, on_the_cme.kind) == ("match", "core"), typed
@@ -435,7 +435,7 @@ def test_a_bare_no_as_a_new_message_is_decided_like_any_request_and_never_runs_a
     """With no question pending, a bare "no" is a request: the reply reader (whose none-words now need candidates) is not
     consulted at all. It is out of scope, so the CME opens the misunderstanding question (what ``_detect`` did before)."""
     app, cme, *_ = chain
-    monkeypatch.setattr(model_pipeline_training, "CommandRouter", _router_by_context({}, []))
+    monkeypatch.setattr(intent_router, "CommandRouter", _router_by_context({}, []))
     ran: list = []
     monkeypatch.setattr(wildcard.CommandExecutor, "perform_action", staticmethod(
         lambda workflow, action: ran.append(action.command_name) or fastworkflow.CommandOutput(

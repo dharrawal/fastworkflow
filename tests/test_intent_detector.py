@@ -19,7 +19,7 @@ import dataclasses
 from typing import Optional
 import fastworkflow
 from fastworkflow.intent import intent_detector
-from fastworkflow.train import model_pipeline_training
+from fastworkflow.intent import router as intent_router
 from fastworkflow.agent import run_listing
 from fastworkflow._workflows.command_metadata_extraction import intent_detection
 from fastworkflow._workflows.command_metadata_extraction.intent_detection import CommandNamePrediction
@@ -329,7 +329,7 @@ def test_the_default_router_is_the_trainers_as_named_when_the_engine_is_built(li
     from fastworkflow.train import model_pipeline_training
 
     _fake_head(os.path.join(library_copy, "___command_info", "Book"))
-    monkeypatch.setattr(model_pipeline_training, "CommandRouter", _router(["Book/list_loans"]))
+    monkeypatch.setattr(intent_router, "CommandRouter", _router(["Book/list_loans"]))
     engine = intent_detector.engine_for(library_copy, "Book")
     assert engine.decide("loans").labels == ["Book/list_loans"]
 
@@ -531,7 +531,7 @@ def test_the_cme_decision_walks_the_heads_nearest_first_through_the_engine(on_a_
     app, cme, library, _ = on_a_book
     _heads(app, "Book", "Library")
     asked = []
-    monkeypatch.setattr(model_pipeline_training, "CommandRouter", _router_by_context(
+    monkeypatch.setattr(intent_router, "CommandRouter", _router_by_context(
         {"Book": [WILDCARD_LABEL], "Library": ["Library/list_branches"]}, asked))
     predictor = CommandNamePrediction(cme)
 
@@ -547,7 +547,7 @@ def test_the_cme_decision_stops_on_a_bare_value_from_the_head(on_a_book, monkeyp
     app, cme, _, _ = on_a_book
     _heads(app, "Book", "Library")
     asked = []
-    monkeypatch.setattr(model_pipeline_training, "CommandRouter", _router_by_context(
+    monkeypatch.setattr(intent_router, "CommandRouter", _router_by_context(
         {"Book": [PARAMETER_VALUE_LABEL], "Library": ["Library/list_branches"]}, asked))
 
     intent = CommandNamePrediction(cme).predict("france")
@@ -560,7 +560,7 @@ def test_the_cme_decision_stops_on_a_bare_value_from_the_head(on_a_book, monkeyp
 def test_the_classifier_layer_records_its_engine_on_the_trace(on_a_book, monkeypatch):
     app, cme, _, _ = on_a_book
     _heads(app, "Book", "Library")
-    monkeypatch.setattr(model_pipeline_training, "CommandRouter", _router(["Book/show_book"]))
+    monkeypatch.setattr(intent_router, "CommandRouter", _router(["Book/show_book"]))
     predictor = CommandNamePrediction(cme)
     intent = predictor.predict("tell me about this one")
     trace = predictor.trace
@@ -645,7 +645,7 @@ def test_head_answers_reads_each_trained_head_through_the_contract(on_a_book, mo
         "topk_scores": [0.4, 0.35, 0.25],
     }
     labels = ["Book/loan_report", "wildcard", "Book/list_loans"]
-    monkeypatch.setattr(model_pipeline_training, "CommandRouter", _router(labels, details))
+    monkeypatch.setattr(intent_router, "CommandRouter", _router(labels, details))
 
     assert run_listing.head_answers(app, "who has this book") == {
         "Book": {

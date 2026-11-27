@@ -230,7 +230,7 @@ class ChatSession:
         # Import is deferred so `import fastworkflow` / ChatSession does not
         # pull transformers/torch/sklearn at package import time.
         try:
-            from fastworkflow.train.model_pipeline_training import CommandRouter
+            from fastworkflow.intent.router import CommandRouter
 
             command_info_root = Path(workflow.folderpath) / "___command_info"
             if command_info_root.is_dir():

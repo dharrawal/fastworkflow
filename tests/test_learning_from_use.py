@@ -463,7 +463,7 @@ def test_too_few_teaching_rows_are_not_refitted(library):
 def test_a_calibrated_threshold_is_in_force_unless_the_setting_names_one(library):
     model_dir = str(_current_model_dir(library))
     version = av.resolve_current_version(library)
-    from fastworkflow.train.model_pipeline_training import CommandRouter
+    from fastworkflow.intent.router import CommandRouter
 
     context = os.path.join(library, "___command_info", "Book")
     assert CommandRouter(context)._workflow_router.threshold == 0.65
@@ -514,7 +514,7 @@ def test_a_published_head_is_picked_up_without_a_restart_and_a_turn_in_flight_ke
 
 def test_the_other_layouts_are_not_reloaded(library):
     """A router that is not an embedding head is left where it is: nothing for the reload to look at."""
-    from fastworkflow.train.model_pipeline_training import CommandRouter
+    from fastworkflow.intent.router import CommandRouter
 
     context = os.path.join(library, "___command_info", "Book")
     router = CommandRouter(context)
