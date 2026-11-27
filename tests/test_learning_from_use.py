@@ -23,9 +23,9 @@ from types import SimpleNamespace
 import pytest
 
 import fastworkflow
-from fastworkflow import intent_detector
-from fastworkflow import intent_learning as learning
-from fastworkflow.command_routing import RoutingRegistry
+from fastworkflow.intent import intent_detector
+from fastworkflow.intent import intent_learning as learning
+from fastworkflow.core.command_routing import RoutingRegistry
 from fastworkflow.train import artifact_versioning as av
 from fastworkflow.train import embedding_head as eh
 from fastworkflow.train import head_refit
@@ -599,7 +599,7 @@ def _plan_of(*pairs):
 
 def test_a_reviewed_part_is_a_confirmed_accept_or_switch_and_an_unreviewed_one_is_the_links_answer(
         initialized_fastworkflow, tmp_path):  # noqa: F811
-    from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+    from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
     fastworkflow.init(env_vars={})
     wf = tmp_path / "wf"

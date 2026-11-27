@@ -19,7 +19,8 @@ import pytest
 
 import fastworkflow
 from fastworkflow import model_pipeline_training
-from fastworkflow import CommandOutput, intent_loop
+from fastworkflow import CommandOutput
+from fastworkflow.intent import intent_loop
 from fastworkflow._workflows.command_metadata_extraction import intent_detection
 from fastworkflow._workflows.command_metadata_extraction._commands import wildcard
 from fastworkflow._workflows.command_metadata_extraction.intent_detection import (
@@ -29,7 +30,7 @@ from fastworkflow._workflows.command_metadata_extraction.parameter_extraction im
     ParameterExtraction,
     extraction_of,
 )
-from fastworkflow.command_executor import _wildcard_command_output
+from fastworkflow.engine.command_executor import _wildcard_command_output
 from fastworkflow.parameters.signatures import (
     INVALID_FLOAT_VALUE,
     INVALID_INT_VALUE,
@@ -153,7 +154,7 @@ def todo_cme(tmp_path):
 
 
 def _route_ambiguous(app, cme, *, assistant: bool):
-    from fastworkflow import intent_loop
+    from fastworkflow.intent import intent_loop
 
     c = cme.context
     if assistant:
@@ -221,7 +222,7 @@ SCOPE_CANDIDATES = ["TodoListManager/list_todo_lists", "TodoListManager/create_t
 
 def _pending_question(cme, candidates, request="find something"):
     """The which-command question the CME holds for *candidates* (the intent loop's record, in its context)."""
-    from fastworkflow import intent_loop
+    from fastworkflow.intent import intent_loop
 
     record = intent_loop.open_question(request, [{"name": name, "description": "", "closest": True}
                                                  for name in candidates], listing_hint=True)
@@ -269,7 +270,7 @@ def test_clarification_reply_naming_a_command_of_another_scope_is_picked_and_fou
     assert chosen is None
     out = wildcard.ResponseGenerator()(cme, reply, None)
     assert out.handled is True and out.routed is False and "not available from here" in out.response
-    from fastworkflow import intent_loop
+    from fastworkflow.intent import intent_loop
     assert intent_loop.pending_record(cme.context) is None   # the question is over
 
 
@@ -302,7 +303,7 @@ def test_parameter_request_values_exclude_not_given_sentinels():
 
 # Other ambiguity exits: a reply that cannot be read is asked once more, then the question ends with the listing
 def test_unmatched_clarification_reply_is_asked_once_more_and_then_ends_with_the_listing(todo_cme, monkeypatch):
-    from fastworkflow import intent_loop
+    from fastworkflow.intent import intent_loop
 
     _, cme = todo_cme
     monkeypatch.setattr(model_pipeline_training, "CommandRouter", _RouterThatMustNotClassify)

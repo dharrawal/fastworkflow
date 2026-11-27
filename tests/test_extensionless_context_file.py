@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow.command_directory import CommandDirectory
+from fastworkflow.core.command_directory import CommandDirectory
 from fastworkflow.planning.command_preview import load_problems
 
 LIBRARY = Path(__file__).resolve().parent.parent / "fastworkflow" / "examples" / "library"

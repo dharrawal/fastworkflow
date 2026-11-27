@@ -18,13 +18,14 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow import command_declarations, command_writes, workflow_agent
+from fastworkflow.core import command_declarations, command_writes
+from fastworkflow import workflow_agent
 from fastworkflow.planning import command_preview
 from fastworkflow.planning import planning_commands as pc
-from fastworkflow.approval_annotations import command_approval
-from fastworkflow.command_declarations import UserApproval
-from fastworkflow.command_directory import CommandLoadError
-from fastworkflow.command_routing import RoutingRegistry
+from fastworkflow.core.approval_annotations import command_approval
+from fastworkflow.core.command_declarations import UserApproval
+from fastworkflow.core.command_directory import CommandLoadError
+from fastworkflow.core.command_routing import RoutingRegistry
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401 - shared fixture
 
 pytestmark = pytest.mark.usefixtures("initialized_fastworkflow")

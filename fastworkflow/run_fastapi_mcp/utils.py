@@ -26,10 +26,10 @@ from fastworkflow.session.session_state_store import (
     get_session_state_store,
 )
 from fastworkflow.session.state_serialization import StateEncodingError
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 from fastworkflow.experiment.readiness import runtime_readiness_snapshot
 from fastworkflow.utils.logging import logger
-from fastworkflow.turn_progress import ProgressEvent
+from fastworkflow.core.turn_progress import ProgressEvent
 from fastworkflow.experiment.runner import (
     MissingExperimentLifecycleFeature,
     experiment_store_readiness,

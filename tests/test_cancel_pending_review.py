@@ -9,7 +9,7 @@ import json
 import pytest
 
 from fastworkflow.review import approval_binding as ab
-from fastworkflow.turn import TurnStatus
+from fastworkflow.core.turn import TurnStatus
 from tests.test_approval_binding import (  # noqa: F401 - fixtures
     _finish, annotated_library, no_live_model, no_model_call_for_parameters, todo)
 from tests.test_round1_gate import EMMA, FIND, JOKE, _open_review, _split_into, gated, remote_decides_emma_and_joke  # noqa: F401

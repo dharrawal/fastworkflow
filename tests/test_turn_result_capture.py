@@ -28,14 +28,14 @@ from fastworkflow import (
     TurnStatus,
     mint_turn_key,
 )
-from fastworkflow.command_executor import CommandExecutor
-from fastworkflow.turn import (
+from fastworkflow.engine.command_executor import CommandExecutor
+from fastworkflow.core.turn import (
     collect_artifact_responses,
     merge_artifact_responses_into,
     validate_artifacts_serializable,
     warn_on_unserializable_artifacts,
 )
-from fastworkflow.workflow_execution_context import MAX_HANDOFFS, WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import MAX_HANDOFFS, WorkflowExecutionContext
 from tests.todo_list_workflow.application.todo_manager import TodoListManager
 
 TURN_KEY_RE = re.compile(r"^\d{8}T\d{6}\.\d{6}Z-[0-9a-f]{12}$")
@@ -72,7 +72,7 @@ def todo_workflow_path() -> str:
 @pytest.fixture
 def initialized_fastworkflow(monkeypatch):
     fastworkflow.init({})
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     monkeypatch.setattr(
         WorkflowExecutionContext,
@@ -171,7 +171,7 @@ class TestExportsAndTurnKey:
         assert callable(mint_turn_key)
         assert issubclass(TurnResult, object)
         # the same objects are reachable via the turn module
-        import fastworkflow.turn as turn_mod
+        import fastworkflow.core.turn as turn_mod
 
         assert turn_mod.TurnResult is TurnResult
         assert turn_mod.mint_turn_key is mint_turn_key
@@ -556,7 +556,7 @@ class TestFailureCapture:
         ctx, _wf = _make_assistant_ctx(todo_workflow_path, monkeypatch)
         _enter_todo_list_manager(_wf, tmp_path)
 
-        from fastworkflow.command_executor import CommandNotFoundError
+        from fastworkflow.engine.command_executor import CommandNotFoundError
         from fastworkflow.workflow_agent import _execute_workflow_query
 
         def unroutable_invoke(cls, session, command: str):

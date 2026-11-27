@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow.command_routing import RoutingRegistry
+from fastworkflow.core.command_routing import RoutingRegistry
 from fastworkflow.model_pipeline_training import (
     INTERNAL_CME_ARM,
     NOT_HERE_SEEDS,
@@ -229,7 +229,7 @@ def test_a_workflow_with_no_artifacts_is_not_refused_here(tmp_path):
 
 
 def test_chat_session_refuses_an_old_artifact_before_it_creates_a_workflow(tmp_path):
-    from fastworkflow.chat_session import ChatSession
+    from fastworkflow.engine.chat_session import ChatSession
 
     workflow = str(tmp_path / "old_chat_app")
     _write_version(workflow, "20260101T000000Z-oldchat", manifest={"seed": 1})
@@ -297,7 +297,7 @@ def test_the_automatic_cme_check_skips_only_the_framework_workflows(tmp_path):
 
 def test_every_execution_context_refuses_an_old_cme_before_it_builds_anything(tmp_path, monkeypatch):
     """The CME serves every session, so the context's constructor is the gate for every runtime path."""
-    from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+    from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
     old_cme = str(tmp_path / "old_cme")
     _write_version(old_cme, "20260101T000000Z-oldcme", manifest={"seed": 1})

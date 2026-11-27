@@ -82,7 +82,7 @@ import sys
 import collections
 from typing import Any, Mapping, Optional, Sequence
 
-from fastworkflow.nlu_labels import is_non_routable, label_of
+from fastworkflow.intent.nlu_labels import is_non_routable, label_of
 from fastworkflow.train import planning_test_set as pts
 from fastworkflow.train import score_not_here as scorer
 

@@ -27,7 +27,7 @@ def collect_command_files_and_context_model(
             if file.endswith('.py') and file != '__init__.py'
         )
     # The context model: every context folder with the bases its class Context declares (inherits)
-    from fastworkflow.command_context_model import (
+    from fastworkflow.core.command_context_model import (
         CommandContextModel, CommandContextModelValidationError, context_folders)
     workflow = os.path.dirname(os.path.abspath(output_dir))
     context_model = None
@@ -203,7 +203,7 @@ def generate_readme_content(
     readme.append("## Available Commands\n")
 
     # Add global commands first if they exist
-    from fastworkflow.command_directory import declares_signature
+    from fastworkflow.core.command_directory import declares_signature
 
     global_commands = []
     for meta in command_metadata:

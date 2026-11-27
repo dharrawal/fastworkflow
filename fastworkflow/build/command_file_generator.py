@@ -4,7 +4,7 @@ from typing import Dict, List, Tuple
 from fastworkflow.build.class_analysis_structures import ClassInfo, MethodInfo, PropertyInfo, FunctionInfo
 from fastworkflow.build.command_file_template import create_command_file, create_function_command_file
 from fastworkflow.utils.python_utils import get_module_import_path, find_module_dependencies
-from fastworkflow.command_context_model import CommandContextModel
+from fastworkflow.core.command_context_model import CommandContextModel
 import importlib.util
 import traceback
 import json

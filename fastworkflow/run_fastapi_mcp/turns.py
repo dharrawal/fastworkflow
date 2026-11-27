@@ -45,7 +45,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 import fastworkflow
 from fastworkflow.review import approval_binding
 from fastworkflow.session.state_serialization import StateEncodingError
-from fastworkflow.turn import TurnStatus
+from fastworkflow.core.turn import TurnStatus
 from fastworkflow.utils.logging import logger
 from fastworkflow.utils.react import NoSuspendedAgentStateError
 

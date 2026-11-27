@@ -11,9 +11,9 @@ import os
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Set, Tuple
 
-from fastworkflow.command_context_model import CommandContextModel, CommandContextModelValidationError
+from fastworkflow.core.command_context_model import CommandContextModel, CommandContextModelValidationError
 from fastworkflow.utils.logging import logger
-from fastworkflow.utils.context_utils import get_context_names
+from fastworkflow.core.context_utils import get_context_names
 
 __all__ = ["NavigatorStubGenerator"]
 

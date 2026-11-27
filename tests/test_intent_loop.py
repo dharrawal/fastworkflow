@@ -21,7 +21,8 @@ import shutil
 import pytest
 
 import fastworkflow
-from fastworkflow import intent_clarification, intent_detector, intent_loop, model_pipeline_training
+from fastworkflow.intent import intent_clarification, intent_detector, intent_loop
+from fastworkflow import model_pipeline_training
 from fastworkflow._workflows.command_metadata_extraction._commands import wildcard
 from fastworkflow._workflows.command_metadata_extraction.intent_detection import CommandNamePrediction
 from fastworkflow._workflows.plan_metadata_extraction import resolution
@@ -181,7 +182,7 @@ def test_the_remote_model_is_never_offered_a_command_that_only_enters_a_context_
 def test_one_hook_records_a_settled_decision_from_both_paths(chain, monkeypatch):
     app, cme, *_ = chain
     written: list = []
-    from fastworkflow import intent_learning
+    from fastworkflow.intent import intent_learning
 
     monkeypatch.setattr(intent_learning, "record", lambda folder, **row: written.append(row) or True)
     intent = CommandNamePrediction(cme).predict("create_todo_list")
@@ -282,7 +283,7 @@ def test_the_question_text_and_data_are_one_function_and_one_shape():
 def test_the_cme_pending_question_is_one_json_record_saved_with_the_session(tmp_path, setup_test_environment):
     """The CME keeps the which-command question under ``intent_loop`` in its context: plain data, saved whole with the
     session and restored on the next process (no file is written for it)."""
-    from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+    from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
     folder = tmp_path / "todo_list_workflow"
     shutil.copytree(TODO, folder, ignore=shutil.ignore_patterns(
@@ -377,8 +378,8 @@ def test_difference_3_after_two_unreadable_replies_the_cme_lists_the_commands(ch
 
 @pytest.mark.usefixtures("initialized_fastworkflow")
 def test_two_unreadable_replies_drop_the_part_on_the_plan_path(ambiguous_joke):
-    from fastworkflow.turn import TurnStatus
-    from fastworkflow.workflow_execution_context import NOT_RUN_ARTIFACT
+    from fastworkflow.core.turn import TurnStatus
+    from fastworkflow.engine.workflow_execution_context import NOT_RUN_ARTIFACT
     from tests.test_parameter_loop import HOST, _reply
     from tests.test_round1_gate import JOKE
 

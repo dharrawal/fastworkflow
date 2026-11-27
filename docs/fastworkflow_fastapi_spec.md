@@ -164,7 +164,7 @@ inside each `command_outputs` entry the field is now singular
 level are `workflow_name`, `context`, `command_name`, `command_parameters` and
 the response payload — they live per command under `command_outputs[*]`.
 
-The public projection (`fastworkflow/turn.py`, `TurnOutput`):
+The public projection (`fastworkflow/core/turn.py`, `TurnOutput`):
 
 ```json
 {

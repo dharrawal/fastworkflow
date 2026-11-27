@@ -6,7 +6,7 @@ from typing import Any, Callable, Optional
 
 import fastworkflow
 from fastworkflow import context_budget
-from fastworkflow.command_metadata_api import CommandMetadataAPI
+from fastworkflow.core.command_metadata_api import CommandMetadataAPI
 from fastworkflow.observation_offloading.archive import (
     RuntimeHandleArchive,
     UnavailableHandleArchive,

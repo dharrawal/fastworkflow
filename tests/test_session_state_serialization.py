@@ -18,7 +18,7 @@ from fastworkflow.session.session_state_store import (
     DiskSessionStateStore,
     IncompatibleSessionState,
 )
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 from tests.test_turn_result_capture import no_review_gate  # noqa: F401 - shared fixture (autouse in this module)
 
 
@@ -30,7 +30,7 @@ def todo_workflow_path() -> str:
 @pytest.fixture
 def initialized_fastworkflow(tmp_path, monkeypatch):
     fastworkflow.init({"FASTWORKFLOW_STATE_ROOT": str(tmp_path / "workflow_contexts")})
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     monkeypatch.setattr(
         WorkflowExecutionContext,
@@ -44,7 +44,7 @@ def initialized_fastworkflow(tmp_path, monkeypatch):
 
 def _agent_question(question, message=None) -> dict:
     """The saved form of the agent's own question (the turn's ``agent`` waiting record)."""
-    from fastworkflow import waiting as waiting_module
+    from fastworkflow.core import waiting as waiting_module
 
     return waiting_module.Waiting(
         waiting_module.KIND_AGENT, question=question, payload={} if message is None else {"message": message}).to_state()

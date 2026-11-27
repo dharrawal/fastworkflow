@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from fastworkflow.command_context_model import (
+from fastworkflow.core.command_context_model import (
     CommandContextModel,
     CommandContextModelValidationError,
 )

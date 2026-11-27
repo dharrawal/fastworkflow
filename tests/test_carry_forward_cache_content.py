@@ -447,8 +447,8 @@ def test_reserved_nlu_labels_are_not_generation_eligible():
     only a workflow.
     """
     import fastworkflow
-    from fastworkflow.command_routing import RoutingRegistry
-    from fastworkflow.nlu_labels import WILDCARD_LABEL
+    from fastworkflow.core.command_routing import RoutingRegistry
+    from fastworkflow.intent.nlu_labels import WILDCARD_LABEL
     from fastworkflow.train.selective_training import _generation_eligible_commands
 
     fastworkflow.init({"FASTWORKFLOW_STATE_ROOT": "/tmp/test_eligible_workflow_contexts"})
@@ -477,7 +477,7 @@ def test_an_unreadable_workflow_path_does_not_raise_or_force_a_retrain():
     commands, which every workflow has -- so what is asserted is the property that
     matters: no exception escapes, and nothing reserved comes back.
     """
-    from fastworkflow.nlu_labels import WILDCARD_LABEL
+    from fastworkflow.intent.nlu_labels import WILDCARD_LABEL
     from fastworkflow.train.selective_training import _generation_eligible_commands
 
     eligible = _generation_eligible_commands("/nonexistent/workflow/path")

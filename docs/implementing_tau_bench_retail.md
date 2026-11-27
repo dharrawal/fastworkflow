@@ -152,7 +152,7 @@ Example (pseudocode):
 import json
 import fastworkflow
 from fastworkflow import Action
-from fastworkflow.command_executor import CommandExecutor
+from fastworkflow.engine.command_executor import CommandExecutor
 
 _SESSION_ENV: dict[int, any] = {}
 _STEP_CB = None  # optional callback(dict)
@@ -273,7 +273,7 @@ class FastWorkflowAgentAdapter:
 - If `_execute_workflow_query` becomes unavailable, patch `CommandExecutor.invoke_command` with an equivalent bridge:
 
 ```python
-from fastworkflow.command_executor import CommandExecutor as CE
+from fastworkflow.engine.command_executor import CommandExecutor as CE
 _orig_invoke = CE.invoke_command
 
 def invoke_command_bridge(chat_session, command):

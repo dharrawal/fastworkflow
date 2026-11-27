@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow.command_routing import RoutingRegistry
+from fastworkflow.core.command_routing import RoutingRegistry
 from fastworkflow.train import generate_synthetic as gs
 from fastworkflow.train import not_here_pilot as pilot
 from fastworkflow.train import param_example_cache as pc

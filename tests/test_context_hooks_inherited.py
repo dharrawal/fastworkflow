@@ -214,7 +214,7 @@ def test_b_round_trip_matches_the_class_by_class_hooks(initialized_fastworkflow,
 # (c) the helper is neither a command nor a context
 
 def test_c_the_helper_module_is_not_registered(initialized_fastworkflow, inheriting, plain):
-    from fastworkflow.command_directory import get_cached_command_directory
+    from fastworkflow.core.command_directory import get_cached_command_directory
 
     for folder in (plain, inheriting):
         directory = get_cached_command_directory(str(folder))
@@ -259,8 +259,8 @@ def test_e_the_relative_import_of_the_helper_resolves_from_a_callback_file(initi
 # the other members the framework reads off the class
 
 def test_the_other_class_members_are_read_with_getattr_so_they_inherit(initialized_fastworkflow, inheriting):
-    from fastworkflow.context_identity import declared_instance_label
-    from fastworkflow.entry_declarations import declared_occupiable
+    from fastworkflow.core.context_identity import declared_instance_label
+    from fastworkflow.core.entry_declarations import declared_occupiable
 
     commands = inheriting / "_commands"
     (commands / "_shared" / "checkpoint.py").write_text(HELPER.replace(

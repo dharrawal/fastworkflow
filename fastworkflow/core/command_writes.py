@@ -19,7 +19,7 @@ when one of the phase's steps names it:
   (``phase_write_refusal``, called by ``CommandExecutor`` before the approval gate).
 
 Outside a planning command's phase (the turn's agent, a plain goal, a command the user typed) nothing
-changes. The decorator is defined in ``fastworkflow.command_declarations``, whose ``declaration_problems`` fails the
+changes. The decorator is defined in ``fastworkflow.core.command_declarations``, whose ``declaration_problems`` fails the
 load of a planning command that carries it.
 """
 from __future__ import annotations
@@ -29,7 +29,7 @@ import os
 from typing import Any, Optional
 
 import fastworkflow
-from fastworkflow.command_declarations import WRITES_ATTRIBUTE, declares_writes  # noqa: F401 - re-exported
+from fastworkflow.core.command_declarations import WRITES_ATTRIBUTE, declares_writes  # noqa: F401 - re-exported
 
 logger = logging.getLogger(__name__)
 

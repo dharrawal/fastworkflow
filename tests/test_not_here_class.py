@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow.command_routing import RoutingRegistry
+from fastworkflow.core.command_routing import RoutingRegistry
 from fastworkflow.model_pipeline_training import (
     NOT_HERE_SEEDS,
     RESERVED_CLASS_ARMS,
@@ -34,7 +34,7 @@ from fastworkflow.model_pipeline_training import (
     select_escalation_rows,
     trained_command_labels,
 )
-from fastworkflow.nlu_labels import WILDCARD_LABEL, label_of
+from fastworkflow.intent.nlu_labels import WILDCARD_LABEL, label_of
 from fastworkflow.planning.planning_commands import command_utterances  # noqa: F401
 from fastworkflow.train import score_not_here as scorer
 from fastworkflow.workflow_agent import planning_command_utterances

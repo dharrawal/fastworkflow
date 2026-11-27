@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import fastworkflow
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
-from fastworkflow.workflow import Workflow
+from fastworkflow.core.workflow import Workflow
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from fastworkflow._workflows.plan_metadata_extraction import _item_validation

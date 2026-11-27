@@ -259,7 +259,7 @@ The full internal `TurnResult`, post-redaction:
   `artifacts` carry `question_kind` (`agent`, `plan_choice`, `planning_parameter`,
   `phase_step`, `review`, `approval`) and that question's payload (`plan_choice`,
   `parameter_request`, `phase_step`, `review`, `approval`). The question itself is the turn's
-  one waiting record (`fastworkflow/waiting.py`), saved with the session, not in this store.
+  one waiting record (`fastworkflow/core/waiting.py`), saved with the session, not in this store.
 - **Parts not run** (no agent model): `artifacts.fw_not_run` lists one stop per part
   (`kind`, `command`, `phase`, `open_step` `{number, text, kind, reason}`, `done`, `facts`,
   `remaining`, `suggested_plan`, `means`, `sub_task`, and when present `results`,
@@ -376,7 +376,7 @@ WHERE name='fw.turn' AND trace_id=:turn_key AND end_ns IS NOT NULL;
 ## Intent-learning store
 
 Separate from the observability database: `<workflow>/___convo_info/intent_learning.sqlite3`
-(`fastworkflow/intent_learning.py`), one row per settled part: the request, context, the
+(`fastworkflow/intent/intent_learning.py`), one row per settled part: the request, context, the
 resolved command, `how` (`local`, `remote`, `name`, `user_choice`, `agent_choice`,
 `review_accept`, `review_switch`), `confirmed`, the head's facts at decision time
 (`head_version`, top label, `p_in`, `p_out`, threshold), the remote model's top label and

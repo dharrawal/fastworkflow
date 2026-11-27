@@ -22,11 +22,11 @@ import pytest
 
 import fastworkflow
 from fastworkflow.planning import command_preview
-from fastworkflow import context_navigation
-from fastworkflow.command_directory import CommandLoadError
-from fastworkflow.command_executor import CommandExecutor, call_response_generator
-from fastworkflow.command_routing import ModuleType
-from fastworkflow.workflow import MissingGetParentError
+from fastworkflow.core import context_navigation
+from fastworkflow.core.command_directory import CommandLoadError
+from fastworkflow.engine.command_executor import CommandExecutor, call_response_generator
+from fastworkflow.core.command_routing import ModuleType
+from fastworkflow.core.workflow import MissingGetParentError
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EXAMPLES = os.path.join(ROOT, "fastworkflow", "examples")

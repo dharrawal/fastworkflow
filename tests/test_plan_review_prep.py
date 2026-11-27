@@ -7,7 +7,7 @@ from dspy.utils import DummyLM
 
 from fastworkflow.review import review_engine as re
 from fastworkflow.review import review_proposals
-from fastworkflow.command_writes import write_commands
+from fastworkflow.core.command_writes import write_commands
 from fastworkflow.review.review_engine import Add, Change, Drop, PROPOSAL_TTL_SECONDS, apply_edits, parse_edits, reply_policy
 from fastworkflow.review.review_proposals import (
     Means, PendingItemSlot, ProposedEdit, SubTask, SubTaskInput, SubTaskProposal, merge_subtask_input_edit,
@@ -473,7 +473,7 @@ def test_a_drop_still_conflicts_with_a_field_change_on_that_item():
 def test_the_user_rendering_omits_means_keys_and_the_edit_hint(todo, monkeypatch):
     folder = todo.wf.folderpath
     monkeypatch.setattr(
-        "fastworkflow.command_writes.write_commands",
+        "fastworkflow.core.command_writes.write_commands",
         lambda path: frozenset({"Library/book_loans"}),
     )
     proposal = SubTaskProposal(items=[
@@ -534,7 +534,7 @@ def test_a_goal_edit_re_drafts_means_and_inputs(todo, monkeypatch):
 def test_part_intent_with_an_exclusion_reads_the_same_turn_cache_entry(todo, monkeypatch):
     """The one decision is memoised per part and turn; a look_up's exclusion filters that decision and makes no second
     detection (bd fix-o1lg: at most one matcher call per part per turn)."""
-    from fastworkflow import turn_cache
+    from fastworkflow.core import turn_cache
     from fastworkflow._workflows.plan_metadata_extraction import resolution
 
     keys: list = []
@@ -555,7 +555,7 @@ def test_part_intent_with_an_exclusion_reads_the_same_turn_cache_entry(todo, mon
 
 def test_redraft_for_look_up_preserves_the_goal(todo, monkeypatch):
     writes = frozenset({"Library/book_loans"})
-    monkeypatch.setattr("fastworkflow.command_writes.write_commands", lambda path: writes)
+    monkeypatch.setattr("fastworkflow.core.command_writes.write_commands", lambda path: writes)
     item = SubTask(goal="add a loan for Ann", means=Means(kind="planning", name="Library/book_loans"),
                    inputs=[SubTaskInput(name="title", value="Dune")])
     redrafted = redraft_for_look_up(todo.wf, item, earlier=[], planner_lm=None)

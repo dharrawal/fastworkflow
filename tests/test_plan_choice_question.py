@@ -1,4 +1,4 @@
-"""The plan-choice question (fix-yu3l.5, ``fastworkflow/intent_clarification.py``).
+"""The plan-choice question (fix-yu3l.5, ``fastworkflow/intent/intent_clarification.py``).
 
 With no agent model, a turn part that matches no planning command used to end as not run at once. A turn somebody can
 answer ASKS which planning command is meant. The question is asked while the turn's parts are being resolved
@@ -18,11 +18,12 @@ import json
 import dspy
 import pytest
 
-from fastworkflow import intent_clarification as choice
-from fastworkflow import no_agent_mode, workflow_agent
-from fastworkflow.turn import TurnStatus
+from fastworkflow.intent import intent_clarification as choice
+from fastworkflow.core import no_agent_mode
+from fastworkflow import workflow_agent
+from fastworkflow.core.turn import TurnStatus
 from fastworkflow.workflow_agent import build_query_with_next_steps as REAL_BUILD
-from fastworkflow.workflow_execution_context import NOT_RUN_ARTIFACT
+from fastworkflow.engine.workflow_execution_context import NOT_RUN_ARTIFACT
 from tests.test_approval_binding import _finish, annotated_library, todo  # noqa: F401
 from tests.test_parameter_loop import (  # noqa: F401 - the no-agent context and its helpers
     ABOUT_DUNE, ABOUT_EMMA, BOOK_PLAN, DUNE_RAN, EMMA_RAN, HOST, MEMBER, NOTE, NOTE_PLAN, NOTE_RAN, _as_a_new_process,

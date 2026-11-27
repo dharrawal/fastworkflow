@@ -14,7 +14,7 @@ import dspy
 
 from fastworkflow import workflow_agent
 from fastworkflow.utils import react as react_module
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 
 class Script:

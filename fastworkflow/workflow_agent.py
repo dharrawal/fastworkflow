@@ -27,8 +27,8 @@ from dspy.experimental import Choice, TypeSafe
 import fastworkflow
 from fastworkflow.observability import tracing
 from fastworkflow.review import approval_binding
-from fastworkflow import intent_loop
-from fastworkflow import turn_progress
+from fastworkflow.intent import intent_loop
+from fastworkflow.core import turn_progress
 from fastworkflow.utils import subtask_pool
 from fastworkflow.planning import planning_commands
 from fastworkflow.planning.planning_commands import (
@@ -39,18 +39,18 @@ from fastworkflow.split_merge import (
     unnamed_subjects, with_referent, without_repeated_clauses)
 from fastworkflow.utils.logging import logger
 from fastworkflow.policy.policy_runtime import policy_of
-from fastworkflow.workflow_execution_context import CommandCancelledError
+from fastworkflow.engine.workflow_execution_context import CommandCancelledError
 from fastworkflow.utils import dspy_utils
-from fastworkflow.command_directory import (
+from fastworkflow.core.command_directory import (
     CommandDirectory, _command_kind_from_ast, _handle_command_field_source_errors, check_no_planning_commands_folder,
     get_cached_command_directory,
 )
-from fastworkflow.command_metadata_api import CommandMetadataAPI
-from fastworkflow.command_executor import AlreadyInContextError, CommandNotFoundError
-from fastworkflow.context_navigation import (
+from fastworkflow.core.command_metadata_api import CommandMetadataAPI
+from fastworkflow.engine.command_executor import AlreadyInContextError, CommandNotFoundError
+from fastworkflow.core.context_navigation import (
     command_on_path, enters_current_context, lookup_scopes, render_already_in_context,
     scope_command_names, unavailable_command_message)
-from fastworkflow.context_navigation import home_contexts as context_homes
+from fastworkflow.core.context_navigation import home_contexts as context_homes
 from fastworkflow.utils.react import AskUserSuspend
 from fastworkflow.utils.chat_adapter import CommandsSystemPreludeAdapter
 from fastworkflow.utils.dspy_logger import watch_cut_off_replies
@@ -66,7 +66,7 @@ from fastworkflow.observation_offloading.state import (
     observability_db_path,
     scope_for_host,
 )
-from fastworkflow.context_identity import context_clause_for, context_identity
+from fastworkflow.core.context_identity import context_clause_for, context_identity
 
 _FINAL_ANSWER_DESC = "The answer from the evidence gathered: one line for each part of the request, giving what was found with its names and uids, or saying plainly that it was not found or not reached. Never claim work the trajectory does not show, and do not say the task is complete."
 
@@ -275,7 +275,7 @@ def _what_can_i_do(chat_session_obj: fastworkflow.ChatSession) -> str:
 
 def _unplanned_writes(host, workflow) -> frozenset[str]:
     """The write commands the running phase's steps do not name (none outside a phase)."""
-    from fastworkflow import command_writes
+    from fastworkflow.core import command_writes
 
     if workflow is None:
         return frozenset()
@@ -694,7 +694,7 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
 
     # Directly invoke the command without going through queues
     # This allows the agent to synchronously call workflow tools
-    from fastworkflow.command_executor import CommandExecutor, _annotation
+    from fastworkflow.engine.command_executor import CommandExecutor, _annotation
     started = datetime.now(timezone.utc)
     try:
         resolved_command = _explicit_agent_command(command, chat_session_obj.get_active_workflow())
@@ -893,7 +893,7 @@ def _refusal_may_ask_attended(chat_session_obj) -> bool:
     The callers add their own check that nothing ran yet in the turn (a re-run would repeat its
     side effects): a planning command call's refusal checks the whole turn, a fast-path call its own outputs.
     """
-    from fastworkflow import waiting
+    from fastworkflow.core import waiting
 
     return waiting.can_ask(chat_session_obj)
 
@@ -1710,7 +1710,7 @@ def split_settings_from_module(module, path: str) -> SplitSettings:
             f"{path}: a Signature (a replacement splitter prompt) is removed: write split_examples = "
             "[(\"<request>\", [\"<part 1>\", \"<part 2>\"]), ...] for the workflow's own examples; the framework's "
             "splitting rules are not replaceable")
-    from fastworkflow.command_context_model import CONTEXT_HOOKS
+    from fastworkflow.core.command_context_model import CONTEXT_HOOKS
 
     for name in sorted(name for name in dir(context) if not name.startswith("_") and name not in WORKFLOW_SETTINGS):
         if name in CONTEXT_HOOKS:
@@ -2003,7 +2003,7 @@ def planning_scopes(workflow) -> tuple[str, ...]:
     """
     if workflow is None:
         return ("",)
-    from fastworkflow.context_navigation import live_chain
+    from fastworkflow.core.context_navigation import live_chain
 
     return lookup_scopes(getattr(workflow, "folderpath", None), [name for _, name in live_chain(workflow)])
 
@@ -2040,7 +2040,7 @@ def _matcher_job_types(workflow_folderpath: str, examples: int = MATCHER_EXAMPLE
     The commands and their texts come from the detector contract (``intent_detector.planning_candidates``,
     the planning candidates of each scope), and each line is ``intent_detector.candidate_line``: the text is
     what it always was, byte for byte (``tests/test_intent_matcher_engine.py`` compares it with the old builder)."""
-    from fastworkflow import intent_detector
+    from fastworkflow.intent import intent_detector
 
     lines = [intent_detector.candidate_line(candidate.name, candidate.description, candidate.examples, examples)
              for candidate in intent_detector.planning_candidates(workflow_folderpath)
@@ -2318,7 +2318,7 @@ def classify_user_reply(reply: str, question: str) -> str:
             return value
         return "answer"
     except Exception as error:  # noqa: BLE001 - the reply is then taken as an answer; never fail the turn
-        from fastworkflow import remote_outage
+        from fastworkflow.intent import remote_outage
 
         remote_outage.report(error, "reply intent")
         return "answer"
@@ -2495,7 +2495,7 @@ def _one_job_gate(user_query: str, job_types: str) -> dict | None:
         label, probability = _choice_value_and_probability(choice)
         score = probability if label == "one" else float((choice.probabilities or {}).get("one", 1.0 - probability))
     except Exception as error:  # noqa: BLE001 - the gate is an optimisation; the splitter runs
-        from fastworkflow import remote_outage
+        from fastworkflow.intent import remote_outage
 
         remote_outage.report(error, "split gate")
         tracing.end_span(host, span, status=tracing.STATUS_ERROR,

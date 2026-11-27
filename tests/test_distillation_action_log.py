@@ -26,7 +26,7 @@ import pytest
 import fastworkflow
 from fastworkflow.evaluation.distillation import DistillationSession, distill_message
 from fastworkflow.workflow_agent import _append_action_record
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 
 @pytest.fixture
@@ -37,7 +37,7 @@ def todo_workflow_path() -> str:
 @pytest.fixture
 def initialized_fastworkflow():
     fastworkflow.init({})
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     RoutingRegistry.clear_registry()
     yield

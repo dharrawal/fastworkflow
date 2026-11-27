@@ -608,17 +608,17 @@ du -sh <workflow>/___command_info/*/ | sort -h | tail -5
 cat tests/todo_list_workflow/_commands/context_inheritance_model.json   # removed spelling: now inherits on class Context
 cat tests/todo_list_workflow/context_hierarchy_model.json
 grep -n "context_model.commands(ancestor_ctx)\|get_ancestor_contexts" \
-     fastworkflow/model_pipeline_training.py fastworkflow/command_context_model.py
+     fastworkflow/model_pipeline_training.py fastworkflow/core/command_context_model.py
 
 # AR2 - simple-name shadowing in the resolved command list
-sed -n '252,266p' fastworkflow/command_context_model.py
+sed -n '252,266p' fastworkflow/core/command_context_model.py
 
 # AR5 - training order is set-iteration order; the in-run cache is order-dependent, and
 # core commands are absent from commands() but present in crd.contexts
 sed -n '820,829p' fastworkflow/model_pipeline_training.py
 sed -n '839,863p' fastworkflow/model_pipeline_training.py
-grep -n "core_commands" fastworkflow/command_routing.py
-grep -n "pop('Core'" fastworkflow/command_context_model.py
+grep -n "core_commands" fastworkflow/core/command_routing.py
+grep -n "pop('Core'" fastworkflow/core/command_context_model.py
 ```
 
 Related skills: `fastworkflow-nlu-pipeline-reference` (the NLU stack this spec modifies),

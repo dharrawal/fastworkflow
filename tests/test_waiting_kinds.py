@@ -1,7 +1,7 @@
 """One test per pending kind: the derived ``waiting`` view and what ``//cancel`` does (bd fix-fpyb.8 step 1, fix-fpyb.6).
 
 ``WorkflowExecutionContext.waiting`` is a read-only view derived from today's flags and records
-(``fastworkflow/waiting.py``). For each kind of question a session can be waiting on, a real session is driven to that
+(``fastworkflow/core/waiting.py``). For each kind of question a session can be waiting on, a real session is driven to that
 question and two things are checked: (a) the view's kind and the pointer to the record that holds the question, and (b)
 that ``ChatSession.cancel_pending_prompt``'s lookup (``_pending_cancel_reply``) names the kind's cancel reply and that
 sending it ends the question the way typing that reply does. Real contexts on the real test workflows (the library
@@ -25,15 +25,17 @@ import dspy
 import pytest
 
 from fastworkflow.review import approval_binding as ab
-from fastworkflow import intent_loop, no_agent_mode, workflow_agent
+from fastworkflow.intent import intent_loop
+from fastworkflow.core import no_agent_mode
+from fastworkflow import workflow_agent
 from fastworkflow.parameters import parameter_clarification
 from fastworkflow.planning import planning_commands as pc
-from fastworkflow import waiting as waiting_module
-from fastworkflow.chat_session import ChatSession
-from fastworkflow.turn import TurnStatus
+from fastworkflow.core import waiting as waiting_module
+from fastworkflow.engine.chat_session import ChatSession
+from fastworkflow.core.turn import TurnStatus
 from fastworkflow.workflow_agent import build_query_with_next_steps as REAL_BUILD
 from fastworkflow.workflow_agent import load_planning_command_map
-from fastworkflow.workflow_execution_context import NOT_RUN_ARTIFACT, WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import NOT_RUN_ARTIFACT, WorkflowExecutionContext
 from tests.conftest import script_matcher
 from tests.test_approval_binding import _ask, _finish, annotated_library, todo  # noqa: F401 - fixtures
 from tests.test_no_agent_decisions import Conditional
@@ -514,7 +516,7 @@ def test_a_decline_decided_on_the_store_ends_the_record_too(todo):
 
 def test_an_approval_typed_by_the_user_is_not_a_suspension_until_a_reply_is_not_understood(todo, annotated_library):
     from fastworkflow import Action
-    from fastworkflow.command_executor import CommandExecutor
+    from fastworkflow.engine.command_executor import CommandExecutor
     from tests.test_approval_binding import MANDATORY
 
     out = CommandExecutor.perform_action(todo.wf, Action(

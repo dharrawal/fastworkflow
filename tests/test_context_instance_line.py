@@ -13,7 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from fastworkflow.context_identity import (
+from fastworkflow.core.context_identity import (
     context_clause_for,
     context_identity,
     declared_instance_label,
@@ -269,7 +269,7 @@ class ExecuteStepPrintsTheContextItRanIn(unittest.TestCase):
 
         patches = [
             patch("fastworkflow.workflow_agent._execute_workflow_query", dispatch),
-            patch("fastworkflow.context_identity.context_class_for", context_class),
+            patch("fastworkflow.core.context_identity.context_class_for", context_class),
         ]
         for item in patches:
             item.start()

@@ -25,7 +25,7 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow.chat_session import ChatSession
+from fastworkflow.engine.chat_session import ChatSession
 from fastworkflow.run_cli.turn_wait import (
     WaitOutcome, interrupted_message, timed_out_message, wait_for_turn,
 )

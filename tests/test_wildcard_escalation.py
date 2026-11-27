@@ -26,8 +26,8 @@ import pytest
 
 import fastworkflow
 from fastworkflow import model_pipeline_training
-from fastworkflow.command_directory import CommandDirectory
-from fastworkflow.nlu_labels import (
+from fastworkflow.core.command_directory import CommandDirectory
+from fastworkflow.intent.nlu_labels import (
     ESCALATION_LABELS,
     NON_ROUTABLE_LABELS,
     PARAMETER_VALUE_LABEL,
@@ -143,7 +143,7 @@ def test_wildcard_plain_utterances_still_expose_the_placeholders(cme_command_dir
 @pytest.mark.parametrize("label", sorted(NON_ROUTABLE_LABELS))
 def test_non_routable_label_is_never_a_candidate(label):
     """A reserved label is not looked up as a command and never offered as one (the intent loop's filter)."""
-    from fastworkflow import intent_loop
+    from fastworkflow.intent import intent_loop
 
     assert intent_loop._usable([label, "Todo/add_item"], set()) == ["Todo/add_item"]
     assert intent_loop._usable([label], set()) == []
@@ -155,7 +155,7 @@ def test_non_routable_label_is_never_a_candidate(label):
 
 
 def _question_for(labels, *, for_agent):
-    from fastworkflow import intent_clarification, intent_loop
+    from fastworkflow.intent import intent_clarification, intent_loop
 
     choices = [{"name": name, "description": "", "closest": True} for name in intent_loop._usable(labels, set())]
     return intent_clarification.plan_choice_question("approve all", choices, ambiguous=True, for_agent=for_agent)
@@ -194,7 +194,7 @@ def test_ambiguity_message_lists_only_local_candidates(run_as_agent):
 
 def _fake_heads(app_workflow, *contexts):
     """A trained-looking head for each context: the router double answers for it."""
-    from fastworkflow import intent_detector
+    from fastworkflow.intent import intent_detector
 
     for context in contexts:
         folder = intent_detector.head_folder(app_workflow.folderpath, context)

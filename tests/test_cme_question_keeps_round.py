@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import pytest
 
-from fastworkflow import intent_loop
+from fastworkflow.intent import intent_loop
 from tests.test_parameter_form_reply_contract import PARTIAL, session  # noqa: F401
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401
 
@@ -74,7 +74,7 @@ def test_two_unreadable_replies_end_the_question_and_the_round(session, run_as_a
 def test_the_slash_parameter_question_carries_the_kind_of_the_record(session, run_as_agent):
     """The `/` path's parameter question is tagged ``question_kind`` like the plan path's (``waiting.TABLE``), beside its
     ``parameter_request``; the turn stays a completed one (the chat page draws its form from a completed turn)."""
-    from fastworkflow import waiting
+    from fastworkflow.core import waiting
 
     ctx = session(run_as_agent)
     out = ctx.process_turn(PARTIAL)

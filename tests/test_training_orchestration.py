@@ -17,8 +17,8 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow.command_directory import CommandDirectory
-from fastworkflow.command_routing import RoutingDefinition, RoutingRegistry
+from fastworkflow.core.command_directory import CommandDirectory
+from fastworkflow.core.command_routing import RoutingDefinition, RoutingRegistry
 from fastworkflow import model_pipeline_training
 from fastworkflow.model_pipeline_training import TrainingDataError
 from fastworkflow.train import __main__ as train_orchestration

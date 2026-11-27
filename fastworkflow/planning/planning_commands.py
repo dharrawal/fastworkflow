@@ -237,8 +237,8 @@ from typing import Any, Callable, Literal, Mapping, Optional, Sequence, Union, g
 from pydantic import BaseModel
 
 from fastworkflow.observability import tracing
-from fastworkflow.command_context_model import CommandContextModel
-from fastworkflow.command_directory import CommandDirectory, compute_commands_source_fingerprint, raised_in_helper
+from fastworkflow.core.command_context_model import CommandContextModel
+from fastworkflow.core.command_directory import CommandDirectory, compute_commands_source_fingerprint, raised_in_helper
 from fastworkflow.parameters.field_options import (
     CLASSIFIER_CONFIRMS, CLASSIFIER_DECIDES, COMMAND_TEXT_AFTER_COMMAND_NAME,
     COPIED_FROM_COMMAND_TEXT, EXAMPLES_BY, FROM_COMMAND_OUTPUT, OPTION_KEYS, RECORD_NAMED_IN_COMMAND_TEXT, UI)
@@ -276,7 +276,7 @@ from fastworkflow.planning.planning_phases import (
 )
 from fastworkflow.utils import python_utils
 from fastworkflow.utils.logging import logger
-from fastworkflow.workflow_inheritance_model import (
+from fastworkflow.core.workflow_inheritance_model import (
     WorkflowInheritanceModel,
     WorkflowInheritanceModelError,
 )
@@ -3007,9 +3007,9 @@ def _command_class_problems(module: Any, fpath: str, signature: Any, is_planning
     arguments (``command_routing.response_call_arity_problem``) and the declarations on the generator
     (``command_declarations.declaration_problems``), and the Signature's members (``signature_member_problems``). One
     list, read as every other problem of the file."""
-    from fastworkflow.command_declarations import declaration_problems, declared_descend
-    from fastworkflow.command_directory import missing_generator_problem
-    from fastworkflow.command_routing import response_call_arity_problem
+    from fastworkflow.core.command_declarations import declaration_problems, declared_descend
+    from fastworkflow.core.command_directory import missing_generator_problem
+    from fastworkflow.core.command_routing import response_call_arity_problem
 
     problems = []
     if problem := missing_generator_problem(fpath):
@@ -3211,7 +3211,7 @@ def _resolve_field_sources_cached(folder: str, _source_fingerprint: str) -> Fiel
 def is_framework_planning_command(command: "PlanningCommandCommand") -> bool:
     """True for a framework-provided planning command (fastworkflow/review/commands): system machinery, not
     trained, not inventoried, not listed. It stays loadable and callable by name (``planning_command``)."""
-    import fastworkflow.command_directory as command_directory
+    import fastworkflow.core.command_directory as command_directory
 
     source = os.path.abspath(command.path) if command.path else ""
     root = os.path.abspath(str(command_directory.FRAMEWORK_PLANNING_COMMANDS_DIR))
@@ -3234,7 +3234,7 @@ def planning_command(workflow_folderpath: str, qualified_name: str) -> PlanningC
 
 def _clear_field_sources_cache() -> None:
     _resolve_field_sources_cached.cache_clear()
-    from fastworkflow import command_directory  # circular import: planning_commands -> command_context_model -> command_directory
+    from fastworkflow.core import command_directory  # circular import: planning_commands -> command_context_model -> command_directory
 
     command_directory.clear_resolved_command_signatures_cache()
 
@@ -4300,7 +4300,7 @@ def command_utterances(workflow_folderpath: str) -> dict[str, list[str]]:
     (a name in several contexts gets the utterances of each). Planning commands count too:
     their utterances come from their ``Signature``, as an execution command's do. Empty when
     the definition cannot be read; never raises."""
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     out: dict[str, list[str]] = {}
     try:
@@ -4356,7 +4356,7 @@ def command_texts(available_commands: str, workflow_folderpath: str | None = Non
 def _planning_only_names(workflow_folderpath: str) -> set[str]:
     """The simple names of the workflow's planning commands that no execution command shares.
     Empty when the routing definition cannot be read."""
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     try:
         crd = RoutingRegistry.get_definition(workflow_folderpath)

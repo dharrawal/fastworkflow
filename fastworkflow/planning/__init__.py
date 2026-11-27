@@ -93,7 +93,7 @@ from fastworkflow.observation_offloading.finish_check import quote_step_value
 from fastworkflow.utils.python_utils import type_text
 from fastworkflow.parameters.field_options import (ConfirmsOptions, CopiedOptions, FieldOptions,  # noqa: F401
                                         RecordNamedOptions, UiOptions)
-from fastworkflow.command_declarations import (UserApproval, descends_to,  # noqa: F401
+from fastworkflow.core.command_declarations import (UserApproval, descends_to,  # noqa: F401
                                                user_approval_for_execution)
 from fastworkflow.planning.planning_phases import (Phase, PhaseError, Placeholder, _template_kwargs,
                                        concatenated_steps, is_building_template,

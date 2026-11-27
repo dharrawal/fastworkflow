@@ -36,10 +36,10 @@ FRAMEWORK_COMMANDS = ("review_proposal", "review_subtasks")
 
 _HEADER = """import fastworkflow
 from fastworkflow import CommandOutput, CommandResponse
-from fastworkflow.workflow import Workflow
+from fastworkflow.core.workflow import Workflow
 from fastworkflow.parameters.signatures import InputForParamExtraction
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
-from fastworkflow.utils.context_utils import list_context_names
+from fastworkflow.core.context_utils import list_context_names
 from typing import Any, Dict, Optional
 from pydantic import BaseModel, Field
 
@@ -180,7 +180,7 @@ def test_command_schemas_lists_every_listed_command_with_kind_and_schemas(app_mo
     body = resp.json()
     # Every listed command, and nothing else: framework commands and the internal CME workflow's
     # commands (IntentDetection/*, wildcard) are in the directory but hidden.
-    from fastworkflow.command_directory import CommandDirectory
+    from fastworkflow.core.command_directory import CommandDirectory
     cme_root = os.path.realpath(fastworkflow.get_internal_workflow_path("command_metadata_extraction"))
     directory = CommandDirectory.load(output_workflow).map_command_2_metadata
     expected = {

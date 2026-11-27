@@ -133,7 +133,7 @@ def test_ordered_bases_is_depth_first_in_declared_order_each_once():
 
 @needs_real_workflow
 def test_ordered_bases_matches_command_context_model_on_a_real_workflow():
-    from fastworkflow.command_context_model import CommandContextModel
+    from fastworkflow.core.command_context_model import CommandContextModel
 
     raw = json.loads(Path(REAL_WORKFLOW, "_commands", "context_inheritance_model.json").read_text())
     inheritance = {name: definition["base"] for name, definition in raw.items()}

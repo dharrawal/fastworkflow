@@ -61,7 +61,7 @@ from typing import Iterable, Optional
 
 from pydantic import BaseModel, Field, ValidationError
 
-from fastworkflow.nlu_labels import (
+from fastworkflow.intent.nlu_labels import (
     NON_ROUTABLE_LABELS,
     PARAMETER_VALUE_LABEL,
     WILDCARD_LABEL,

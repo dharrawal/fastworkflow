@@ -10,12 +10,12 @@ import dspy
 import litellm
 
 import fastworkflow
-from fastworkflow import active_workflow
-from fastworkflow import waiting as waiting_module
-from fastworkflow.workflow_execution_context import CommandCancelledError, WorkflowExecutionContext
+from fastworkflow.engine import active_workflow
+from fastworkflow.core import waiting as waiting_module
+from fastworkflow.engine.workflow_execution_context import CommandCancelledError, WorkflowExecutionContext
 from fastworkflow.utils.logging import logger
 from fastworkflow.utils.startup_progress import StartupProgress
-from fastworkflow.turn_gate import GatedQueue, MessageQueue, TurnGate
+from fastworkflow.engine.turn_gate import GatedQueue, MessageQueue, TurnGate
 
 
 class SessionStatus(Enum):
@@ -113,7 +113,7 @@ class ChatSession:
             generate_insights: If True, enable teacher/student insights distillation
                          on each agent turn (Topology A / CLI only).
             detect_no_agent_mode: If True, an unset agent model (``LLM_AGENT``) puts the session in no-agent mode
-                         (``fastworkflow.no_agent_mode``). ``fastworkflow run_cli`` sets it.
+                         (``fastworkflow.core.no_agent_mode``). ``fastworkflow run_cli`` sets it.
 
         A chat session can run multiple workflows that share the same message queues.
         Use start_workflow() to start a specific workflow within this session.
@@ -149,7 +149,7 @@ class ChatSession:
         self._current_workflow = None
         self._keep_alive = False
 
-        from fastworkflow.command_executor import CommandExecutor
+        from fastworkflow.engine.command_executor import CommandExecutor
         self._CommandExecutor = CommandExecutor
 
         # this intializes the conversation traces file name also
@@ -375,7 +375,7 @@ class ChatSession:
           (the turn's "Command cancelled" output, suspension cleared).
         * ``"review"``: an open approval or plan review is answered ``no``.
         * ``"clarification"``: any other open question (a which-command or value question of a plan or of the open
-          command, a paused decision step) is answered with its kind's cancel reply (``fastworkflow.waiting.TABLE``).
+          command, a paused decision step) is answered with its kind's cancel reply (``fastworkflow.core.waiting.TABLE``).
 
         The reply goes through the user message queue, so the turn that results is read like any other.
         None when nothing is pending, or when an interrupted turn is still finishing (it has no prompt).

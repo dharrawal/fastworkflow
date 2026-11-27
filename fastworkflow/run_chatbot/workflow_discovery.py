@@ -98,7 +98,7 @@ def _workflow_is_trained(path: str) -> bool:
     if missing:
         # A context with no trained head may run on the model matcher: the one decision is
         # intent_detector.startup_report (the notice itself is printed when the workflow starts).
-        from fastworkflow import intent_detector
+        from fastworkflow.intent import intent_detector
 
         if intent_detector.startup_report(path, missing)[0]:
             return False

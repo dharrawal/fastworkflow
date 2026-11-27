@@ -7,7 +7,7 @@ import pytest
 
 from fastworkflow.review import review_proposals
 from fastworkflow.split_merge import JoinedSubtask, reduce_to_cap
-from fastworkflow.turn import TurnStatus
+from fastworkflow.core.turn import TurnStatus
 from fastworkflow.workflow_agent import MAX_SUBTASKS
 from tests.test_approval_binding import _finish  # noqa: F401
 from tests.conftest import script_matcher

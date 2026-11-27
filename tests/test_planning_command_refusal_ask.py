@@ -17,12 +17,13 @@ from dspy.utils.exceptions import LMTransportError
 
 import fastworkflow
 from fastworkflow.planning import planning_commands as sc
-from fastworkflow import no_agent_mode, workflow_agent
+from fastworkflow.core import no_agent_mode
+from fastworkflow import workflow_agent
 from fastworkflow.parameters import parameter_clarification as pcl
 from fastworkflow.parameters.parameter_clarification import Extraction, ParameterLoop
-from fastworkflow.waiting import KIND_PARAMETERS, Waiting
-from fastworkflow.turn import TurnStatus
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.core.waiting import KIND_PARAMETERS, Waiting
+from fastworkflow.core.turn import TurnStatus
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 from tests.llm_credentials import syndata_llm_available
 from tests.scripted_extractor import script_extractor
 from tests.test_text_planner_and_split import RecordingTraceSink, _session, workflow_env  # noqa: F401 - workflow_env is a fixture

@@ -199,7 +199,7 @@ def _timings(routers: dict, cases, repetitions: int, threads: int) -> dict:
 def _product(args: argparse.Namespace) -> int:
     import fastworkflow
     import single_intent_model as runner
-    from fastworkflow import intent_detector
+    from fastworkflow.intent import intent_detector
     from fastworkflow import model_pipeline_training as heads
     from fastworkflow.train import artifact_versioning, determinism, embedding_head, utterance_cache
     from fastworkflow.train import intent_model_layout as layout

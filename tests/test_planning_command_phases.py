@@ -42,9 +42,9 @@ from fastworkflow.planning.planning_phases import (
 )
 from fastworkflow.observation_offloading import finish_check
 from fastworkflow.observation_offloading.facts import MissingFactError
-from fastworkflow.turn import TurnStatus
+from fastworkflow.core.turn import TurnStatus
 from fastworkflow.utils.react import fastWorkflowReAct
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 from tests.test_turn_result_capture import no_review_gate  # noqa: F401 - the review gate is off for these turns
 from tests.test_turn_result_capture import (  # noqa: F401 - shared fixtures
     _make_agent_ctx,
@@ -2804,7 +2804,7 @@ def test_a_failure_after_an_earlier_phase_ran_does_not_restart_the_call(phased, 
 def test_a_first_phase_whose_steps_name_a_writing_command_is_not_restarted(phased, monkeypatch):
     # The library's find_book is declared @writes (stubbed here: the todo workflow declares none). Its
     # step ran before the facts failed, so a restart would write it twice: no re-extraction, no second plan.
-    from fastworkflow import command_writes
+    from fastworkflow.core import command_writes
     monkeypatch.setattr(command_writes, "write_commands",
                         lambda folderpath: frozenset({"find_book"}))
     phased.args.update(name="Dunne")

@@ -13,8 +13,8 @@ from pydantic import BaseModel, Field
 
 from fastworkflow.planning.planning_commands import call_phases
 from fastworkflow.planning.planning_phases import typed_phase_outputs
-from fastworkflow.turn import TurnStatus
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.core.turn import TurnStatus
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 from tests.test_planning_command_phases import (  # noqa: F401 - fixtures and helpers
     SEEN, SCRIPT, FILL_COMMANDS, NoteFacts, _phased_command, _run, command_output, no_review_gate, phased)
 from tests.test_turn_result_capture import initialized_fastworkflow, todo_workflow_path  # noqa: F401

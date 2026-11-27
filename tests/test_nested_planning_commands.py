@@ -22,8 +22,8 @@ import fastworkflow.workflow_agent as workflow_agent
 from fastworkflow.planning import planning_commands, planning_phases
 from fastworkflow.planning import plan_frame as plan_frame_module
 from fastworkflow.observability import tracing
-from fastworkflow.command_executor import CommandExecutor, CommandNotFoundError
-from fastworkflow.context_identity import context_class_for
+from fastworkflow.engine.command_executor import CommandExecutor, CommandNotFoundError
+from fastworkflow.core.context_identity import context_class_for
 from fastworkflow.planning import run
 from fastworkflow.planning import phase
 from fastworkflow.observation_offloading.facts import MissingFactError, workflow_signatures
@@ -39,8 +39,8 @@ from fastworkflow.examples.library._commands.Library.book_by_title import Signat
 from fastworkflow.examples.library._commands.Library.find_book import Signature as FindBook
 from fastworkflow.planning.planning_commands import PlanningCommandInputError
 from fastworkflow.session.state_serialization import validate_state
-from fastworkflow.turn import TurnStatus
-from fastworkflow.workflow_execution_context import (
+from fastworkflow.core.turn import TurnStatus
+from fastworkflow.engine.workflow_execution_context import (
     AWAITING_ANSWER_REFUSAL_MESSAGE,
     NESTED_BUDGET_SPENT_MESSAGE,
 )
@@ -1567,8 +1567,8 @@ import pytest
 
 import fastworkflow
 import tests.test_nested_planning_commands as nested
-from fastworkflow.command_routing import RoutingRegistry
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.core.command_routing import RoutingRegistry
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 mode, workdir, blob_path = sys.argv[1], Path(sys.argv[2]), Path(sys.argv[3])
 with pytest.MonkeyPatch.context() as mp:

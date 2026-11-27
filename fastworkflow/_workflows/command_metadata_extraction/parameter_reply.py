@@ -38,7 +38,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from fastworkflow import no_agent_mode, waiting
+from fastworkflow.core import no_agent_mode, waiting
 from fastworkflow.parameters import parameter_clarification
 from fastworkflow.parameters import ask, reply as replies
 from fastworkflow.utils.logging import logger

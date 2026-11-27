@@ -1,7 +1,7 @@
 """Tests for contextvar-backed active workflow stack nesting."""
 
 import fastworkflow
-from fastworkflow.active_workflow import (
+from fastworkflow.engine.active_workflow import (
     clear_workflow_stack,
     get_active_workflow,
     pop_active_workflow,

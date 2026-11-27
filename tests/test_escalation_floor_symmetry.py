@@ -59,14 +59,14 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow.command_routing import RoutingRegistry
+from fastworkflow.core.command_routing import RoutingRegistry
 from fastworkflow.model_pipeline_training import (
     cache_context_command_utterances,
     select_escalation_rows,
     train,
     trained_command_labels,
 )
-from fastworkflow.nlu_labels import (
+from fastworkflow.intent.nlu_labels import (
     PARAMETER_VALUE_LABEL,
     WILDCARD_LABEL,
     label_of,

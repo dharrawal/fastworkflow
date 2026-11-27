@@ -41,7 +41,7 @@ from fastworkflow.observation_offloading.state import (
     prune_once,
     reset_observation_state,
 )
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 
 class Signature(dspy.Signature):

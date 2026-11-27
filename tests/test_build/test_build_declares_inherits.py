@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from fastworkflow.build.__main__ import run_command_generation
-from fastworkflow.command_context_model import CommandContextModel
+from fastworkflow.core.command_context_model import CommandContextModel
 
 APPLICATION = Path(__file__).resolve().parents[1] / "example_workflow" / "application"
 

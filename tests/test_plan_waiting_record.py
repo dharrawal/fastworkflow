@@ -18,10 +18,10 @@ from fastworkflow.parameters import parameter_clarification as loops
 from fastworkflow.planning import planning_commands as pc
 from fastworkflow import workflow_agent
 from fastworkflow._workflows.plan_metadata_extraction.resolution import PlanResolution
-from fastworkflow.turn import TurnStatus
+from fastworkflow.core.turn import TurnStatus
 from fastworkflow.workflow_agent import build_query_with_next_steps as REAL_BUILD
 from fastworkflow.workflow_agent import load_planning_command_map
-from fastworkflow.workflow_execution_context import NOT_RUN_ARTIFACT
+from fastworkflow.engine.workflow_execution_context import NOT_RUN_ARTIFACT
 from tests.conftest import script_matcher
 from tests.test_approval_binding import _finish, annotated_library, todo  # noqa: F401 - fixtures
 from tests.test_parameter_loop import (  # noqa: F401 - fixtures and helpers

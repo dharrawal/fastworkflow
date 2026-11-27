@@ -288,8 +288,8 @@ Re-verification one-liners for volatile facts:
 
 | Fact | Re-verify with |
 |---|---|
-| fingerprint fields/coverage | `sed -n '603,655p' fastworkflow/command_directory.py` |
-| freshness gate | `sed -n '384,407p' fastworkflow/command_routing.py` |
+| fingerprint fields/coverage | `sed -n '603,655p' fastworkflow/core/command_directory.py` |
+| freshness gate | `sed -n '384,407p' fastworkflow/core/command_routing.py` |
 | snapshot JSON keys | `python -c "import json;print(list(json.load(open('tests/example_workflow/___command_info/command_directory.json'))))"` |
 | model artifact filenames per context | `ls fastworkflow/_workflows/command_metadata_extraction/___command_info/global/` |
 | param_labeled naming | `grep -n "param_labeled" fastworkflow/train/__main__.py` |
@@ -297,7 +297,7 @@ Re-verification one-liners for volatile facts:
 | trained-check semantics | `grep -n "def is_workflow_trained" -A 15 fastworkflow/model_pipeline_training.py` |
 | action-log lifecycle + clear points | `grep -rn "clear_action_log\|append_action_log" fastworkflow/*.py` |
 | observability DB path + schema | `grep -n "def observability_db" -A 8 fastworkflow/session/state_paths.py; grep -n "_SCHEMA_STATEMENTS" -A 45 fastworkflow/observability/store.py` |
-| trace event emission sites | `grep -n "CommandTraceEvent" fastworkflow/workflow_agent.py fastworkflow/workflow_execution_context.py` |
+| trace event emission sites | `grep -n "CommandTraceEvent" fastworkflow/workflow_agent.py fastworkflow/engine/workflow_execution_context.py` |
 | server trace dict keys | `grep -n "_format_trace_event" -A 14 fastworkflow/run_fastapi_mcp/utils.py` |
 | turn response body keys | `grep -n "def render_turn_response" -A 40 fastworkflow/run_fastapi_mcp/turns.py` |
 | destructive drain still unfixed | `grep -n "Destructive trace drain" fastworkflow/run_fastapi_mcp/turns.py` |

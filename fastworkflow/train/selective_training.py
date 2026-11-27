@@ -76,8 +76,8 @@ from typing import Iterable, Mapping, Optional
 from pydantic import BaseModel, ValidationError
 
 import fastworkflow
-from fastworkflow.command_directory import CommandDirectory
-from fastworkflow.nlu_labels import (
+from fastworkflow.core.command_directory import CommandDirectory
+from fastworkflow.intent.nlu_labels import (
     NON_ROUTABLE_LABELS,
     PARAMETER_VALUE_PLACEHOLDERS,
     WILDCARD_LABEL,

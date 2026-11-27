@@ -27,8 +27,8 @@ import fastworkflow
 from fastworkflow import TurnStatus
 from fastworkflow.observability import tracing
 from fastworkflow.observability import store as obs
-from fastworkflow.command_executor import CommandExecutor
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.command_executor import CommandExecutor
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 
 @pytest.fixture
@@ -39,7 +39,7 @@ def todo_workflow_path() -> str:
 @pytest.fixture
 def initialized_fastworkflow(monkeypatch):
     fastworkflow.init({})
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     monkeypatch.setattr(
         WorkflowExecutionContext,

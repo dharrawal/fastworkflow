@@ -16,8 +16,8 @@ import pytest
 
 import fastworkflow
 from fastworkflow import ModuleType
-from fastworkflow.command_executor import CommandExecutor
-from fastworkflow.workflow import running_command
+from fastworkflow.engine.command_executor import CommandExecutor
+from fastworkflow.core.workflow import running_command
 from fastworkflow.observability.decision_signals import SLOT_BINDING_SOURCES, SIGNAL_CONTRACT_VERSION
 from fastworkflow.observability.decision_signals import slot_binding_source  # noqa: F401 - the vocabulary
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import slot_binding_uncertainty

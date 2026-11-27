@@ -79,7 +79,7 @@ _RUNNER = textwrap.dedent(
     """
     import json, sys
     import fastworkflow
-    from fastworkflow.command_executor import CommandExecutor
+    from fastworkflow.engine.command_executor import CommandExecutor
     from fastworkflow.experiment.runner import ExperimentHarness, ExperimentTask
 
     def invoke(cls, session, command):

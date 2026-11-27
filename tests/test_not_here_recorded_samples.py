@@ -33,7 +33,7 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow.command_routing import RoutingRegistry
+from fastworkflow.core.command_routing import RoutingRegistry
 from fastworkflow.model_pipeline_training import (
     _stable_rank,
     choose_not_here_sample,

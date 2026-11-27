@@ -116,7 +116,7 @@ mechanism; the 100+ range is shown by one workflow only. The value-swap sets are
 
 ## Product implementation (bd fix-o5wi.6)
 
-Built as the sections above recommend: `fastworkflow/intent_learning.py` (the store, what teaches, the calibration),
+Built as the sections above recommend: `fastworkflow/intent/intent_learning.py` (the store, what teaches, the calibration),
 `fastworkflow/train/head_refit.py` (the refit and its gate) and the `fastworkflow learn` and `fastworkflow learned`
 commands. The settings, the store and the rules are in AGENTS.md ("Learning from use") and the README. In short: every
 resolved request is recorded; only confirmed rows (a pick at a question, a review that showed the command and was

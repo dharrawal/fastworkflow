@@ -59,7 +59,7 @@ from fastworkflow.review import approval_binding
 from fastworkflow.session import state_paths
 from fastworkflow.experiment.readiness import runtime_readiness_snapshot
 from fastworkflow.utils.logging import logger
-from fastworkflow.workflow_execution_context import UsePlanError
+from fastworkflow.engine.workflow_execution_context import UsePlanError
 
 from fastapi import FastAPI, HTTPException, status, Depends, Header, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -449,10 +449,10 @@ async def lifespan(_app: FastAPI):
 
         # A command that does not load is skipped by the server: log each one at startup. A workflow-wide problem (a
         # shared file such as startup_action.json or _workflow.py, or neither the agent model nor Jev set:
-        # fastworkflow.no_agent_mode) stops it, naming the file.
+        # fastworkflow.core.no_agent_mode) stops it, naming the file.
         from fastworkflow.planning.command_preview import load_problems
 
-        from fastworkflow import no_agent_mode
+        from fastworkflow.core import no_agent_mode
 
         problems = load_problems(ARGS.workflow_path, runtime=True)
         for problem in problems:
@@ -466,7 +466,7 @@ async def lifespan(_app: FastAPI):
         # The detection chain is named once in the log (intent_detector.startup_report), with the contexts
         # that have no trained local model and run on the model matcher. A workflow that may not start that
         # way is reported here and refused where it always was, when its session starts.
-        from fastworkflow import intent_detector
+        from fastworkflow.intent import intent_detector
 
         engine_problems, engine_notices = intent_detector.startup_report(ARGS.workflow_path, build=True)
         for notice in engine_notices:
@@ -492,7 +492,7 @@ async def lifespan(_app: FastAPI):
                 logger.error(f"startup problem: {problem}; a session that passes no startup_action starts on "
                              "no record")
 
-        # The mode is named once at startup (no agent model: fastworkflow.no_agent_mode).
+        # The mode is named once at startup (no agent model: fastworkflow.core.no_agent_mode).
         if (mode_line := no_agent_mode.startup_line()) is not None:
             logger.info(mode_line)
 
@@ -2210,7 +2210,7 @@ async def invoke_agent_stream(
                 await stream.emit("trace", trace_json)
 
             async def on_progress(progress_json: dict) -> None:
-                # The stage the turn is in (fastworkflow.turn_progress); a client
+                # The stage the turn is in (fastworkflow.core.turn_progress); a client
                 # that does not know the frame type ignores it.
                 await stream.emit("progress", progress_json)
 

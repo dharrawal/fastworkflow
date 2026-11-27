@@ -30,7 +30,7 @@ from tests.test_nested_planning_commands import (  # noqa: F401
 from tests.test_step_helpers import FoundBooks, _build_planning_command, library_env  # noqa: F401
 from tests.test_turn_result_capture import initialized_fastworkflow, no_review_gate  # noqa: F401
 from tests.test_no_agent_mode import _plan
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIBRARY = os.path.join(ROOT, "fastworkflow", "examples", "library")
@@ -311,7 +311,7 @@ def test_a_nested_call_with_a_failing_result_fails_the_callers_step(
 
 
 def test_a_text_result_for_a_declared_output_is_the_one_rules_error():
-    from fastworkflow.command_executor import command_response_of
+    from fastworkflow.engine.command_executor import command_response_of
 
     """Before fix-qjne.12 a command that declares an Output and wrote text from ``__result__`` handed its caller a
     response with ``output=None`` (the nested test above showed 'Dune is a book', success True, no Output, with the
@@ -326,7 +326,7 @@ def test_a_text_result_for_a_declared_output_is_the_one_rules_error():
 # ----------------------------------------------------------------------
 
 def test_one_rule_for_what_a_command_returns():
-    from fastworkflow.command_executor import command_response_of
+    from fastworkflow.engine.command_executor import command_response_of
 
     declared = Declared(found=True)
     # the Output, directly or in a CommandResponse: accepted, the response text is the Output as JSON by default
@@ -348,7 +348,7 @@ def test_one_rule_for_what_a_command_returns():
     lambda out: fastworkflow.CommandResponse(response="r", output=_Sub(found=True, extra=1)),
 ], ids=["direct", "in-a-response"])
 def test_a_subclass_of_the_declared_output_is_refused_the_same_way_direct_or_in_a_response(hand_over):
-    from fastworkflow.command_executor import command_response_of, frame_command_result
+    from fastworkflow.engine.command_executor import command_response_of, frame_command_result
 
     with pytest.raises(TypeError, match="declares an Output but returned"):
         frame_command_result(hand_over(None), command_name="x", output_model=Declared)
@@ -357,7 +357,7 @@ def test_a_subclass_of_the_declared_output_is_refused_the_same_way_direct_or_in_
 
 
 def test_a_success_false_response_is_refused_for_result_as_for_call():
-    from fastworkflow.command_executor import command_response_of
+    from fastworkflow.engine.command_executor import command_response_of
 
     with pytest.raises(TypeError, match="success=False"):
         command_response_of(fastworkflow.CommandResponse(response="r", success=False), command_name="x",

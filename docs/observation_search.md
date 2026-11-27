@@ -100,7 +100,7 @@ The context is the one the command **ran in**, read before the dispatch. A
 command that moved the context says so with `; and resulted in a context change`,
 and the command's own response states where it moved to. The instance identity is
 declared by the context class (a classmethod `instance_label(...)` or an
-`instance_label_attr`, see `fastworkflow/context_identity.py`), never derived; a
+`instance_label_attr`, see `fastworkflow/core/context_identity.py`), never derived; a
 context with no declaration prints its name alone. Backend text is never
 inspected, and there is no fallback to another step's alias.
 

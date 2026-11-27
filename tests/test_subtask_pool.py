@@ -24,9 +24,9 @@ from dspy.utils import DummyLM
 
 import fastworkflow
 from fastworkflow.review import review_proposals
-from fastworkflow import turn_cache, turn_progress
+from fastworkflow.core import turn_cache, turn_progress
 from fastworkflow.utils import subtask_pool
-from fastworkflow.turn_progress import ProgressEvent
+from fastworkflow.core.turn_progress import ProgressEvent
 from fastworkflow.utils import dspy_logger
 from fastworkflow.parameters import signatures
 from tests.test_drafted_subtask_inputs import (  # noqa: F401 - the library copy with its trained heads, and the guards
@@ -340,7 +340,7 @@ def test_the_stage_events_of_a_pooled_draft_are_one_per_sub_task_and_in_order(li
 def test_a_failed_prefetched_match_is_asked_again_in_order(library_heads, monkeypatch, turn_memo):
     """Every sub-task's intent is decided together; one that fails there is dropped and the in-order loop decides that
     text again, so the draft is made as it would have been."""
-    from fastworkflow import intent_loop
+    from fastworkflow.intent import intent_loop
 
     calls: list[str] = []
     real = intent_loop.resolve

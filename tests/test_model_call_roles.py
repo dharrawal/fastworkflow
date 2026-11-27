@@ -11,9 +11,10 @@ import pytest
 from dspy.utils import DummyLM
 
 import fastworkflow
-from fastworkflow import remote_outage, workflow_agent
+from fastworkflow.intent import remote_outage
+from fastworkflow import workflow_agent
 from fastworkflow.observability import tracing
-from fastworkflow.turn import TurnStatus
+from fastworkflow.core.turn import TurnStatus
 from tests import span_tree
 from tests.test_approval_binding import (  # noqa: F401 - the real agent on a library copy, and the guards
     annotated_library, no_live_model, no_model_call_for_parameters, todo)

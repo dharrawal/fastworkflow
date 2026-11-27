@@ -1,7 +1,7 @@
 """Execution command whose hook refuses one value and names its field (Refused(field=...))."""
 
 import fastworkflow
-from fastworkflow.workflow import Workflow
+from fastworkflow.core.workflow import Workflow
 from pydantic import BaseModel, Field, model_validator
 
 TAKEN = "seat B9 is taken"

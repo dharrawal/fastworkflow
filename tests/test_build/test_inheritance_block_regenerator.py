@@ -12,7 +12,7 @@ import pytest
 from fastworkflow.build.class_analysis_structures import ClassInfo
 from fastworkflow.build.context_model_generator import (
     declare_inherits, derive_inherits, existing_context_files, generate_context_model)
-from fastworkflow.command_context_model import REMOVED_INHERITANCE_FILE
+from fastworkflow.core.command_context_model import REMOVED_INHERITANCE_FILE
 
 
 @pytest.fixture

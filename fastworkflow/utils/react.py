@@ -56,7 +56,7 @@ class fastWorkflowReAct(Module):
     # The steps code runs before the loop (``planning_phases.CodeSteps``), for the next
     # forward() only: set by the caller per run, taken (and cleared) by forward().
     code_steps: Any = None
-    # No-agent mode (fastworkflow.no_agent_mode): set by the caller before each run. The run takes no model
+    # No-agent mode (fastworkflow.core.no_agent_mode): set by the caller before each run. The run takes no model
     # step: code runs the steps it can, and the run then ends (``_finish_run``) with an empty answer, leaving
     # ``last_code.stop`` for the caller to read.
     no_model: bool = False

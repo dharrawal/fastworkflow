@@ -6,7 +6,7 @@ import pytest
 
 from fastworkflow import ModuleType
 from fastworkflow.observability import tracing
-from fastworkflow.command_executor import CommandExecutor, CommandNotFoundError
+from fastworkflow.engine.command_executor import CommandExecutor, CommandNotFoundError
 
 
 # ---------------------------------------------------------------------------
@@ -93,7 +93,7 @@ def test_invoke_command_wraps_error(monkeypatch):
     _monkey_registry(monkeypatch)
 
     from fastworkflow import CommandOutput, CommandResponse
-    from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+    from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
     # Stand in for intent detection. Everything below the CME hop is real: this
     # only names the command the way a successful extraction would, so the
@@ -221,7 +221,7 @@ def _stub_cme_naming(command_name: str):
 
 def _failing_ctx(monkeypatch, exc_factory):
     """A traced WEC with an open turn whose `fail` command raises."""
-    from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+    from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
     fastworkflow.init({})
     _raising_registry(monkeypatch, exc_factory)
@@ -249,7 +249,7 @@ def _failing_ctx(monkeypatch, exc_factory):
 
 def test_annotate_exception_keeps_the_first_writer():
     """Nested dispatch unwinds outward; the innermost identity must survive."""
-    from fastworkflow.command_executor import _annotate_exception
+    from fastworkflow.engine.command_executor import _annotate_exception
 
     exc = RuntimeError("boom")
 
@@ -296,7 +296,7 @@ def test_error_span_names_the_command_and_context(monkeypatch):
 def test_error_span_records_success_false_and_control_signals_do_not(monkeypatch):
     """fix-zl5b: a failed dispatch says success=False like the normal path
     does; a control signal is not a failure and records no success."""
-    from fastworkflow.workflow_execution_context import CommandCancelledError
+    from fastworkflow.engine.workflow_execution_context import CommandCancelledError
 
     ctx, sink, _wf = _failing_ctx(monkeypatch, lambda: RuntimeError("boom"))
     try:
@@ -351,7 +351,7 @@ def test_failure_output_names_the_command_and_joins_its_record(monkeypatch):
 
 def test_control_signal_is_neither_stamped_nor_recorded(monkeypatch):
     """Cancellation is not a failed dispatch: it produces no outcome to join."""
-    from fastworkflow.workflow_execution_context import CommandCancelledError
+    from fastworkflow.engine.workflow_execution_context import CommandCancelledError
 
     ctx, _sink, _wf = _failing_ctx(
         monkeypatch, lambda: CommandCancelledError("cancelled")
@@ -471,7 +471,7 @@ def test_perform_action_carries_identity_out_when_the_command_takes_parameters(
             return True, "", None, None
 
     monkeypatch.setattr(
-        "fastworkflow.command_executor.InputForParamExtraction", _Extraction
+        "fastworkflow.engine.command_executor.InputForParamExtraction", _Extraction
     )
 
     with pytest.raises(RuntimeError, match="boom") as excinfo:
@@ -491,7 +491,7 @@ def test_a_cme_hop_failure_reaches_the_failure_output_and_the_error_span(monkeyp
     seam both were empty on the output and null on the span.
     """
     from fastworkflow.workflow_agent import _execute_workflow_query
-    from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+    from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
     fastworkflow.init({})
 
@@ -573,7 +573,7 @@ def test_a_hostile_getattr_cannot_mask_the_real_exception():
     destroyed and replaced by one about the reporting. The write was guarded
     from the start; the read was not, which is the same hole one line over.
     """
-    from fastworkflow.command_executor import _annotate_exception, _annotation
+    from fastworkflow.engine.command_executor import _annotate_exception, _annotation
 
     exc = _HostileAttrs("the real failure")
     _annotate_exception(exc, _fw_command_name="Ctx/cmd")   # must not raise
@@ -598,7 +598,7 @@ def test_a_hostile_getattr_cannot_mask_the_real_exception():
 
 def _control_signals():
     from fastworkflow.utils.react import AskUserSuspend
-    from fastworkflow.workflow_execution_context import CommandCancelledError
+    from fastworkflow.engine.workflow_execution_context import CommandCancelledError
 
     return [
         pytest.param(lambda: CommandCancelledError("cancelled"), id="cancelled"),
@@ -652,7 +652,7 @@ def test_the_status_mapping_is_a_single_shared_function():
     site is rewritten: control signals are not failures, everything else is.
     """
     from fastworkflow.utils.react import AskUserSuspend
-    from fastworkflow.workflow_execution_context import CommandCancelledError
+    from fastworkflow.engine.workflow_execution_context import CommandCancelledError
 
     assert tracing.status_for_dispatch_exception(AskUserSuspend("q")) == (
         tracing.STATUS_CANCELLED

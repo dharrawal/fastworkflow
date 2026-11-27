@@ -6,7 +6,7 @@ import sys
 
 import pytest
 
-from fastworkflow import no_agent_mode
+from fastworkflow.core import no_agent_mode
 from tests.test_approval_binding import (  # noqa: F401 - the real agent on the annotated library copy
     annotated_library, no_live_model, no_model_call_for_parameters, todo)
 from tests.test_step_helpers import library_env  # noqa: F401
@@ -114,7 +114,7 @@ def test_a_planning_command_phase_out_of_steps_states_the_rows_read_of_the_total
 
 def test_an_unsplit_single_part_out_of_steps_states_the_rows_read_of_the_total(paged, monkeypatch):
     """The turn's one part runs through ``_run_turn_subtasks``' own branch; its answer carries the same note once."""
-    from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+    from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
     seen = []
     original = WorkflowExecutionContext._run_turn_subtasks

@@ -1,10 +1,10 @@
 import pytest
 from pathlib import Path
 
-from fastworkflow.command_routing import RoutingDefinition
-from fastworkflow.command_directory import CommandDirectory
-from fastworkflow.command_context_model import CommandContextModel
-from fastworkflow.command_directory import UtteranceMetadata
+from fastworkflow.core.command_routing import RoutingDefinition
+from fastworkflow.core.command_directory import CommandDirectory
+from fastworkflow.core.command_context_model import CommandContextModel
+from fastworkflow.core.command_directory import UtteranceMetadata
 
 
 @pytest.fixture(scope="module")

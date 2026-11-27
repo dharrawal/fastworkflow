@@ -57,7 +57,7 @@ def test_an_empty_process_value_counts_as_set_and_hides_the_env_file(files, monk
 
 
 def test_a_former_process_only_setting_now_works_from_an_env_file(files, monkeypatch):
-    from fastworkflow import intent_detector
+    from fastworkflow.intent import intent_detector
 
     monkeypatch.delenv("FW_REQUIRE_HEADS", raising=False)
     assert intent_detector.heads_required() is False

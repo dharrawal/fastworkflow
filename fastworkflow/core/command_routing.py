@@ -24,8 +24,8 @@ from typing import Any, Dict, Optional, Set, Type, ClassVar
 from pydantic import BaseModel, ConfigDict, PrivateAttr
 
 from fastworkflow import ModuleType
-from fastworkflow.entry_declarations import check_retired_entry_declarations
-from fastworkflow.command_directory import (
+from fastworkflow.core.entry_declarations import check_retired_entry_declarations
+from fastworkflow.core.command_directory import (
     CommandDirectory,
     is_visible_planning,
     UtteranceMetadata,
@@ -34,7 +34,7 @@ from fastworkflow.command_directory import (
     CommandLoadError,
     command_load_errors,
 )
-from fastworkflow.command_context_model import CommandContextModel, read_declarations
+from fastworkflow.core.command_context_model import CommandContextModel, read_declarations
 from fastworkflow.utils import python_utils
 from fastworkflow.utils.logging import logger
 
@@ -264,7 +264,7 @@ class RoutingDefinition(BaseModel):
         paging = paging_parameters(input_model)
         if not paging:
             return
-        from fastworkflow.command_executor import _declared_output_model
+        from fastworkflow.engine.command_executor import _declared_output_model
 
         output_model = _declared_output_model(
             self.get_command_class(command_name, ModuleType.RESPONSE_GENERATION_INFERENCE))
@@ -475,7 +475,7 @@ def _check_approval_annotations(workflow_folderpath: str, definition: "RoutingDe
     """Snapshot each command's approval annotation (imported lazily: approval_annotations imports this module).
     A mistake in a command's declarations is that command's load error (``command_declarations
     .declaration_problems``, read by ``command_load_errors``), so such a command is skipped here."""
-    from fastworkflow.approval_annotations import check_approval_annotations
+    from fastworkflow.core.approval_annotations import check_approval_annotations
 
     check_approval_annotations(workflow_folderpath, definition)
 
@@ -566,9 +566,9 @@ class RoutingRegistry:
         RoutingDefinition._GLOBAL_COMMAND_CLASS_CACHE.clear()
         
         # Also clear the CommandDirectory cache to ensure fresh data on reload
-        import fastworkflow.command_directory
-        if hasattr(fastworkflow.command_directory.get_cached_command_directory, 'cache_clear'):
-            fastworkflow.command_directory.get_cached_command_directory.cache_clear()
+        import fastworkflow.core.command_directory
+        if hasattr(fastworkflow.core.command_directory.get_cached_command_directory, 'cache_clear'):
+            fastworkflow.core.command_directory.get_cached_command_directory.cache_clear()
         
         # Clear the python_utils module import cache
         import fastworkflow.utils.python_utils

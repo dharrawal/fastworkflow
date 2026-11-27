@@ -23,7 +23,7 @@ import fastworkflow
 from fastworkflow.observability import store as obs
 from fastworkflow.observability import tracing
 from fastworkflow.experiment.runner import ExperimentController
-from fastworkflow.turn import TurnOutput, TurnResult, TurnStatus
+from fastworkflow.core.turn import TurnOutput, TurnResult, TurnStatus
 
 
 def _race_claim_process(

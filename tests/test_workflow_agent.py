@@ -5,7 +5,7 @@ Tests for the new workflow_agent.py functionality.
 import json
 import pytest
 import fastworkflow
-from fastworkflow.chat_session import ChatSession
+from fastworkflow.engine.chat_session import ChatSession
 from fastworkflow.workflow_agent import (
     initialize_workflow_tool_agent,
 )
@@ -25,7 +25,7 @@ def mock_env_vars():
 
 @pytest.fixture
 def initialized_fastworkflow(mock_env_vars):
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
     RoutingRegistry.clear_registry()
     fastworkflow.init(env_vars=mock_env_vars)
     yield

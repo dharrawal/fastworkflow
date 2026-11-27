@@ -15,7 +15,7 @@ import dspy
 import pytest
 from dspy.utils.exceptions import AdapterParseError
 
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 
 class _Agent:

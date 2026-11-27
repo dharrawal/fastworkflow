@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow import context_navigation
+from fastworkflow.core import context_navigation
 from fastworkflow.workflow_agent import _explicit_agent_command
 from tests.test_lookup_exact_names import GLOBAL_PROBE, _RefusingRouter, _run
 from tests.todo_list_workflow.application.todo_item import TodoItem

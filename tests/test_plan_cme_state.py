@@ -8,13 +8,14 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow import intent_loop, waiting
+from fastworkflow.intent import intent_loop
+from fastworkflow.core import waiting
 from fastworkflow.review import approval_binding
 from fastworkflow.parameters import parameter_clarification
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import model_of, park
 from fastworkflow.review.review_engine import open_review
 from fastworkflow.review.review_proposals import SubTask, SubTaskProposal
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 pytestmark = pytest.mark.usefixtures("initialized_fastworkflow")
 
@@ -82,7 +83,7 @@ def test_the_two_cmes_keep_their_own_pending_which_command_question(todo_workflo
     """The plan CME and the application's CME are two instances. The pending which-command question was a row in
     a file under ``___convo_info`` that the plan CME had to be redirected away from (``convo_path``); it is now
     plain data in each CME's own context (``intent_loop``), so the two cannot collide and nothing is redirected."""
-    from fastworkflow import intent_loop
+    from fastworkflow.intent import intent_loop
 
     channel = f"kk46_{uuid.uuid4().hex[:8]}"
     ctx = _make_ctx(todo_workflow_path, channel)

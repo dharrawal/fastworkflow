@@ -40,7 +40,7 @@ import typing
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping, Optional
 
-from fastworkflow import no_agent_mode
+from fastworkflow.core import no_agent_mode
 
 #: How a reply reads (``Read.kind``).
 DECLINE = "decline"

@@ -235,7 +235,7 @@ Shape (artifact-agnostic projection, no recursion):
   and preserves the dict verbatim. **What** a key means and which outputs are worth
   rendering richly (a gallery, a chart, a download) is entirely the consuming client's
   concern.
-- New helper `fastworkflow.turn.collect_artifact_responses(command_outputs)` flattens the
+- New helper `fastworkflow.core.turn.collect_artifact_responses(command_outputs)` flattens the
   turn's `CommandResponse`s whose `artifacts` dict is non-empty, in turn order, returning
   the **original** response objects. No nested TurnResult/object serialization.
 - `_finalize_agent_output` keeps the synthesized agent answer at `command_responses[0]`
@@ -253,7 +253,7 @@ keeps emitting a one-element `command_responses` list — identical in shape to 
 The goal is to keep the v2.21 wire/return shape as close to v2.20 as possible while still
 surfacing the previously-dropped structured outputs.
 
-- New helper `fastworkflow.turn.merge_artifact_responses_into(target, artifact_responses)` copies
+- New helper `fastworkflow.core.turn.merge_artifact_responses_into(target, artifact_responses)` copies
   each key from every collected response into `target.artifacts`.
 - **Key-collision rule (minimal divergence from baseline):** a key is written **unchanged** when
   it is not already present on the target; only on collision is the incoming key suffixed with

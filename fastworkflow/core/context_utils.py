@@ -1,4 +1,4 @@
-from fastworkflow.command_context_model import CommandContextModel
+from fastworkflow.core.command_context_model import CommandContextModel
 
 def list_context_names(workflow_folderpath: str, include_default: bool = False) -> list[str]:
     """Return the workflow's context names (its context folders and the contexts its declarations name).

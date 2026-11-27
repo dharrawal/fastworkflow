@@ -33,7 +33,7 @@ import sys
 from collections import Counter
 from typing import Any, Iterable, Optional, Sequence
 
-from fastworkflow.nlu_labels import PARAMETER_VALUE_LABEL, WILDCARD_LABEL, is_non_routable, label_of
+from fastworkflow.intent.nlu_labels import PARAMETER_VALUE_LABEL, WILDCARD_LABEL, is_non_routable, label_of
 from fastworkflow.train.score_not_here import Z_95, mcnemar_exact, wilson_interval
 
 SCHEMA_VERSION = 1
@@ -724,7 +724,7 @@ def load_models(workflow_folderpath: str) -> dict[str, Any]:
     hierarchy_path = os.path.join(workflow_folderpath, "context_hierarchy_model.json")
     snapshot_path = os.path.join(workflow_folderpath, "___command_info", SNAPSHOT_FILENAME)
     hierarchy = _load_json(hierarchy_path) if os.path.isfile(hierarchy_path) else {}
-    from fastworkflow.command_context_model import CommandContextModel
+    from fastworkflow.core.command_context_model import CommandContextModel
 
     inheritance = CommandContextModel.declared_bases(workflow_folderpath)   # each context's declared inherits
     if not os.path.isfile(snapshot_path):

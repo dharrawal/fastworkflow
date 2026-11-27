@@ -14,7 +14,7 @@ from tests.test_turn_result_capture import no_review_gate  # noqa: F401 - the re
 from fastworkflow._workflows.command_metadata_extraction._commands.IntentDetection.what_can_i_do import (
     Signature as WhatCanIDo)
 from fastworkflow.capability_answer import is_capability_question, render_capability_answer
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 UTTERANCES = WhatCanIDo.plain_utterances
 
@@ -166,7 +166,7 @@ def test_the_shared_line_may_fill_two_line_widths(monkeypatch):
 @pytest.fixture
 def agent_ctx(monkeypatch):
     fastworkflow.init({})
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     RoutingRegistry.clear_registry()
     ctx = WorkflowExecutionContext(run_as_agent=True)

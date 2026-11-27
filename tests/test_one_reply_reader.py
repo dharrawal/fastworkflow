@@ -21,12 +21,14 @@ import fastworkflow
 from dspy.utils import DummyLM
 from types import SimpleNamespace
 
-from fastworkflow import intent_loop, no_agent_mode, waiting, workflow_agent
+from fastworkflow.intent import intent_loop
+from fastworkflow.core import no_agent_mode, waiting
+from fastworkflow import workflow_agent
 from fastworkflow.parameters import parameter_clarification
 from fastworkflow._workflows.command_metadata_extraction import parameter_reply
 from fastworkflow.parameters import read, reply as replies
-from fastworkflow.turn import TurnStatus
-from fastworkflow.workflow_execution_context import NOT_RUN_ARTIFACT
+from fastworkflow.core.turn import TurnStatus
+from fastworkflow.engine.workflow_execution_context import NOT_RUN_ARTIFACT
 from tests.conftest import script_matcher
 from tests.test_approval_binding import _finish, annotated_library, todo  # noqa: F401 - fixtures
 from tests.test_jev_missing_value_reply import (  # noqa: F401 - fixtures and helpers of the execution command's side

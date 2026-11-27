@@ -20,7 +20,7 @@ from fastworkflow.review import approval_binding as ab
 from fastworkflow.review import review_proposals
 from fastworkflow import workflow_agent
 from fastworkflow.review.review_engine import AWAITING, INVALIDATED
-from fastworkflow.turn import TurnStatus
+from fastworkflow.core.turn import TurnStatus
 from tests.test_approval_binding import (  # noqa: F401 - fixtures and the scripted agent
     _added, _ask, _finish, annotated_library, no_live_model, no_model_call_for_parameters, todo)
 from tests.test_round1_gate import EMMA, JOKE, _open_review, _split_into, gated, remote_decides_emma_and_joke  # noqa: F401

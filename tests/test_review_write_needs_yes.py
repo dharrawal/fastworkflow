@@ -27,12 +27,12 @@ def _open(gated, monkeypatch, *, writes: bool):
     if not writes:
         # the workflow has no command that changes data, from the review's first ask on (an ad hoc part may change data
         # when the workflow has a command that does, bd fix-ftdl.8.4)
-        monkeypatch.setattr("fastworkflow.command_writes.write_commands", lambda path: frozenset())
+        monkeypatch.setattr("fastworkflow.core.command_writes.write_commands", lambda path: frozenset())
     record = _open_review_two_step(gated, monkeypatch)
     if writes:
         names = {item.means.name for item in proposal_of(record).items if item.means.name}
         # every part of the turn names a command that changes data
-        monkeypatch.setattr("fastworkflow.command_writes.write_commands", lambda path: frozenset(names))
+        monkeypatch.setattr("fastworkflow.core.command_writes.write_commands", lambda path: frozenset(names))
     return record
 
 

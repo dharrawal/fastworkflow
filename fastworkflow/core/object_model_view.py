@@ -45,9 +45,9 @@ def object_model(workflow_folder: str) -> ObjectModel:
     their ``class Context`` (``inherits``, ``parents``, ``occupiable``) and every command's ``@descends_to``. Raises
     ``CommandContextModelValidationError`` when the declarations do not read."""
     import fastworkflow
-    from fastworkflow.command_context_model import CommandContextModel, context_folders
-    from fastworkflow.command_declarations import declared_descend
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_context_model import CommandContextModel, context_folders
+    from fastworkflow.core.command_declarations import declared_descend
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     folder = os.path.abspath(workflow_folder)
     contexts = tuple(sorted(context_folders(folder)))

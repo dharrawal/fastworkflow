@@ -55,7 +55,7 @@ from fastworkflow.observability.archive_files import (
 )
 from fastworkflow.benchmark.catalog import load_version
 from fastworkflow.utils.logging import logger
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 # The env knobs `[XR16]` needs in the process before any attempt starts. Both
 # are process-wide by nature: `fastworkflow.init()` installs one global env dict
@@ -964,7 +964,7 @@ class ExperimentHarness:
         try:
             from pathlib import Path
 
-            from fastworkflow.command_routing import RoutingRegistry
+            from fastworkflow.core.command_routing import RoutingRegistry
             from fastworkflow.model_pipeline_training import CommandRouter
 
             RoutingRegistry.get_definition(self.workflow_folderpath)

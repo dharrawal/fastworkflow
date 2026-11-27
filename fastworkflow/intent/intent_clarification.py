@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Any, Iterable, Mapping, Optional
 
-from fastworkflow import no_agent_mode
+from fastworkflow.core import no_agent_mode
 from fastworkflow.utils.fuzzy_match import normalize_text, normalized_levenshtein_distance
 
 from typing import NamedTuple

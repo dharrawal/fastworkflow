@@ -238,7 +238,8 @@ def main(argv: list[str] | None = None) -> int:
     import fastworkflow
 
     fastworkflow.init(env_vars=env_vars)
-    from fastworkflow import intent_detector, workflow_agent
+    from fastworkflow.intent import intent_detector
+    from fastworkflow import workflow_agent
     from fastworkflow.train import heldout_evaluation
 
     core = workflow_agent.core_command_names()

@@ -20,7 +20,7 @@ import jsonschema
 import fastworkflow
 from fastworkflow.run_fastapi_mcp.mcp_specific import TURN_RESULT_SCHEMA, _mcp_transport
 from fastworkflow.run_fastapi_mcp.turns import TurnExecution, TurnStreamChannel, note_stream_frame, running_progress
-from fastworkflow.turn_progress import ProgressEvent
+from fastworkflow.core.turn_progress import ProgressEvent
 from tests.test_approval_endpoint_surfaces import (  # noqa: F401  (fixtures and helpers)
     _configure, _session, app_module, no_live_model)
 from tests.test_fastapi_end_session import FREE_ACTION

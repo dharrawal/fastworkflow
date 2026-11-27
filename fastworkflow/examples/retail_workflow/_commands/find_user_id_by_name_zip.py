@@ -2,7 +2,7 @@ from typing import List
 
 import fastworkflow
 from pydantic import BaseModel, Field, ConfigDict
-from fastworkflow.workflow import Workflow
+from fastworkflow.core.workflow import Workflow
 
 # Domain helpers
 from ..retail_data import load_data

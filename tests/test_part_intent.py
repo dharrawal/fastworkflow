@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from fastworkflow import no_agent_mode, turn_cache
+from fastworkflow.core import no_agent_mode, turn_cache
 from fastworkflow._workflows.plan_metadata_extraction import resolution
 from tests.conftest import script_matcher
 from tests.test_approval_binding import annotated_library, no_live_model, todo  # noqa: F401
@@ -175,7 +175,7 @@ BRANCHES = "Library/list_branches"
 def test_the_remote_model_is_never_offered_a_command_that_only_enters_a_context(gated, monkeypatch):
     """A request that names a workspace by its subject goes to the command or plan that serves it, not to the opener:
     the remote link's options leave the entry-only commands out, and an answer naming one cannot win."""
-    from fastworkflow import intent_detector, intent_loop
+    from fastworkflow.intent import intent_detector, intent_loop
 
     monkeypatch.setattr(intent_loop, "_entry_only", lambda workflow: frozenset({BRANCHES}))
     offered: list = []
@@ -203,7 +203,7 @@ def test_an_entry_only_command_is_one_that_always_descends_and_takes_no_required
     import shutil
 
     import fastworkflow
-    from fastworkflow import context_navigation
+    from fastworkflow.core import context_navigation
 
     source = os.path.join(os.path.dirname(fastworkflow.__file__), "examples", "library")
     folder = tmp_path / "library"

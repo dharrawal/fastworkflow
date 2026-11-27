@@ -13,7 +13,8 @@ from __future__ import annotations
 
 import pytest
 
-from fastworkflow import intent_loop, no_agent_mode
+from fastworkflow.intent import intent_loop
+from fastworkflow.core import no_agent_mode
 from fastworkflow.parameters import read, reply as replies
 from fastworkflow.review.review_engine import ActionReplyPolicy, Verdict
 

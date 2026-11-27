@@ -16,9 +16,10 @@ import pytest
 
 import fastworkflow
 from fastworkflow.planning import planning_commands as pc
-from fastworkflow import prompt_payloads, workflow_agent
+from fastworkflow.engine import prompt_payloads
+from fastworkflow import workflow_agent
 from fastworkflow.review import review_engine, review_proposals
-from fastworkflow.turn import TurnStatus
+from fastworkflow.core.turn import TurnStatus
 from tests.test_approval_binding import (  # noqa: F401 - the real agent on the annotated library copy, and the guards
     _added, _ask, _finish, annotated_library, grant_root, no_live_model, no_model_call_for_parameters, todo)
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401

@@ -88,8 +88,8 @@ benchmark; pass^k = task passes k independent runs in a row.
 - **Status: settled.** Fixed at the chokepoint both transports flow through:
   `_finalize_agent_output` now merges every artifact-bearing tool response into the single
   answer `CommandResponse.artifacts` via `merge_artifact_responses_into`
-  (`fastworkflow/workflow_execution_context.py`, call at ~line 789; helper in
-  `fastworkflow/turn.py`). Key-collision rule: incoming key unchanged when absent, suffixed
+  (`fastworkflow/engine/workflow_execution_context.py`, call at ~line 789; helper in
+  `fastworkflow/core/turn.py`). Key-collision rule: incoming key unchanged when absent, suffixed
   `_<n>` on collision. Wire shape kept identical to the v2.20 baseline (one-element
   `command_responses`).
 - **Near-miss worth remembering:** v2.21 as first staged only *captured* turns into a dormant
@@ -112,7 +112,7 @@ The payload bug triggered the largest design effort in repo history. Full detail
 - **The X6 slice — what v2.21 actually shipped:** the architecture review's X6 shrank the plan
   from ~2.5k lines / ~120 files (96 command-file migrations) to ~500 lines / ~6 files
   (`docs/turn_result_architecture_review.md` lines 85–95). Shipped in afcbe01 + aa20c1b +
-  5a63790: `fastworkflow/turn.py` (TurnResult/TurnOutput/TurnStatus, `mint_turn_key`, artifact
+  5a63790: `fastworkflow/core/turn.py` (TurnResult/TurnOutput/TurnStatus, `mint_turn_key`, artifact
   merge helpers), the WEC turn accumulator, `process_turn()` returning the slim public
   `TurnOutput` (`workflow_execution_context.py:484`), `process_message` deprecated, artifact
   merge at finalize. `TurnOutput.success` is computed = `all(co.success)` — because v2.20
@@ -205,7 +205,7 @@ Three fixes in rapid succession, two of them on the same day (2026-06-15):
   is now exclusively SessionStateStore + ConversationStore (FastAPI only).
 - **v2.21.5 (033132f, fix-04r) — the leak the fix introduced, ~90 minutes later.** Embedders
   never call `close()`, and a unique channel_id per request accumulated entries unboundedly.
-  Fix: the registry became a `weakref.WeakValueDictionary` (`fastworkflow/workflow.py`,
+  Fix: the registry became a `weakref.WeakValueDictionary` (`fastworkflow/core/workflow.py`,
   comment block at lines 14–40 tells the whole story) — GC auto-evicts abandoned sessions;
   holding a strong reference IS the session.
 - **v2.21.6 (3fabdb0):** security dependency updates rounding out the patch train.
@@ -231,9 +231,9 @@ Three fixes in rapid succession, two of them on the same day (2026-06-15):
   `command_directory.json` used a newest-mtime check — which is blind to deletions and
   renames (nothing bumps a surviving file's mtime when another file disappears).
 - **Evidence:** commit b5747df; `compute_commands_source_fingerprint()` at
-  `fastworkflow/command_directory.py:627` (sha256 over the SET of `(path, size, mtime_ns)` of
+  `fastworkflow/core/command_directory.py:627` (sha256 over the SET of `(path, size, mtime_ns)` of
   `_commands/**/*.py` incl. base workflows + context model JSONs), stamped into both
-  artifacts; `fastworkflow/command_routing.py` rebuild-on-mismatch; orphaned
+  artifacts; `fastworkflow/core/command_routing.py` rebuild-on-mismatch; orphaned
   `*_param_labeled.json` pruned only AFTER a successful train so a failed retrain leaves the
   prior artifacts runnable (`fastworkflow/train/__main__.py`).
 - **Status: settled.** Doctrine: invalidate caches by content fingerprint of the full source
@@ -371,8 +371,8 @@ every volatile fact:
 | Commit hashes/subjects cited anywhere above | `git log --oneline --no-decorate -1 <hash>` |
 | Revert-trio cruft shipped to main | `git show f9e2227:fastworkflow/command_router.py \| grep -n "speedict\|-694349230"` |
 | command_router.py dissolution | `git log --follow --oneline -- fastworkflow/command_router.py \| head -3` |
-| Payload fix wired at finalize | `grep -n merge_artifact_responses_into fastworkflow/workflow_execution_context.py` |
-| process_turn line number | `grep -n "def process_turn" fastworkflow/workflow_execution_context.py` |
+| Payload fix wired at finalize | `grep -n merge_artifact_responses_into fastworkflow/engine/workflow_execution_context.py` |
+| process_turn line number | `grep -n "def process_turn" fastworkflow/engine/workflow_execution_context.py` |
 | v3.0 pieces still absent | `ls fastworkflow/stores fastworkflow/turn_serializer.py 2>&1; ls fastworkflow/run_fastapi_mcp/conversation_store.py` |
 | fix-85g / fix-7kp / fix-5fv / fix-yy1 / fix-qtq open status | `bd show <id> --json` (read-only) |
 | fix-vof child count (48) | `python3 -c "import json;print(sum(1 for l in open('.beads/issues.jsonl') if json.loads(l).get('id','').startswith('fix-vof.')))"` |
@@ -380,8 +380,8 @@ every volatile fact:
 | bd memories (flakiness, push rule) | `bd memories --json` |
 | fix-0hb temp-copy fix in place | `grep -n "copytree\|tmp_path_factory" tests/test_train_modern_stack.py` |
 | speedict remaining sites | `grep -rln speedict fastworkflow/ --include=*.py` |
-| Fingerprint function | `grep -n "def compute_commands_source_fingerprint" fastworkflow/command_directory.py` |
-| workflow.py weakref registry + CLI-resume trade-off comment | `sed -n '14,45p' fastworkflow/workflow.py` |
+| Fingerprint function | `grep -n "def compute_commands_source_fingerprint" fastworkflow/core/command_directory.py` |
+| workflow.py weakref registry + CLI-resume trade-off comment | `sed -n '14,45p' fastworkflow/core/workflow.py` |
 | majority_vote dead code + TODOs | `grep -n majority_vote fastworkflow/_workflows/command_metadata_extraction/intent_detection.py` |
 | ambiguous_threshold.json orphans | `find fastworkflow -name ambiguous_threshold.json` |
 | Dep-graph orphan modules have no callers | `grep -rn "dependency_manager\|resolve_command_dependencies" fastworkflow/ --include=*.py \| grep -v "build/dependency_manager.py\|build/command_dependency_resolver.py"` |

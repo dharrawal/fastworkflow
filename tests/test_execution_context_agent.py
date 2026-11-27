@@ -15,11 +15,11 @@ from unittest.mock import MagicMock
 import pytest
 
 import fastworkflow
-from fastworkflow import intent_loop
+from fastworkflow.intent import intent_loop
 from tests.test_turn_result_capture import no_review_gate  # noqa: F401 - the review gate is off for these turns
 from fastworkflow.utils.react import NoSuspendedAgentStateError
 from fastworkflow.workflow_agent import _ask_user_tool
-from fastworkflow.workflow_execution_context import (
+from fastworkflow.engine.workflow_execution_context import (
     CommandCancelledError,
     WorkflowExecutionContext,
 )
@@ -45,7 +45,7 @@ def todo_workflow_path() -> str:
 @pytest.fixture
 def initialized_fastworkflow(monkeypatch):
     fastworkflow.init({})
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     monkeypatch.setattr(
         WorkflowExecutionContext,
@@ -401,7 +401,7 @@ def test_intent_clarification_reply_reaches_agent_unchanged_after_abort(
     No second LLM rewrites or answers it, and the agent is not told to ask the
     user: the reply already lists the commands to choose from.
     """
-    from fastworkflow.command_executor import CommandExecutor
+    from fastworkflow.engine.command_executor import CommandExecutor
     from fastworkflow.workflow_agent import _execute_workflow_query
 
     ctx = WorkflowExecutionContext(run_as_agent=True)

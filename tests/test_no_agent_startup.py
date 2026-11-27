@@ -8,7 +8,7 @@ import asyncio
 import pytest
 
 import fastworkflow
-from fastworkflow import no_agent_mode
+from fastworkflow.core import no_agent_mode
 from tests.test_manager_shutdown_matrix import (  # noqa: F401 - the server fixtures
     app_module, hello_world_workflow_path, isolated_env_file)
 

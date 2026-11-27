@@ -19,8 +19,8 @@ import pytest
 import dspy
 
 import fastworkflow
-from fastworkflow.command_metadata_api import CommandMetadataAPI
-from fastworkflow.command_routing import RoutingRegistry
+from fastworkflow.core.command_metadata_api import CommandMetadataAPI
+from fastworkflow.core.command_routing import RoutingRegistry
 from fastworkflow.utils.chat_adapter import CommandsSystemPreludeAdapter
 from fastworkflow.utils.react import fastWorkflowReAct
 from fastworkflow.workflow_agent import _refresh_agent_available_commands
@@ -340,7 +340,7 @@ def test_agent_system_prompt_refreshes_with_parameters_on_context_change(
 
 
 def test_wec_registers_context_listener_for_agent_refresh(todo_list_env):
-    from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+    from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
     subject = _todo_list_path()
     workflow = fastworkflow.Workflow.create(
@@ -449,7 +449,7 @@ def test_refresh_finds_wec_private_agent_and_app_workflow_fallback(todo_list_env
 
 def test_wec_close_removes_context_change_listener(todo_list_env):
     """WEC.close() must unsubscribe its bound context-change listener."""
-    from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+    from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
     subject = _todo_list_path()
     workflow = fastworkflow.Workflow.create(
@@ -519,7 +519,7 @@ def test_a_context_docstring_is_its_one_line_description(todo_list_env, monkeypa
 
         More detail that is not shown."""
 
-    monkeypatch.setattr("fastworkflow.context_identity.context_class_for",
+    monkeypatch.setattr("fastworkflow.core.context_identity.context_class_for",
                         lambda wf, name: Documented)
     text = CommandMetadataAPI.get_other_contexts_text(
         subject_workflow_path=subject, active_context_name="*",

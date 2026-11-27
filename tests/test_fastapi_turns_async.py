@@ -80,7 +80,7 @@ def _channel(prefix: str) -> str:
 
 
 # Keys of the public TurnOutput projection every turn surface now answers with
-# (fastworkflow/turn.py TurnOutput). `success` is a computed field, so it is part
+# (fastworkflow/core/turn.py TurnOutput). `success` is a computed field, so it is part
 # of the serialized shape rather than something the server bolts on.
 TURN_OUTPUT_KEYS = frozenset(
     {"turn_key", "status", "failure_reason", "answer", "command_outputs", "success"}

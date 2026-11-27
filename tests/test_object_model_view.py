@@ -4,8 +4,8 @@ import os
 import re
 
 from fastworkflow.planning import command_preview
-from fastworkflow import object_model_view
-from fastworkflow.command_context_model import CommandContextModel, context_folders
+from fastworkflow.core import object_model_view
+from fastworkflow.core.command_context_model import CommandContextModel, context_folders
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIBRARY = os.path.join(ROOT, "fastworkflow", "examples", "library")

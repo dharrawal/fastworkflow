@@ -21,9 +21,9 @@ from fastworkflow.observability import tracing
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import (
     ParameterExtraction,
 )
-from fastworkflow import command_executor as command_executor_module
+from fastworkflow.engine import command_executor as command_executor_module
 from fastworkflow.parameters.signatures import InputForParamExtraction
-from fastworkflow.command_executor import (
+from fastworkflow.engine.command_executor import (
     CommandExecutor,
     _resolve_planning_command_name,
     call_response_generator,
@@ -49,7 +49,7 @@ from fastworkflow.planning import (
 from fastworkflow.planning import Step, command_inputs_for_steps, planned
 from fastworkflow.planning.planning_commands import PlanningCommandCallPlan, PlanningCommandFormatError, call_phases
 from fastworkflow.planning.planning_phases import Placeholder, step_paging
-from fastworkflow.turn import TurnStatus
+from fastworkflow.core.turn import TurnStatus
 from fastworkflow.utils import python_utils
 from fastworkflow.utils.react import fastWorkflowReAct
 from fastworkflow.workflow_agent import core_command_names, initialize_workflow_tool_agent
@@ -643,7 +643,7 @@ class LibraryRunner:
             )
         # As the CME walk does (3.9): a name on the lookup path runs bound to the record
         # of its scope; a name of the current scope runs on the current object.
-        from fastworkflow.context_navigation import command_on_path
+        from fastworkflow.core.context_navigation import command_on_path
 
         found = command_on_path(wf, name)
         if found is not None and len(found[1]) == 1:
@@ -749,7 +749,7 @@ def script_command_extraction(monkeypatch, wf, extracted: dict[str, dict] | None
             return core
         # What the CME's wildcard command does for a routed command (3.9): a name on the lookup
         # path runs bound to the record of its scope; any other name runs on the current object.
-        from fastworkflow.context_navigation import command_on_path
+        from fastworkflow.core.context_navigation import command_on_path
 
         found = command_on_path(wf, name)
         if found is not None and len(found[1]) == 1:

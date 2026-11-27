@@ -19,7 +19,7 @@ from fastworkflow.observability import tracing
 from fastworkflow.planning import planning_commands as pc
 from fastworkflow.planning.plan_frame import TURN_MAX_STEPS_ENV
 from fastworkflow.planning.planning_commands import PlanningCommandInputError
-from fastworkflow.turn import TurnStatus
+from fastworkflow.core.turn import TurnStatus
 from fastworkflow.parameters.signatures import InputForParamExtraction
 from tests.scripted_extractor import script_extractor
 from tests.test_turn_result_capture import no_review_gate  # noqa: F401 - the review gate is off for these turns

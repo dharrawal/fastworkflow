@@ -106,7 +106,7 @@ row's `split` field records the overall verdict.
 
 ### 2. Intent
 
-One decision serves execution and planning commands alike (`fastworkflow/intent_loop.py`): an
+One decision serves execution and planning commands alike (`fastworkflow/intent/intent_loop.py`): an
 exact or fuzzy command name, then the local model, then the remote model when `JEV_API_KEY` is
 set, else the which-command question. On the plan path it has no span of its own. Read what it
 bound from `subtask_bindings[].means`, from `skill` on the part's `fw.planner.plan` (always null on

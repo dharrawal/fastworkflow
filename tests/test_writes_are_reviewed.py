@@ -19,13 +19,13 @@ import shutil
 import pytest
 
 from fastworkflow.review import approval_binding as ab
-from fastworkflow import command_writes
+from fastworkflow.core import command_writes
 from fastworkflow.review import review_engine, review_proposals
 from fastworkflow._workflows.plan_metadata_extraction import resolution
-from fastworkflow.approval_annotations import REQUIRED_ALWAYS, REQUIRED_UNTIL_DELEGATED
+from fastworkflow.core.approval_annotations import REQUIRED_ALWAYS, REQUIRED_UNTIL_DELEGATED
 from fastworkflow.review.approval_binding import Origin, Outcome
 from fastworkflow.review.review_engine import AWAITING, proposal_of
-from fastworkflow.turn import TurnStatus
+from fastworkflow.core.turn import TurnStatus
 from fastworkflow.parameters.signatures import InputForParamExtraction
 from tests.test_approval_binding import (  # noqa: F401 - the real agent on a library copy, and the guards
     _COPY_IGNORE, LIBRARY, _annotate, grant_root, no_live_model, no_model_call_for_parameters, todo)
@@ -279,7 +279,7 @@ def test_an_ad_hoc_part_may_change_data_and_needs_an_explicit_yes(gated, monkeyp
 
 def test_an_ad_hoc_part_carries_no_badge_where_nothing_changes_data(gated, monkeypatch):
     monkeypatch.setenv("LLM_AGENT", "scripted/agent")
-    monkeypatch.setattr("fastworkflow.command_writes.write_commands", lambda folder: frozenset())
+    monkeypatch.setattr("fastworkflow.core.command_writes.write_commands", lambda folder: frozenset())
     proposal = review_proposals.SubTaskProposal(items=[review_proposals.SubTask(goal=JOKE)])
     assert proposal.badges(gated.wf.folderpath) == [""] and not proposal.changes_data(gated.wf.folderpath)
 

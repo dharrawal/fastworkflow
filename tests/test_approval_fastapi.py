@@ -84,7 +84,7 @@ def _setup_todo_context(app_module, channel_id: str):
         root.lists[7] = chores
         wf.record = chores
         # A list is identified by its id in the instance label (as a record is), so the context locates.
-        from fastworkflow.context_identity import context_class_for
+        from fastworkflow.core.context_identity import context_class_for
         context_class_for(wf, "TodoList").instance_label_attr = "id"
         return wf, chores
     return asyncio.run(go())

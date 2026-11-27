@@ -38,7 +38,7 @@ import dspy
 
 import fastworkflow
 from fastworkflow.observability import tracing
-from fastworkflow.turn import TurnStatus
+from fastworkflow.core.turn import TurnStatus
 from fastworkflow.utils.logging import logger
 from fastworkflow.utils import dspy_utils
 

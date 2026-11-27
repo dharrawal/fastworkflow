@@ -16,9 +16,9 @@ import uuid
 import pytest
 
 import fastworkflow
-from fastworkflow.command_executor import CommandExecutor
+from fastworkflow.engine.command_executor import CommandExecutor
 from fastworkflow.planning.planning_needs_agent import planning_command_needs_agent, refusal_message
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 from tests.test_planning_command_code_steps import Model
 from tests.test_step_helpers import (
     LibraryRunner,
@@ -215,14 +215,14 @@ def test_refusal_keeps_the_3_4_sentence_and_adds_the_reasons():
 def initialized_fastworkflow():
     fastworkflow.init({})
     yield
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     RoutingRegistry.clear_registry()
 
 
 def _assistant_ctx(tmp_path, monkeypatch, name: str, text: str):
     """(ctx, folder): an assistant-mode context on a library copy holding the planning command *name*."""
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     folder = _copy_with(tmp_path, name, text)
     RoutingRegistry.clear_registry()

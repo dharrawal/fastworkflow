@@ -2,7 +2,7 @@ from typing import List
 
 import fastworkflow
 from pydantic import BaseModel, Field, ConfigDict, model_validator
-from fastworkflow.workflow import Workflow
+from fastworkflow.core.workflow import Workflow
 
 from ..retail_data import load_data
 from ..tools.exchange_delivered_order_items import ExchangeDeliveredOrderItems

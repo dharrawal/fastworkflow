@@ -94,7 +94,7 @@ def deployment_id() -> str:
 
 def workflow_fingerprint(workflow_path: str) -> str:
     """Namespace component that changes when the workflow's commands change."""
-    from fastworkflow.command_directory import compute_commands_source_fingerprint
+    from fastworkflow.core.command_directory import compute_commands_source_fingerprint
 
     try:
         return compute_commands_source_fingerprint(workflow_path)

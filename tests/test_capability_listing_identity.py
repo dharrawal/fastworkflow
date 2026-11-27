@@ -14,8 +14,8 @@ import pytest
 
 import fastworkflow
 from fastworkflow.capability_answer import what_can_i_do_data
-from fastworkflow.command_context_model import CommandContextModel, get_workflow_info
-from fastworkflow.command_metadata_api import CommandMetadataAPI
+from fastworkflow.core.command_context_model import CommandContextModel, get_workflow_info
+from fastworkflow.core.command_metadata_api import CommandMetadataAPI
 
 LIBRARY = Path(__file__).resolve().parent.parent / "fastworkflow" / "examples" / "library"
 

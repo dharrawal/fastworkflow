@@ -165,9 +165,9 @@ def test_distill_takes_exactly_one_mode(argv, ok):
 
 @pytest.fixture
 def session(tmp_path):
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
     from fastworkflow.evaluation.distillation import DistillationSession
-    from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+    from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
     fastworkflow.init({})
     RoutingRegistry.clear_registry()

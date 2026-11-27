@@ -52,12 +52,12 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow.command_executor import CommandExecutor
+from fastworkflow.engine.command_executor import CommandExecutor
 from fastworkflow.session.conversation_history_io import (
     extract_turns_from_history,
     restore_history_from_turns,
 )
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 from tests.todo_list_workflow.application.todo_manager import TodoListManager
 

@@ -24,7 +24,8 @@ import pytest
 
 import fastworkflow
 from fastworkflow.review import review_engine as re_
-from fastworkflow import intent_detector, run_listing
+from fastworkflow.intent import intent_detector
+from fastworkflow import run_listing
 from fastworkflow.review import review_proposals
 from fastworkflow.observability import tracing
 from fastworkflow._workflows.plan_metadata_extraction import resolution
@@ -40,7 +41,7 @@ from tests.test_round1_gate import (  # noqa: F401 - the library review gate; ``
     EMMA, JOKE, _marker, _open_review, _split_into, gated, no_draft_extraction)
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401
 from tests.conftest import no_local_model, script_matcher
-from fastworkflow.turn import TurnStatus
+from fastworkflow.core.turn import TurnStatus
 
 pytestmark = pytest.mark.usefixtures("initialized_fastworkflow")
 

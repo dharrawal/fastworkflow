@@ -12,11 +12,11 @@ from pydantic import BaseModel, field_validator, model_serializer, model_validat
 
 from fastworkflow.utils import python_utils
 from fastworkflow.utils.logging import logger
-from fastworkflow.workflow_inheritance_model import WorkflowInheritanceModel
+from fastworkflow.core.workflow_inheritance_model import WorkflowInheritanceModel
 
 
 #: The framework-provided planning commands (global scope, lowest precedence).
-FRAMEWORK_PLANNING_COMMANDS_DIR = Path(__file__).resolve().parent / "review" / "commands"
+FRAMEWORK_PLANNING_COMMANDS_DIR = Path(__file__).resolve().parent.parent / "review" / "commands"
 
 class CommandMetadata(BaseModel):
     """Command metadata"""
@@ -775,7 +775,7 @@ _RESOLVED_COMMAND_SIGNATURES: dict[tuple[str, str], type] = {}
 # ``(workflow_abs_path, command_name)`` already logged via :func:`_handle_command_field_source_errors`.
 _LOGGED_FIELD_SOURCE_COMMAND_ERRORS: set[tuple[str, str]] = set()
 _INTERNAL_CME_WORKFLOW_PATH = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "_workflows", "command_metadata_extraction")
+    os.path.join(os.path.dirname(os.path.dirname(__file__)), "_workflows", "command_metadata_extraction")
 )
 
 

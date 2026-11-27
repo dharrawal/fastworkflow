@@ -1,6 +1,6 @@
 # common imports
 from pydantic import BaseModel, model_validator
-from fastworkflow.workflow import Workflow
+from fastworkflow.core.workflow import Workflow
 
 # For command metadata extraction
 import os

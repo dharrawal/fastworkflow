@@ -21,8 +21,8 @@ import pytest
 
 import fastworkflow
 from fastworkflow.utils import subtask_pool
-from fastworkflow.turn import TurnStatus
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.core.turn import TurnStatus
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 from tests.test_approval_binding import (  # noqa: F401 - the real agent on the annotated library copy, and the guards
     _finish, annotated_library, no_live_model, no_model_call_for_parameters, todo)
 from tests.test_round1_gate import (  # noqa: F401 - the gated context and the gate's helpers

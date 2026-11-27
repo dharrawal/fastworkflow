@@ -15,8 +15,8 @@ import pytest
 
 from fastworkflow.review import approval_binding
 from fastworkflow.review.approval_binding import Surface
-from fastworkflow.turn import TurnStatus
-from fastworkflow.workflow_execution_context import NOT_RUN_ARTIFACT
+from fastworkflow.core.turn import TurnStatus
+from fastworkflow.engine.workflow_execution_context import NOT_RUN_ARTIFACT
 from tests.test_approval_binding import (  # noqa: F401 - the real agent on the annotated library copy, and the guards
     _finish, annotated_library, no_live_model, no_model_call_for_parameters, todo)
 from tests.test_round1_gate import EMMA, FIND, JOKE, _marker, _open_review, _split_into, gated  # noqa: F401
@@ -37,7 +37,7 @@ def no_draft_extraction(monkeypatch):
 @pytest.fixture(autouse=True)
 def _no_agent(initialized_fastworkflow, no_agent_model, no_planner_key, gated, monkeypatch):
     """No agent model: its LM is never built, and the planner's text plan is scripted."""
-    from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+    from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
     def never(self):
         raise AssertionError("the agent LM was built in no-agent mode")
@@ -246,7 +246,7 @@ def test_a_confident_match_runs_bound(gated, monkeypatch):
 
 def test_a_write_command_never_runs_from_an_unconfident_match(gated):
     from fastworkflow.review import review_proposals
-    from fastworkflow.command_writes import write_commands
+    from fastworkflow.core.command_writes import write_commands
 
     assert "Record/add_note" in write_commands(gated.wf.folderpath)
     reminder = "draft a reminder email to each member with an overdue loan"
@@ -277,7 +277,7 @@ def _deterministic_fallback(gated):
 
 def test_an_unroutable_request_that_offers_candidates_is_answered_as_in_deterministic_mode(gated):
     # D3 (narrowed): the reply lists candidate commands, so the user just picks one: no "not planned" note.
-    from fastworkflow import no_agent_mode
+    from fastworkflow.core import no_agent_mode
 
     _deterministic_fallback(gated)
     out = gated.ctx.process_turn(UNROUTABLE)
@@ -289,8 +289,8 @@ def test_an_unroutable_request_that_offers_candidates_is_answered_as_in_determin
 
 
 def test_the_note_is_added_when_a_reply_offers_no_candidate_command(gated):
-    from fastworkflow import no_agent_mode
-    from fastworkflow.command_executor import _no_agent_note
+    from fastworkflow.core import no_agent_mode
+    from fastworkflow.engine.command_executor import _no_agent_note
 
     class Route:
         handled = routed = False

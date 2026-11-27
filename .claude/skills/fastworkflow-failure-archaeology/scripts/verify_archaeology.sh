@@ -37,10 +37,10 @@ done
 
 echo "== entry 1/2: payload fix + TurnResult =="
 check "merge_artifact_responses_into wired in WEC" \
-  grep -q merge_artifact_responses_into fastworkflow/workflow_execution_context.py
+  grep -q merge_artifact_responses_into fastworkflow/engine/workflow_execution_context.py
 check "process_turn exists" \
-  grep -q "def process_turn" fastworkflow/workflow_execution_context.py
-check "turn.py types exist" grep -q "class TurnOutput" fastworkflow/turn.py
+  grep -q "def process_turn" fastworkflow/engine/workflow_execution_context.py
+check "turn.py types exist" grep -q "class TurnOutput" fastworkflow/core/turn.py
 check_empty "v3.0 stores/ package still absent" ls fastworkflow/stores
 check "conversation_store.py still present (slated for v3.0 deletion)" \
   ls fastworkflow/run_fastapi_mcp/conversation_store.py
@@ -61,13 +61,13 @@ check "temp-copy training fixture in place" \
 
 echo "== entry 6: speedict arc =="
 check "weakref registry comment block in workflow.py" \
-  bash -c "sed -n '14,45p' fastworkflow/workflow.py | grep -q 'no longer resumes workflow'"
+  bash -c "sed -n '14,45p' fastworkflow/core/workflow.py | grep -q 'no longer resumes workflow'"
 check "speedict still used somewhere (fix-7kp not done)" \
   bash -c "grep -rl speedict fastworkflow/ --include='*.py' | grep -q ."
 
 echo "== entry 7: fingerprint =="
 check "compute_commands_source_fingerprint exists" \
-  grep -q "def compute_commands_source_fingerprint" fastworkflow/command_directory.py
+  grep -q "def compute_commands_source_fingerprint" fastworkflow/core/command_directory.py
 
 echo "== entries 8/9: bd memories =="
 check "beads flakiness memory present" \

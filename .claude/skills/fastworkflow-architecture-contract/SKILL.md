@@ -38,8 +38,8 @@ file:line evidence. Facts verified 2026-07-09 against v2.22.2 (commit c33b9a5).
 
 | Term | Meaning |
 |---|---|
-| **WEC** | `WorkflowExecutionContext` (`fastworkflow/workflow_execution_context.py`) — the transport-free, synchronous execution core. One per session. |
-| **ChatSession** | CLI/REPL wrapper that *composes* a WEC and adds Queues + a daemon `ChatWorker` thread (`fastworkflow/chat_session.py:27-48`). |
+| **WEC** | `WorkflowExecutionContext` (`fastworkflow/engine/workflow_execution_context.py`) — the transport-free, synchronous execution core. One per session. |
+| **ChatSession** | CLI/REPL wrapper that *composes* a WEC and adds Queues + a daemon `ChatWorker` thread (`fastworkflow/engine/chat_session.py:27-48`). |
 | **Topology A** | ChatSession mode: `ask_user` **blocks** a worker thread on `user_message_queue.get()` until a human answers (`workflow_agent.py:354-385`). |
 | **Topology B** | WEC mode (FastAPI, embedders): no queues; `ask_user` **suspends** the agent trajectory in memory and the call returns; the next message resumes it. |
 | **CME** | The *command metadata extraction* internal workflow at `fastworkflow/_workflows/command_metadata_extraction/` — a real fastWorkflow workflow that IS the NLU pipeline. |
@@ -59,7 +59,7 @@ Build-time  →  Train-time  →  Run-time
 |---|---|---|---|
 | Build | `fastworkflow/build/` (AST introspection: `ast_class_extractor.py`, `command_file_generator.py`, `context_model_generator.py`, …) | Your Python app | `_commands/*.py` + new `_<Context>.py` files with `inherits` (printed, never written into an existing one) |
 | Train | `fastworkflow/train/` (`__main__.py`, `generate_synthetic.py`) + `fastworkflow/model_pipeline_training.py` | `_commands/` + utterances | `___command_info/` (intent models, thresholds) inside the workflow dir |
-| Run | `fastworkflow/workflow_execution_context.py`, `command_executor.py`, the CME workflow, `run_fastapi_mcp/` | user message | `TurnOutput` / `CommandOutput` |
+| Run | `fastworkflow/engine/workflow_execution_context.py`, `command_executor.py`, the CME workflow, `run_fastapi_mcp/` | user message | `TurnOutput` / `CommandOutput` |
 
 Doc-rot warning: CLAUDE.md says intent models are trained "via scikit-learn". False —
 training is torch/transformers (`model_pipeline_training.py:3-9` imports
@@ -83,7 +83,7 @@ training is torch/transformers (`model_pipeline_training.py:3-9` imports
 - **FastAPI is the server chassis (Topology B).** One `ChannelRuntime` per channel holds a
   live WEC + an `asyncio.Lock` (`run_fastapi_mcp/utils.py:645-664`); blocking WEC work runs
   in `loop.run_in_executor` threads; a `ContextVar` tuple-stack isolates the active workflow
-  per thread/asyncio-task (`fastworkflow/active_workflow.py:16-20`) — this is what makes
+  per thread/asyncio-task (`fastworkflow/engine/active_workflow.py:16-20`) — this is what makes
   many concurrent channels safe in one process.
 
 **The embedder contract** (verbatim intent from `WEC_learning_checklist.md:56-62` — anyone
@@ -268,7 +268,7 @@ returns nothing) — candidate stale file, do not imitate it.
 | `schema_version=1` with **no migration path** — mismatch only logs a warning and ploughs on | `workflow_execution_context.py:360-363` | **fix-4od** (P3, open) |
 | No TTL/reaper for orphaned suspended-session blobs — eviction saves, nothing ever deletes abandoned ones | `session_state_store.py` (no delete-by-age API exists) | **fix-6b4** (P2, open) |
 | Latent `UnboundLocalError` (a `NameError` subclass): `get_last_conversation_id` assigns `db` inside `try` but `finally` calls `db.close()` — if `Rdict(...)` raises, the finally masks the real error | `run_fastapi_mcp/conversation_store.py:47-54` | no issue filed (verified 2026-07-09) |
-| Dead `ChatSessionDescriptor`: the set-once guard never fires — `from .chat_session import ChatSession` (`__init__.py:269`) rebinds `fastworkflow.chat_session` to the SUBMODULE, shadowing the descriptor instance (`__init__.py:151-164`). Verified live: `type(fastworkflow.chat_session)` is `module`; double assignment succeeds | `fastworkflow/__init__.py:151-164`, `:269` | no issue filed |
+| Dead `ChatSessionDescriptor`: the set-once guard never fires — `from .chat_session import ChatSession` (`__init__.py:269`) rebinds `fastworkflow.engine.chat_session` to the SUBMODULE, shadowing the descriptor instance (`__init__.py:151-164`). Verified live: `type(fastworkflow.engine.chat_session)` is `module`; double assignment succeeds | `fastworkflow/__init__.py:151-164`, `:269` | no issue filed |
 | CLI hang on agent-mode ask_user: Topology-A clarification enqueued without the trace sentinel the CLI drains for (flagged "needs runtime verification" — treat as unreproduced) | `workflow_agent.py:371-372` vs sentinel sites `workflow_execution_context.py:656-658` | **fix-5fv** (P2, open) |
 | `/invoke_agent_stream` bypasses the TurnRegistry (guards with `lock.locked()`, no idempotency/202) — inconsistent with I7 | `run_fastapi_mcp/__main__.py:963` (grep `locked()`) | noted in fix-85g scope discussion |
 
@@ -316,19 +316,19 @@ Re-verification one-liners for every volatile fact:
 | Fact | Re-verify with |
 |---|---|
 | Version / commit | `grep '^version' pyproject.toml; git log --oneline -1` |
-| BaseException subclasses + line anchors | `grep -n 'class CommandCancelledError\|class AskUserSuspend' fastworkflow/workflow_execution_context.py fastworkflow/utils/react.py` |
-| wildcard dispatch lines | `grep -n "command_name = \"wildcard\"\|command_name = 'wildcard'\|wildcard" fastworkflow/command_executor.py` |
+| BaseException subclasses + line anchors | `grep -n 'class CommandCancelledError\|class AskUserSuspend' fastworkflow/engine/workflow_execution_context.py fastworkflow/utils/react.py` |
+| wildcard dispatch lines | `grep -n "command_name = \"wildcard\"\|command_name = 'wildcard'\|wildcard" fastworkflow/engine/command_executor.py` |
 | iteration_counter sites | `grep -rn iteration_counter fastworkflow/ --include='*.py' \| grep -v __pycache__` |
 | is_user_command still has no in-tree reader | `grep -rn is_user_command fastworkflow/ --include='*.py' \| grep -v __pycache__` |
-| Global class cache key shape | `grep -n '_GLOBAL_COMMAND_CLASS_CACHE\|cache_key = ' fastworkflow/command_routing.py` |
+| Global class cache key shape | `grep -n '_GLOBAL_COMMAND_CLASS_CACHE\|cache_key = ' fastworkflow/core/command_routing.py` |
 | SCHEMA_VERSION and store backends | `grep -n 'SCHEMA_VERSION\|SESSION_STATE_STORE' fastworkflow/session/session_state_store.py` |
 | Serialize-before-evict + LRU cap | `grep -n 'max_live_sessions\|_evict_oldest_if_needed' fastworkflow/run_fastapi_mcp/utils.py` |
 | TurnRegistry invariants + TTL no-op | `sed -n '13,28p;226,243p' fastworkflow/run_fastapi_mcp/turns.py` |
-| process_message deprecation | `grep -n DeprecationWarning fastworkflow/workflow_execution_context.py` |
+| process_message deprecation | `grep -n DeprecationWarning fastworkflow/engine/workflow_execution_context.py` |
 | v3.0 modules still absent | `ls fastworkflow/turn_accumulator.py fastworkflow/stores 2>&1` |
-| Context model loader | `grep -n 'def read_declarations\|REMOVED_INHERITANCE_FILE' fastworkflow/command_context_model.py` (both JSON files are removed spellings) |
+| Context model loader | `grep -n 'def read_declarations\|REMOVED_INHERITANCE_FILE' fastworkflow/core/command_context_model.py` (both JSON files are removed spellings) |
 | Context callback example | `cat tests/todo_list_workflow/_commands/TodoItem/_TodoItem.py` |
-| Descriptor shadowing | `python -c "import fastworkflow; print(type(fastworkflow.chat_session))"` |
+| Descriptor shadowing | `python -c "import fastworkflow; print(type(fastworkflow.engine.chat_session))"` |
 | conversation_store finally bug | `sed -n '47,54p' fastworkflow/run_fastapi_mcp/conversation_store.py` |
 | Open issue statuses (fix-5ka/cgs/4od/6b4/5fv/85g/qtq/7kp) | `bd list --status open \| grep -E 'fix-(5ka\|cgs\|4od\|6b4\|5fv\|85g\|qtq\|7kp)'` |
 | max_iters=25 default | `grep -n 'max_iters: int = 25' fastworkflow/workflow_agent.py` |

@@ -46,7 +46,8 @@ import dataclasses
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
-from fastworkflow import intent_clarification, waiting
+from fastworkflow.intent import intent_clarification
+from fastworkflow.core import waiting
 
 MATCH = "match"
 AMBIGUOUS = "ambiguous"
@@ -160,7 +161,7 @@ def _kinds(workflow) -> tuple[set[str], set[str]]:
 
 
 def _offers(workflow, context: str) -> list[str]:
-    from fastworkflow import intent_detector
+    from fastworkflow.intent import intent_detector
 
     try:
         return [c.name for c in intent_detector.matcher_candidates(workflow.folderpath, context)]
@@ -172,7 +173,7 @@ def scope_path(workflow) -> tuple[tuple[str, ...], bool]:
     """``(the request's scope path, whether the global scope was added to it)``: the detection's own walk path, then the
     global scope when the walk does not ask it and it offers commands (a root-level planning command, a global command),
     asked last: nearest scope first, so it decides only a request no scope of the walk took."""
-    from fastworkflow import intent_detector
+    from fastworkflow.intent import intent_detector
 
     path = intent_detector.walk_path(workflow)
     if intent_detector.GLOBAL_CONTEXT not in path and _offers(workflow, intent_detector.GLOBAL_CONTEXT):
@@ -187,8 +188,8 @@ def _kind_of(name: str, planning: set[str], core_names: Iterable[str] = ()) -> s
 def _ranked(detection, planning: set[str], offered: set[str], deciding, core_names: set[str]) -> tuple[Ranked, ...]:
     """The candidates of a detection: the deciding answer's labels first, by its score, then the others' by score.
     Reserved labels, ``none`` and names off the scope path are left out."""
-    from fastworkflow.intent_detector import MATCHER_NONE
-    from fastworkflow.nlu_labels import PARAMETER_VALUE_LABEL, is_escalation, label_of
+    from fastworkflow.intent.intent_detector import MATCHER_NONE
+    from fastworkflow.intent.nlu_labels import PARAMETER_VALUE_LABEL, is_escalation, label_of
 
     def scored(answer) -> list[tuple[str, float]]:
         pairs = [(str(label), float(score)) for label, score in answer.scores.items()]
@@ -212,7 +213,7 @@ def _ranked(detection, planning: set[str], offered: set[str], deciding, core_nam
 def _entry_only(workflow) -> frozenset[str]:
     """The commands that only enter a context (``context_navigation.context_entry_commands``): never offered to the
     remote decision model as a request's answer. Empty when they cannot be read."""
-    from fastworkflow import context_navigation
+    from fastworkflow.core import context_navigation
 
     try:
         return context_navigation.context_entry_commands(workflow.folderpath)
@@ -223,7 +224,7 @@ def _entry_only(workflow) -> frozenset[str]:
 def _walk(workflow, text: str, engine_of, path, global_last: bool, detection=None):
     """``intent_detector.detect`` with *engine_of* (or the *detection* already made with the same engines), then the
     global scope, asked last, when the walk does not ask it and declined everywhere (a root-level planning command)."""
-    from fastworkflow import intent_detector
+    from fastworkflow.intent import intent_detector
 
     if detection is None:
         detection = intent_detector.detect(workflow, text, engine_of=engine_of)
@@ -244,7 +245,7 @@ def _walk(workflow, text: str, engine_of, path, global_last: bool, detection=Non
 
 
 def _usable(names, excluded) -> list[str]:
-    from fastworkflow.nlu_labels import PARAMETER_VALUE_LABEL, is_escalation, label_of
+    from fastworkflow.intent.nlu_labels import PARAMETER_VALUE_LABEL, is_escalation, label_of
 
     return [name for name in names
             if name not in excluded and not is_escalation(name) and label_of(name) != PARAMETER_VALUE_LABEL]
@@ -252,7 +253,7 @@ def _usable(names, excluded) -> list[str]:
 
 def _evidence(workflow, answers: Iterable, scope) -> dict:
     """The evidence of a decision (`intent_learning.evidence_of`) with the context the walk ended in."""
-    from fastworkflow import intent_learning
+    from fastworkflow.intent import intent_learning
 
     context = getattr(scope, "context_name", None) or workflow._current_command_context_name
     return {**intent_learning.evidence_of(answers), "context": context}
@@ -279,14 +280,14 @@ def _is_framework_planning(folderpath: str, qualified: str) -> bool:
 def _scope_names(workflow, context_name: str, core_names: set[str]) -> list[str]:
     """The application commands a scope offers, without the core ones (they are the framework's) and without the
     framework's own planning commands (they are not app commands)."""
-    from fastworkflow import context_navigation
+    from fastworkflow.core import context_navigation
 
     return [name for name in context_navigation.scope_command_names(workflow.folderpath, context_name)
             if name not in core_names and not _is_framework_planning(workflow.folderpath, name)]
 
 
 def _current_scope(workflow):
-    from fastworkflow import intent_detector
+    from fastworkflow.intent import intent_detector
 
     return intent_detector.scopes_for(workflow)[0]
 
@@ -296,7 +297,7 @@ def command_inventory(workflow_folderpath: str) -> dict[str, tuple[str, ...]]:
     command and are left out. Read from the same routing definition the per-context candidate sets are built from;
     planning commands too, so a planning name owned by another context is guarded like a routed one."""
     import fastworkflow
-    from fastworkflow.nlu_labels import is_non_routable
+    from fastworkflow.intent.nlu_labels import is_non_routable
 
     crd = fastworkflow.RoutingRegistry.get_definition(workflow_folderpath)
     owners: dict[str, set[str]] = {}
@@ -342,7 +343,7 @@ def foreign_context_hint(command_name: str, owner_contexts: list[str], enter_com
 
 def routing_hint_for(workflow_folderpath: str, command_name: str, owner_contexts: list[str]) -> str:
     """The hint for one foreign known name, the entering commands resolved (never raises: ``entering_commands``)."""
-    from fastworkflow.context_navigation import entering_commands
+    from fastworkflow.core.context_navigation import entering_commands
 
     return foreign_context_hint(command_name, owner_contexts,
                                 {name: entering_commands(workflow_folderpath, name) for name in owner_contexts})
@@ -366,7 +367,7 @@ def foreign_hint(workflow, text: str) -> Optional[tuple[str, list[str]]]:
     """``(routing hint, owning contexts)`` when the first word of *text* names a command no scope of the lookup path
     owns, else None. The guard of ``resolve`` as a question of its own: the CME applies it to a reply to the which-command
     question too, since a reply that names a real command owned elsewhere is a misroute, not an unreadable answer."""
-    from fastworkflow import context_navigation
+    from fastworkflow.core import context_navigation
 
     _, core_names = _kinds(workflow)
     bare = first_word(text).lstrip("/").lower()
@@ -401,7 +402,7 @@ def _by_name(workflow, text: str, planning: set[str], core_names: set[str], core
              ) -> tuple[Optional[Intent], dict]:
     """Layers 1 to 3: an exact name, the foreign-name guard, a fuzzy name. ``(intent, facts)``: the intent is None when
     none of them decides, and the facts (a fuzzy tie) are then kept for the span of the chain's decision."""
-    from fastworkflow import context_navigation
+    from fastworkflow.core import context_navigation
 
     token = first_word(text)
     bare = token.lstrip("/").lower()
@@ -480,7 +481,7 @@ def _second_opinion(workflow, text: str, local: str, local_ranked: tuple, path, 
     local model to a multi-step plan the request does not ask for. The remote decision model is asked over the same
     scope path (when the key is set) and its answer stands, the local plan kept as the top candidate; with no key, or
     when its call fails, the request is an ambiguity, asked like any other, never the unreviewed fast path."""
-    from fastworkflow import intent_detector
+    from fastworkflow.intent import intent_detector
 
     answers = tuple(local_answers)
     if intent_detector.matcher_available():
@@ -536,7 +537,7 @@ def resolve(workflow, text: str, *, core: bool = False) -> Intent:
 
 def _chain(workflow, text: str, planning: set[str], core_names: set[str], core: bool) -> Intent:
     """Layers 4 to 7: the local model over the whole walk, then the chain."""
-    from fastworkflow import intent_detector
+    from fastworkflow.intent import intent_detector
 
     excluded_core = set() if core else core_names
     path, global_last = scope_path(workflow)
@@ -601,7 +602,8 @@ def choose(workflow, qualified: str, *, decided_by: str = BY_CHOICE) -> Optional
     A global command is taken from the global scope when the walk asks that scope first (``global_first_applies``),
     as the walk does for natural language; otherwise the nearest scope that has it. A framework command runs anywhere,
     on the current scope."""
-    from fastworkflow import context_navigation, intent_detector
+    from fastworkflow.core import context_navigation
+    from fastworkflow.intent import intent_detector
 
     planning, core_names = _kinds(workflow)
     kind = _kind_of(qualified, planning, core_names)
@@ -629,7 +631,7 @@ def on_owner_record(workflow, qualified: str):
     binds it before the "/" path extracts (``choose``: the nearest scope of the lookup path that has it, the root for a
     global command; a command no scope of the path has keeps the current position). The binding is context-local
     (``workflow.running_command``), so parts checked side by side each see their own; the position does not move."""
-    from fastworkflow.workflow import running_command
+    from fastworkflow.core.workflow import running_command
 
     chosen = choose(workflow, qualified) if qualified else None
     record = chosen.record if chosen is not None else workflow._current_command_context
@@ -649,7 +651,7 @@ def unconfirmed_pick(workflow, intent: "Intent", origin) -> bool:
     The one rule both paths read: "a command that changes data or needs approval runs only when the user named it
     (typed its exact name, picked it at the which-command question, or a client pinned or called it directly), or
     after the user says yes to it". Raises what reading the workflow's routing raises."""
-    from fastworkflow import approval_annotations, command_writes
+    from fastworkflow.core import approval_annotations, command_writes
     from fastworkflow.review import approval_binding
 
     if intent.outcome != MATCH or intent.decided_by in NAMED_DECIDERS or not intent.command:
@@ -668,7 +670,7 @@ def unconfirmed_pick(workflow, intent: "Intent", origin) -> bool:
 
 def how_settled(decided_by: str) -> Optional[str]:
     """How a request's command was settled, for `intent_learning`: None when nobody settled it (a question comes next)."""
-    from fastworkflow import intent_learning as learning
+    from fastworkflow.intent import intent_learning as learning
 
     return {BY_CLASSIFIER: learning.HOW_LOCAL, BY_MATCHER: learning.HOW_REMOTE, BY_EXACT_NAME: learning.HOW_NAME,
             BY_FUZZY_NAME: learning.HOW_NAME, BY_PINNED: learning.HOW_USER_CHOICE,
@@ -679,7 +681,7 @@ def record(workflow, text: str, command: str, how: str, evidence: Optional[dict]
            rejected: Optional[str] = None, context: Optional[str] = None) -> None:
     """Record a request's settled command (`intent_learning.record`; never raises). THE one writer, called where a decision
     is settled: by the plan path for a part (``WorkflowExecutionContext``) and by the CME's router for a request."""
-    from fastworkflow import intent_learning
+    from fastworkflow.intent import intent_learning
 
     where = context or (evidence or {}).get("context") or workflow._current_command_context_name
     intent_learning.record(workflow.folderpath, text=text, context=where, command=command, how=how,
@@ -728,7 +730,7 @@ def open_question(request: str, choices: list[dict[str, Any]], *, sub_task: Opti
 
 def ask(record: dict[str, Any], *, retry: str = "") -> str:
     """The question's text, written into the record (``record["question"]``) and counted."""
-    from fastworkflow import no_agent_mode
+    from fastworkflow.core import no_agent_mode
 
     record["question"] = intent_clarification.plan_choice_question(
         record["request"], record["choices"], sub_task=record.get("sub_task"), listed=no_agent_mode.AD_HOC_LIST_CAP,
@@ -753,7 +755,7 @@ def answer(record: dict[str, Any], reply: str, *, aliases: Optional[Mapping[str,
     """Apply *reply* to the pending question (*aliases*: see ``read``). A reply that cannot be read is asked once more
     (``no_agent_mode.MAX_NO_PROGRESS`` replies in all); after the last one the replies are ``exhausted`` and the
     caller ends the question (the plan path drops the part; the CME lists the commands). Counts in the record."""
-    from fastworkflow import no_agent_mode
+    from fastworkflow.core import no_agent_mode
 
     names = [each["name"] for each in record["choices"]]
     reading = read(reply, names, numbered=no_agent_mode.AD_HOC_LIST_CAP, aliases=aliases)
@@ -767,7 +769,7 @@ def answer(record: dict[str, Any], reply: str, *, aliases: Optional[Mapping[str,
 
 def describe(workflow, names: Iterable[str]) -> dict[str, str]:
     """``{name: one-line description}`` for the commands of the request's scope path."""
-    from fastworkflow import intent_detector
+    from fastworkflow.intent import intent_detector
 
     wanted = set(names)
     found: dict[str, str] = {}
@@ -815,7 +817,7 @@ def command_choices(app_workflow, *, core: bool = True) -> list[dict[str, Any]]:
     and its planning commands, by name. Without *core* the CME's navigation commands are left out (a plan does not run
     them)."""
     import fastworkflow
-    from fastworkflow.nlu_labels import is_non_routable
+    from fastworkflow.intent.nlu_labels import is_non_routable
 
     internal = fastworkflow.RoutingRegistry.get_definition(
         fastworkflow.get_internal_workflow_path("command_metadata_extraction"))

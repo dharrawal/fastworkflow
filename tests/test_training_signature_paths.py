@@ -14,8 +14,8 @@ import os
 import shutil
 
 import fastworkflow
-from fastworkflow.command_directory import CommandDirectory
-from fastworkflow.command_routing import RoutingRegistry
+from fastworkflow.core.command_directory import CommandDirectory
+from fastworkflow.core.command_routing import RoutingRegistry
 from fastworkflow.train import selective_training as st
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401
 

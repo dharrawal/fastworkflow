@@ -33,7 +33,7 @@ from fastworkflow.observability import control
 from fastworkflow.observability import store as obs
 from fastworkflow.session import state_paths
 from fastworkflow.observability import tracing
-from fastworkflow.command_executor import CommandExecutor
+from fastworkflow.engine.command_executor import CommandExecutor
 from fastworkflow.experiment.runner import (
     ExperimentHarness,
     ExperimentTask,
@@ -41,7 +41,7 @@ from fastworkflow.experiment.runner import (
     derived_outcome,
 )
 from fastworkflow.run_chatbot import server as run_chatbot_server
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 
 # ----------------------------------------------------------------------
@@ -76,7 +76,7 @@ def todo_workflow_path() -> str:
 def initialized_fastworkflow(tmp_path, monkeypatch):
     monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "state"))
     fastworkflow.init({})
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     RoutingRegistry.clear_registry()
     yield
@@ -1264,7 +1264,7 @@ class TestHarness:
         """A round that leaves learning on changes the model under test mid-round."""
         import json
 
-        from fastworkflow import intent_learning
+        from fastworkflow.intent import intent_learning
         from fastworkflow.train.artifact_versioning import resolve_current_version
 
         fastworkflow._env_vars["INTENT_LEARNING_REFIT"] = "background"
@@ -1522,7 +1522,7 @@ class TestDeterminismSeams:
         each other's and no file is written for it."""
         import json
 
-        from fastworkflow import intent_loop
+        from fastworkflow.intent import intent_loop
         from fastworkflow._workflows.command_metadata_extraction.intent_detection import (
             CommandNamePrediction,
         )

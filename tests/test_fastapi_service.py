@@ -243,7 +243,7 @@ def test_session_manager_basic(app_module):
 
 
 # Keys of the public TurnOutput projection every turn surface answers with
-# (fastworkflow/turn.py). ``success`` is a computed field, so it is part of the
+# (fastworkflow/core/turn.py). ``success`` is a computed field, so it is part of the
 # serialized shape rather than something the server bolts on.
 TURN_OUTPUT_KEYS = frozenset(
     {"turn_key", "status", "failure_reason", "answer", "command_outputs", "success"}

@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow.context_navigation import exact_name_scopes, live_context_chain
+from fastworkflow.core.context_navigation import exact_name_scopes, live_context_chain
 
 LIBRARY = str(Path(__file__).resolve().parent.parent / "fastworkflow" / "examples" / "library")
 

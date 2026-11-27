@@ -31,9 +31,9 @@ from typing import Iterable, Mapping, Sequence
 
 import fastworkflow
 from fastworkflow.planning import planning_commands
-from fastworkflow import turn_cache
-from fastworkflow.command_metadata_api import CommandMetadataAPI
-from fastworkflow.context_navigation import (
+from fastworkflow.core import turn_cache
+from fastworkflow.core.command_metadata_api import CommandMetadataAPI
+from fastworkflow.core.context_navigation import (
     collect_descend_edges, display_context_name, exact_name_scopes, live_context_chain,
     navigation_steps_to_context, plan_navigation)
 
@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 def _routing_registry():
     """The routing registry class itself. ``fastworkflow.RoutingRegistry`` stays None until
     ``fastworkflow.init()`` runs, and the listing is read on paths that may come first."""
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
     return RoutingRegistry
 
 
@@ -289,7 +289,7 @@ def head_answers(workflow, sub_task: str, command_info_root: str | None = None) 
     each, so a context with no trained head (no ``threshold.json`` etc. in its folder) answers nothing here (3.9).
     Blank text answers nothing either (fix-wfxt): the head's predict refuses empty input, and
     there is no command in it to route."""
-    from fastworkflow import intent_detector
+    from fastworkflow.intent import intent_detector
 
     if not sub_task.strip():
         return {}
@@ -372,7 +372,7 @@ def exact_command_name(workflow, sub_task: str) -> str | None:
     token = text.split(None, 1)[0].split("(", 1)[0].lower() if text else ""
     if not token:
         return None
-    from fastworkflow.context_navigation import exact_name_scopes
+    from fastworkflow.core.context_navigation import exact_name_scopes
 
     crd = _routing_registry().get_definition(workflow.folderpath)
     for scope in exact_name_scopes(workflow):    # the lookup path intent detection reads, nearest first
@@ -422,7 +422,7 @@ def shortlist_live(workflow, sub_task: str, planning_probabilities: Mapping[str,
 
 def _one_line(workflow, active: str, context: str, on_path: bool, crd) -> str:
     """One context as one line, as the executor's list writes it (``get_other_contexts_text``)."""
-    from fastworkflow.context_identity import context_class_for
+    from fastworkflow.core.context_identity import context_class_for
 
     description = ""
     with contextlib.suppress(Exception):
@@ -585,7 +585,7 @@ def command_shortlist_text(workflow, names: Iterable[str]) -> str:
 def has_trained_heads(workflow) -> bool:
     """True when the workflow has at least one trained head (a context folder of ``___command_info`` with the head's
     model files). The production THRESHOLD arm needs them to gather a shortlist; without them it gives FULL."""
-    from fastworkflow.intent_detector import has_head
+    from fastworkflow.intent.intent_detector import has_head
 
     root = command_info_root_of(workflow)
     if not os.path.isdir(root):

@@ -57,10 +57,10 @@ import pytest
 import fastworkflow
 from fastworkflow.observability import store as obs
 from fastworkflow.observability import tracing
-from fastworkflow.command_executor import CommandExecutor
+from fastworkflow.engine.command_executor import CommandExecutor
 from fastworkflow.observability.evidence_run import capture_observability_provenance
 from fastworkflow.observability.provenance import ObservabilityProvenance
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 from tests.todo_list_workflow.application.todo_manager import TodoListManager
 
@@ -425,10 +425,10 @@ def test_the_scan_found_the_emitters_that_obviously_exist():
     """
     found = {(site["file"], site["function"]) for site in SITES}
     for expected in (
-        ("command_executor.py", "invoke_command"),
+        ("engine/command_executor.py", "invoke_command"),
         ("workflow_agent.py", "build_query_with_next_steps"),
         ("utils/dspy_logger.py", "on_lm_end"),
-        ("workflow_execution_context.py", "_close_ask_user_span"),
+        ("engine/workflow_execution_context.py", "_close_ask_user_span"),
     ):
         assert expected in found, f"the scan missed {expected}"
 
@@ -572,15 +572,15 @@ def test_the_rule_has_real_multi_producer_names_to_hold():
     def openers(name):
         return sorted((site["file"], site["function"]) for site in SITES if name in site["opens"])
 
-    assert openers(tracing.SPAN_COMMAND) == [
-        ("command_executor.py", "invoke_command"),
-        ("workflow_execution_context.py", "_process_action"),
-    ]
-    assert openers(tracing.SPAN_STEP) == [
+    assert openers(tracing.SPAN_COMMAND) == sorted([
+        ("engine/command_executor.py", "invoke_command"),
+        ("engine/workflow_execution_context.py", "_process_action"),
+    ])
+    assert openers(tracing.SPAN_STEP) == sorted([
         ("utils/react.py", "_run_loop"),
-        ("workflow_execution_context.py", "_record_result_failure"),
-        ("workflow_execution_context.py", "_settled_phase_answer"),
-    ]
+        ("engine/workflow_execution_context.py", "_record_result_failure"),
+        ("engine/workflow_execution_context.py", "_settled_phase_answer"),
+    ])
     assert not openers("fw.agent.tool_call")
 
 
@@ -594,12 +594,12 @@ def test_a_reconstruction_is_not_held_to_the_producer_rule():
         for site in SITES
         if site["names"] and not site["opens"]
     }
-    assert ("workflow_execution_context.py", "_close_ask_user_span") in rebuilders
-    assert ("workflow_execution_context.py", "_finalize_turn_trace") in rebuilders
+    assert ("engine/workflow_execution_context.py", "_close_ask_user_span") in rebuilders
+    assert ("engine/workflow_execution_context.py", "_finalize_turn_trace") in rebuilders
     # The stage and part spans (bd fix-qjne.34): opened by the stage machinery, closed by one rebuilder each.
     for rebuilder in ("_close_split_span", "_close_resolve_span", "_close_resolve_part_span", "_close_review_span",
                       "_close_run_span", "_close_run_part_span", "_close_answer_span"):
-        assert ("workflow_execution_context.py", rebuilder) in rebuilders
+        assert ("engine/workflow_execution_context.py", rebuilder) in rebuilders
 
 
 # ----------------------------------------------------------------------
@@ -720,7 +720,7 @@ def todo_workflow_path() -> str:
 @pytest.fixture
 def initialized_fastworkflow():
     fastworkflow.init({})
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     RoutingRegistry.clear_registry()
     yield

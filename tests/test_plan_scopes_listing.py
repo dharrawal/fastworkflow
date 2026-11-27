@@ -11,10 +11,11 @@ from __future__ import annotations
 import pytest
 
 from fastworkflow.review import approval_binding
-from fastworkflow import no_agent_mode, workflow_agent
+from fastworkflow.core import no_agent_mode
+from fastworkflow import workflow_agent
 from fastworkflow.review.approval_binding import Surface
-from fastworkflow.turn import TurnStatus
-from fastworkflow.workflow_execution_context import NOT_RUN_ARTIFACT, UsePlanError, WorkflowExecutionContext
+from fastworkflow.core.turn import TurnStatus
+from fastworkflow.engine.workflow_execution_context import NOT_RUN_ARTIFACT, UsePlanError, WorkflowExecutionContext
 from tests.scripted_extractor import script_extractor
 from tests.test_approval_binding import annotated_library, todo  # noqa: F401
 from tests.test_round1_gate import gated  # noqa: F401

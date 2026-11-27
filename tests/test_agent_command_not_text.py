@@ -11,7 +11,7 @@ spied on, not replaced, so the real dispatch runs for anything not refused.
 import pytest
 
 from fastworkflow import workflow_agent
-from fastworkflow.command_executor import CommandExecutor
+from fastworkflow.engine.command_executor import CommandExecutor
 from fastworkflow.workflow_agent import initialize_workflow_tool_agent
 from tests.test_tracing_phase1 import (  # noqa: F401
     _make_agent_ctx,

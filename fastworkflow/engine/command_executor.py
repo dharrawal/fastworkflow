@@ -7,9 +7,10 @@ import fastworkflow
 from pydantic import BaseModel
 from fastworkflow.observability import tracing
 from fastworkflow.review import approval_binding
-from fastworkflow import command_writes, intent_loop, waiting
-from fastworkflow.command_interfaces import CommandExecutorInterface
-from fastworkflow.command_declarations import declared_descend
+from fastworkflow.core import command_writes, waiting
+from fastworkflow.intent import intent_loop
+from fastworkflow.core.command_interfaces import CommandExecutorInterface
+from fastworkflow.core.command_declarations import declared_descend
 
 from fastworkflow import Action, CommandOutput, ChatSession
 from fastworkflow.observability.execution_recorder import record_execution, recorder_for
@@ -17,11 +18,11 @@ from fastworkflow import ModuleType
 from fastworkflow.utils.python_utils import legacy_module_names
 from fastworkflow.parameters.signatures import InputForParamExtraction, parameters_with_unfilled
 from pathlib import Path
-from fastworkflow.command_routing import RoutingDefinition
+from fastworkflow.core.command_routing import RoutingDefinition
 from typing import Optional
-from fastworkflow.command_context_model import CommandContextModel
-from fastworkflow.command_directory import CommandDirectory
-from fastworkflow.workflow import running_command
+from fastworkflow.core.command_context_model import CommandContextModel
+from fastworkflow.core.command_directory import CommandDirectory
+from fastworkflow.core.workflow import running_command
 
 
 def _declared_output_model(response_generator_class) -> type | None:
@@ -170,7 +171,7 @@ def _pending_before_cme_reply(workflow) -> dict:
     waiting for (``intent_loop.waiting_for``), the command text being processed and the command whose parameters were
     being extracted. Empty when nothing."""
     try:
-        from fastworkflow import intent_loop
+        from fastworkflow.intent import intent_loop
 
         context = workflow.context
         pending = {"waiting_for": intent_loop.waiting_for(context),
@@ -212,7 +213,7 @@ def _no_agent_note(route, workflow) -> str:
             return ""
     except Exception:  # noqa: BLE001 - a note is never worth failing a reply
         return ""
-    from fastworkflow.no_agent_mode import NOT_PLANNED_NOTE
+    from fastworkflow.core.no_agent_mode import NOT_PLANNED_NOTE
     return f"\n{NOT_PLANNED_NOTE}"
 
 
@@ -397,7 +398,7 @@ def _ran_on(workflow, record) -> Optional[tuple[str, str]]:
     the CME's walk reports for a message (``wildcard``), so a direct action is filed the same way."""
     if record is workflow._current_command_context:
         return None
-    from fastworkflow.context_identity import identity_of
+    from fastworkflow.core.context_identity import identity_of
     from fastworkflow.observation_offloading.labels import context_clause
 
     name, label = identity_of(workflow, record)

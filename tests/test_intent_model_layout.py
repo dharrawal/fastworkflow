@@ -24,9 +24,9 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow import intent_detector
-from fastworkflow.command_routing import RoutingRegistry
-from fastworkflow.nlu_labels import PARAMETER_VALUE_LABEL, WILDCARD_LABEL
+from fastworkflow.intent import intent_detector
+from fastworkflow.core.command_routing import RoutingRegistry
+from fastworkflow.intent.nlu_labels import PARAMETER_VALUE_LABEL, WILDCARD_LABEL
 from fastworkflow.train import artifact_versioning
 from fastworkflow.train import intent_model_layout as layout
 from fastworkflow.train import selective_training as st

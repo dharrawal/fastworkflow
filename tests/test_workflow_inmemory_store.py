@@ -10,7 +10,7 @@ automatic eviction of abandoned workflows once they are garbage-collected
 import gc
 
 import fastworkflow
-from fastworkflow.workflow import _WORKFLOW_REGISTRY
+from fastworkflow.core.workflow import _WORKFLOW_REGISTRY
 
 
 def _internal_path() -> str:

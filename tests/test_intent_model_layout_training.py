@@ -42,10 +42,10 @@ import pytest
 from dotenv import dotenv_values
 
 import fastworkflow
-from fastworkflow import intent_detector
+from fastworkflow.intent import intent_detector
 from fastworkflow._workflows.command_metadata_extraction import intent_detection
-from fastworkflow.command_executor import CommandExecutor
-from fastworkflow.command_routing import RoutingRegistry
+from fastworkflow.engine.command_executor import CommandExecutor
+from fastworkflow.core.command_routing import RoutingRegistry
 from fastworkflow.train import artifact_versioning, param_example_cache
 from fastworkflow.train import intent_model_layout as layout
 from fastworkflow.train import selective_training as st
@@ -196,7 +196,7 @@ def _session_on_a_book(workflow_path: str, name: str):
 
 def _confident(cme, candidates, head: str):
     """The candidates the trained model names one command for when asked in *head* (the local model alone)."""
-    from fastworkflow import intent_detector
+    from fastworkflow.intent import intent_detector
 
     app = cme.context["app_workflow"]
     engine = intent_detector.engine_for(app.folderpath, head, allow_matcher=False)
@@ -216,7 +216,7 @@ CORE_LABELS = frozenset({"IntentDetection/go_up", "IntentDetection/reset_context
 
 def _spy_on_the_heads_asked(monkeypatch) -> list:
     """Record each head the decision asks, in order, and call through (a spy on ``intent_detector.engine_for``)."""
-    from fastworkflow import intent_detector
+    from fastworkflow.intent import intent_detector
 
     asked: list = []
     original = intent_detector.engine_for
@@ -506,7 +506,7 @@ def test_train_and_run_in_the_default_embedding_layout(
                for router in routers.values())
     assert intent_detection._classifier_signal_version(str(info / "*"), "embedding") == (
         f"intent-classifier/{version}/global/embedding")
-    from fastworkflow import intent_detector
+    from fastworkflow.intent import intent_detector
 
     assert intent_detector.engine_choice(workflow_path, "Book") == "classifier"       # no planner key
     assert intent_detector.startup_report(workflow_path) == ([], [

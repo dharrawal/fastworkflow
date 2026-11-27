@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastworkflow.turn import ExecutionRecordRef
+from fastworkflow.core.turn import ExecutionRecordRef
 
 
 class ExecutionRecorder:

@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow.command_executor import CommandExecutor
+from fastworkflow.engine.command_executor import CommandExecutor
 from fastworkflow.policy.policy_decision import (
     ContractFacts,
     DecisionPhase,
@@ -30,7 +30,7 @@ from fastworkflow.policy.policy_decision import (
 )
 from fastworkflow.policy.policy_runtime import AgentPolicy
 from fastworkflow.utils.react import fastWorkflowReAct
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 from tests.todo_list_workflow.application.todo_manager import TodoListManager
 
@@ -52,7 +52,7 @@ def todo_workflow_path() -> str:
 @pytest.fixture
 def ctx(todo_workflow_path, tmp_path, monkeypatch):
     fastworkflow.init({})
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     RoutingRegistry.clear_registry()
     workflow = fastworkflow.Workflow.create(

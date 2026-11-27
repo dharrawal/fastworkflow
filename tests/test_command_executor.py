@@ -7,8 +7,8 @@ from dotenv import dotenv_values
 import pytest
 
 import fastworkflow
-from fastworkflow.command_executor import CommandExecutor
-from fastworkflow.chat_session import ChatSession
+from fastworkflow.engine.command_executor import CommandExecutor
+from fastworkflow.engine.chat_session import ChatSession
 
 
 @pytest.fixture(scope="module")

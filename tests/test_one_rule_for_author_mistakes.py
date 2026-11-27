@@ -22,8 +22,8 @@ import fastworkflow
 from fastworkflow import ModuleType, workflow_agent
 from fastworkflow.planning import command_preview
 from fastworkflow.planning import planning_commands as pc
-from fastworkflow.command_directory import CommandLoadError
-from fastworkflow.command_routing import RoutingRegistry
+from fastworkflow.core.command_directory import CommandLoadError
+from fastworkflow.core.command_routing import RoutingRegistry
 from tests.test_command_preview import PING, PONG
 from tests.context_declarations import declare_inherits
 from tests.test_field_sources import ROOT, _build_workflow
@@ -342,7 +342,7 @@ def test_an_unknown_base_stops_the_workflow_naming_the_file_and_the_referring_co
     problem = _one_global_problem(folder, "_commands/Member/_Member.py")
     assert "inherits names 'Recrd', which is no context; did you mean 'Record'?" in problem
     with pytest.raises(Exception, match="inherits names 'Recrd', which is no context"):
-        fastworkflow.command_context_model.CommandContextModel.load(folder)     # at load, not at first use
+        fastworkflow.core.command_context_model.CommandContextModel.load(folder)     # at load, not at first use
 
 
 @pytest.mark.parametrize("old,new,text", [
@@ -405,7 +405,7 @@ def test_the_removed_inheritance_file_stops_the_workflow(tmp_path):
     assert "context_inheritance_model.json is removed and not read" in problem
     assert "inherits = [" in problem and "fastworkflow migrate-contexts" in problem
     with pytest.raises(Exception, match="context_inheritance_model.json is removed and not read"):
-        fastworkflow.command_context_model.CommandContextModel.load(folder)
+        fastworkflow.core.command_context_model.CommandContextModel.load(folder)
 
 
 _A_CONTEXT_CLASS = """class Context:
@@ -429,7 +429,7 @@ def test_a_folder_with_no_command_file_that_inherits_one_loads_with_its_context_
     with caplog.at_level("DEBUG"):
         assert command_preview.load_problems(folder) == []
     assert not [r for r in caplog.records if r.levelname in ("WARNING", "ERROR") and "Paperback" in r.getMessage()]
-    model = fastworkflow.command_context_model.CommandContextModel.load(folder)
+    model = fastworkflow.core.command_context_model.CommandContextModel.load(folder)
     assert set(model.commands("Book")) <= set(model.commands("Paperback")) and model.commands("Paperback")
     definition = RoutingRegistry.get_definition(folder)
     assert "Paperback" in definition.command_directory.map_context_2_metadata
@@ -445,7 +445,7 @@ def test_a_folder_that_inherits_from_a_base_workflow_folder_loads(tmp_path):
     (derived / "workflow_inheritance_model.json").write_text(json.dumps({"base": [base]}), encoding="utf-8")
     _context_folder(str(derived), "Paperback", {"_Paperback.py": _A_CONTEXT_CLASS})
     declare_inherits(derived, {"Paperback": ["Book"]})
-    model = fastworkflow.command_context_model.CommandContextModel.load(str(derived))
+    model = fastworkflow.core.command_context_model.CommandContextModel.load(str(derived))
     assert "Book/show_book" in model.commands("Paperback")
 
 
@@ -469,7 +469,7 @@ def test_a_folder_with_no_command_file_that_inherits_none_stops_the_workflow(tmp
         assert f"_commands/{name}: the context folder {name!r} holds no command file and inherits none" in problem
         assert "add a command" in problem and "move helper modules to _commands/_shared/" in problem
     with pytest.raises(Exception, match="holds no command file and inherits none"):
-        fastworkflow.command_context_model.CommandContextModel.load(folder)
+        fastworkflow.core.command_context_model.CommandContextModel.load(folder)
 
 
 def test_a_folder_whose_only_command_does_not_load_is_that_commands_problem_only(tmp_path):

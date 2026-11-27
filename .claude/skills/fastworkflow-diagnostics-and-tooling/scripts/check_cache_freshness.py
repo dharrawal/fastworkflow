@@ -60,7 +60,7 @@ def stamped_fingerprint(path: Path):
 def contributing_sources(workflow_dir: str):
     """Re-derive the file set the fingerprint covers, using the same package
     helpers the runtime uses (no reimplementation of the selection logic)."""
-    from fastworkflow.command_directory import (
+    from fastworkflow.core.command_directory import (
         _CONTEXT_MODEL_BASENAMES,
         _command_source_roots,
     )
@@ -89,7 +89,7 @@ def main() -> int:
         return 1
 
     # Import late: `import fastworkflow` takes ~5-10s.
-    from fastworkflow.command_directory import compute_commands_source_fingerprint
+    from fastworkflow.core.command_directory import compute_commands_source_fingerprint
 
     live = compute_commands_source_fingerprint(str(wf))
     sources = contributing_sources(str(wf))

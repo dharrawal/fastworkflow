@@ -49,7 +49,7 @@ from fastworkflow.run_fastapi_mcp.utils import (
 )
 from fastworkflow.session.serialization_hooks import ProjectionOutcome
 from fastworkflow.utils.logging import logger
-from fastworkflow.workflow import _WORKFLOW_REGISTRY
+from fastworkflow.core.workflow import _WORKFLOW_REGISTRY
 
 TESTS_DIR = Path(__file__).parent
 

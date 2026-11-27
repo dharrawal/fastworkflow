@@ -21,7 +21,7 @@ from dspy.utils import DummyLM
 import fastworkflow
 from fastworkflow.review import review_proposals
 from fastworkflow.review.review_proposals import Means, SubTask, SubTaskInput
-from fastworkflow.turn import TurnStatus
+from fastworkflow.core.turn import TurnStatus
 from fastworkflow.parameters import signatures
 from tests.conftest import script_matcher
 from tests.test_approval_binding import annotated_library, no_live_model, todo  # noqa: F401 - the fixtures

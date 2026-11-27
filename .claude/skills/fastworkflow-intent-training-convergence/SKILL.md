@@ -160,7 +160,7 @@ Anything that shrinks the escalation class buys routing accuracy with escalation
 Measure both or you will "improve" the workflow by breaking hierarchy navigation.
 
 **3. `wildcard` no longer means "catch-all" — check which reserved label you are reasoning about.**
-`fastworkflow/nlu_labels.py` now defines two reserved labels, and conflating them will
+`fastworkflow/intent/nlu_labels.py` now defines two reserved labels, and conflating them will
 make you misread every number here.
 
 | Label | Stage it belongs to | What it means | Trained where |
@@ -450,7 +450,7 @@ grep -n "select_persona_indices\|random.sample" fastworkflow/train/generate_synt
 grep -n "fell_back\|fallback_reason" fastworkflow/train/generate_synthetic.py
 
 # The two reserved labels and which one escalates
-sed -n '46,77p' fastworkflow/nlu_labels.py
+sed -n '46,77p' fastworkflow/intent/nlu_labels.py
 
 # The escalation class is dropped where there are no ancestors
 grep -n "if net_ancestor_utterances" -B 12 fastworkflow/model_pipeline_training.py

@@ -49,7 +49,7 @@ _BLOCK = re.compile(r"<!-- ([\w-]+)(?:: ([^\n]*?))? -->\n```[\w-]*\n(.*?)\n```",
 
 
 def _routing(folder: str = WORKFLOW):
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     return RoutingRegistry.get_definition(folder)
 

@@ -29,7 +29,7 @@ from fastworkflow.session.state_serialization import (
     state_digest,
     validate_state,
 )
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 
 @pytest.fixture(scope="module")

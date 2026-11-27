@@ -75,7 +75,7 @@ import json, os, uuid
 
 import fastworkflow
 from fastworkflow import Action, ModuleType
-from fastworkflow.command_executor import CommandExecutor, call_response_generator
+from fastworkflow.engine.command_executor import CommandExecutor, call_response_generator
 
 
 def open_session(workflow_folder):
@@ -225,9 +225,9 @@ Asks each context's trained local model (`CommandRouter`, cached per folder) and
 as the runtime does (see `SKILL.md`). Never touches the backend or a remote model.
 
 ```python
-from fastworkflow.intent_detector import handed_on
+from fastworkflow.intent.intent_detector import handed_on
 from fastworkflow.model_pipeline_training import CommandRouter
-from fastworkflow.nlu_labels import PARAMETER_VALUE_LABEL, WILDCARD_LABEL
+from fastworkflow.intent.nlu_labels import PARAMETER_VALUE_LABEL, WILDCARD_LABEL
 
 
 class Router:

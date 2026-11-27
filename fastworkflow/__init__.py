@@ -420,9 +420,9 @@ def init(env_vars: dict):
         reconfigure_log_level(log_level)
 
     # init before importing other modules so env vars are available
-    from .command_context_model import CommandContextModel as CommandContextModelClass
-    from .command_routing import RoutingDefinition as RoutingDefinitionClass
-    from .command_routing import RoutingRegistry as RoutingRegistryClass
+    from fastworkflow.core.command_context_model import CommandContextModel as CommandContextModelClass
+    from fastworkflow.core.command_routing import RoutingDefinition as RoutingDefinitionClass
+    from fastworkflow.core.command_routing import RoutingRegistry as RoutingRegistryClass
     from .model_pipeline_training import ModelPipeline
 
     # Assign to global variables
@@ -529,17 +529,17 @@ def get_internal_workflow_path(workflow_name: str) -> str:
 def get_workflow_id(workflow_id_str: str) -> int:
     return int(mmh3.hash(workflow_id_str))
 
-from .active_workflow import (
+from fastworkflow.engine.active_workflow import (
     get_active_workflow,
     push_active_workflow,
     pop_active_workflow,
     clear_workflow_stack,
 )
 
-# Turn-level result types (fastworkflow.turn). Imported here — after
+# Turn-level result types (fastworkflow.core.turn). Imported here — after
 # CommandResponse and CommandOutput are defined — so the forward references
 # inside TurnResult can be resolved against this module's types.
-from fastworkflow.turn import (
+from fastworkflow.core.turn import (
     TurnResult,
     TurnOutput,
     TurnStatus,
@@ -569,15 +569,13 @@ from fastworkflow.observability.metrics import (
     LoggingMetricsSink as LoggingMetricsSink,
 )
 
-# The ChatSessionDescriptor instance used to occupy this name until the eager
-# `from .chat_session import ChatSession` replaced it with the submodule.
-# Leave the name unbound so attribute access loads that submodule on demand
-# instead of publishing the descriptor, which is not the public object.
-del chat_session
+# The process's ChatSession, set by the CLI and the server (`fastworkflow.chat_session = ChatSession(...)`) and None
+# until then. The session module itself is fastworkflow.engine.chat_session, so the name no longer doubles as it.
+chat_session: Optional["ChatSession"] = None
 
-# Command class declarations (fastworkflow.command_declarations): the decorators a
+# Command class declarations (fastworkflow.core.command_declarations): the decorators a
 # ResponseGenerator or PlanGenerator carries. Stdlib-only, so imported eagerly.
-from fastworkflow.command_declarations import (
+from fastworkflow.core.command_declarations import (
     UserApproval,
     descends_to,
     user_approval_for_execution,
@@ -587,14 +585,14 @@ from fastworkflow.command_declarations import (
 # First-use re-exports. Workflow pulls numpy via kvstore; ChatSession and
 # WorkflowExecutionContext pull dspy, litellm, fastapi, and starlette.
 _LAZY_ATTRS = {
-    "Workflow": ("fastworkflow.workflow", "Workflow"),
-    "ChatSession": ("fastworkflow.chat_session", "ChatSession"),
+    "Workflow": ("fastworkflow.core.workflow", "Workflow"),
+    "ChatSession": ("fastworkflow.engine.chat_session", "ChatSession"),
     "WorkflowExecutionContext": (
-        "fastworkflow.workflow_execution_context",
+        "fastworkflow.engine.workflow_execution_context",
         "WorkflowExecutionContext",
     ),
     "CommandCancelledError": (
-        "fastworkflow.workflow_execution_context",
+        "fastworkflow.engine.workflow_execution_context",
         "CommandCancelledError",
     ),
     "FieldOptions": ("fastworkflow.parameters.field_options", "FieldOptions"),
@@ -610,6 +608,7 @@ __all__ = (
     "BaseModel",
     "ChatSession",
     "ChatSessionDescriptor",
+    "chat_session",
     "CommandCancelledError",
     "CommandContextModel",
     "CommandOutput",
@@ -645,8 +644,6 @@ __all__ = (
     "user_approval_for_execution",
     "writes",
     "WorkflowExecutionContext",
-    "active_workflow",
-    "chat_session",
     "clear_workflow_stack",
     "context_budget",
     "contextlib",
@@ -671,10 +668,8 @@ __all__ = (
     "pop_active_workflow",
     "push_active_workflow",
     "time",
-    "turn",
     "utils",
-    "workflow",
-    "workflow_execution_context",
+    
 )
 
 

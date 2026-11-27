@@ -22,9 +22,9 @@ from pydantic import BaseModel, Field
 import fastworkflow
 from fastworkflow import ModuleType, workflow_agent
 from fastworkflow.planning import planning_commands, command_preview
-from fastworkflow.command_directory import CommandDirectory, get_cached_command_directory
-from fastworkflow.command_metadata_api import CommandMetadataAPI
-from fastworkflow.command_routing import RoutingRegistry
+from fastworkflow.core.command_directory import CommandDirectory, get_cached_command_directory
+from fastworkflow.core.command_metadata_api import CommandMetadataAPI
+from fastworkflow.core.command_routing import RoutingRegistry
 from fastworkflow.planning.planning_phases import fill_output
 from fastworkflow.parameters.signatures import InputForParamExtraction, not_given_value, parameters_with_unfilled
 from tests.context_declarations import declare_inherits
@@ -1157,8 +1157,8 @@ def test_broken_context_or_workflow_inheritance_models_are_reported_as_problems(
     inh_only_path = os.path.join(folder_inh_only, "workflow_inheritance_model.json")
     with open(inh_only_path, "w", encoding="utf-8") as fh:
         fh.write('{"base": ["nonexistent_base_workflow_pkg_xyz"]}')
-    with pytest.raises(fastworkflow.workflow_inheritance_model.WorkflowInheritanceModelValidationError):
-        fastworkflow.command_context_model.CommandContextModel.load_base_contexts(folder_inh_only)
+    with pytest.raises(fastworkflow.core.workflow_inheritance_model.WorkflowInheritanceModelValidationError):
+        fastworkflow.core.command_context_model.CommandContextModel.load_base_contexts(folder_inh_only)
     res_inh_only = planning_commands.resolve_field_sources(folder_inh_only)
     assert {e.file for e in res_inh_only.errors} == {inh_only_path}
 
@@ -1409,7 +1409,7 @@ def test_the_command_source_fingerprint_is_exact_and_rescans_only_when_a_directo
     """``intent_loop.choose`` resolves the workflow's commands on every direct action, which fingerprints every command
     file. The fingerprint keeps what its last scan found and re-stats only those files while no directory changed; an
     edit in place, an added file and a removed file each still change it, to what a fresh scan computes."""
-    from fastworkflow import command_directory
+    from fastworkflow.core import command_directory
 
     folder = os.path.abspath(_build_workflow(tmp_path, "wf_fingerprint"))
     scans: list[str] = []
@@ -1564,8 +1564,8 @@ class ResponseGenerator:
     script = f"""
 import json
 import fastworkflow
-from fastworkflow.command_metadata_api import CommandMetadataAPI
-from fastworkflow.command_routing import RoutingRegistry
+from fastworkflow.core.command_metadata_api import CommandMetadataAPI
+from fastworkflow.core.command_routing import RoutingRegistry
 
 fastworkflow.init({{}})
 folder = {folder!r}

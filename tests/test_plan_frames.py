@@ -20,7 +20,7 @@ import pytest
 
 import fastworkflow
 from fastworkflow.planning import plan_frame as plan_frame_module
-from fastworkflow.command_executor import CommandExecutor
+from fastworkflow.engine.command_executor import CommandExecutor
 from fastworkflow.observation_offloading.state import (
     archive_for_path,
     observability_db_path,
@@ -34,9 +34,9 @@ from fastworkflow.planning.plan_frame import (
 )
 from fastworkflow.session.session_state_store import SCHEMA_VERSION
 from fastworkflow.session.state_serialization import validate_state
-from fastworkflow.turn import TurnStatus
+from fastworkflow.core.turn import TurnStatus
 from fastworkflow.utils.logging import logger as fastworkflow_logger
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 from tests.test_planning_command_code_steps import Model
 from tests.test_step_helpers import LibraryRunner, _library_workflow
 from tests.test_turn_result_capture import (  # noqa: F401 - shared fixtures

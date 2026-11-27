@@ -180,11 +180,11 @@ import fastworkflow  # noqa: E402
 from fastworkflow.observability import tracing  # noqa: E402
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import (  # noqa: E402
     ParameterExtraction)
-from fastworkflow.command_executor import CommandExecutor  # noqa: E402
+from fastworkflow.engine.command_executor import CommandExecutor  # noqa: E402
 from fastworkflow.planning.planning_commands import PlanningCommandCallPlan, call_phases  # noqa: E402
 
 from fastworkflow.planning.planning_phases import Phase  # noqa: E402
-from fastworkflow.turn import TurnStatus  # noqa: E402
+from fastworkflow.core.turn import TurnStatus  # noqa: E402
 from fastworkflow.utils.react import _step_indexes  # noqa: E402
 from fastworkflow.workflow_agent import initialize_workflow_tool_agent  # noqa: E402
 from tests.test_turn_result_capture import no_review_gate  # noqa: F401 - the review gate is off for these turns
@@ -316,7 +316,7 @@ class Workflow:
         # As the CME walk does (3.9): a name on the lookup path runs bound to the record of its
         # scope. perform_action would reset the binding to the current object, so such a run
         # calls the response generator itself, after binding.
-        from fastworkflow.context_navigation import command_on_path
+        from fastworkflow.core.context_navigation import command_on_path
 
         found = command_on_path(wf, name)
         bound = found is not None and len(found[1]) == 1 and found[0].record is not wf._current_command_context
@@ -331,7 +331,7 @@ class Workflow:
             params = (ParameterExtraction._extract_parameters_from_key_values(command, cls, name)
                       or ParameterExtraction._extract_parameters_from_bare(command, cls, name))
         if bound:
-            from fastworkflow.command_executor import call_response_generator
+            from fastworkflow.engine.command_executor import call_response_generator
 
             wf._command_context_for_response_generation = found[0].record
             gen_cls = routing.get_command_class(
@@ -413,7 +413,7 @@ def todo(initialized_fastworkflow, todo_workflow_path, monkeypatch):
     errands.parent = root
     root.lists[8] = errands
     # A list prints its id as its instance label ("TodoList 8"), as a record does.
-    from fastworkflow.context_identity import context_class_for
+    from fastworkflow.core.context_identity import context_class_for
 
     monkeypatch.setattr(context_class_for(wf, "TodoList"), "instance_label_attr", "id",
                         raising=False)
@@ -696,8 +696,8 @@ def test_code_reaches_the_context_of_a_step_by_a_no_value_path(todo, climbable):
 
 
 def test_a_path_that_needs_a_value_stops_code_with_the_refusal(todo, monkeypatch):
-    from fastworkflow import context_navigation
-    from fastworkflow.context_navigation import DescendEdge
+    from fastworkflow.core import context_navigation
+    from fastworkflow.core.context_navigation import DescendEdge
 
     monkeypatch.setattr(context_navigation, "collect_descend_edges", lambda path: (
         DescendEdge("TodoListManager", "get_todo_list", "TodoList", needs=("id",)),))
@@ -714,8 +714,8 @@ def test_a_path_that_needs_a_value_stops_code_with_the_refusal(todo, monkeypatch
 
 
 def test_opening_the_record_already_open_counts_as_done(todo, monkeypatch):
-    from fastworkflow import context_navigation
-    from fastworkflow.context_navigation import DescendEdge
+    from fastworkflow.core import context_navigation
+    from fastworkflow.core.context_navigation import DescendEdge
 
     monkeypatch.setattr(context_navigation, "collect_descend_edges", lambda path: (
         DescendEdge("TodoListManager", "get_todo_list", "TodoList", needs=("id",)),))
@@ -733,8 +733,8 @@ def test_opening_the_record_already_open_counts_as_done(todo, monkeypatch):
 
 
 def test_code_path_takes_only_one_shortest_no_value_path(monkeypatch):
-    from fastworkflow import context_navigation
-    from fastworkflow.context_navigation import DescendEdge, code_path
+    from fastworkflow.core import context_navigation
+    from fastworkflow.core.context_navigation import DescendEdge, code_path
 
     wf = SimpleNamespace(_current_command_context_name="Shelf", folderpath="/x")
     monkeypatch.setattr(context_navigation, "live_context_chain",
@@ -964,7 +964,7 @@ def test_a_note_list_that_fits_one_page_goes_on(paged):
 def climbable(monkeypatch):
     """The todo workflow's root object is a context of its own (TodoListManager): say
     so, so that go_up from a list is a path to it."""
-    from fastworkflow import context_navigation
+    from fastworkflow.core import context_navigation
 
     real_chain = context_navigation.live_context_chain
     monkeypatch.setattr(context_navigation, "live_context_chain", lambda wf: (

@@ -1,4 +1,4 @@
-"""The detector contract (``fastworkflow/intent_detector.py``): the scope decision, the candidates
+"""The detector contract (``fastworkflow/intent/intent_detector.py``): the scope decision, the candidates
 of a scope, the engine of a scope, and the walk over scopes.
 
 Integration tests against real components: a COPY of the bundled library example (five contexts, an
@@ -18,10 +18,11 @@ import pytest
 import dataclasses
 from typing import Optional
 import fastworkflow
-from fastworkflow import intent_detector, model_pipeline_training, run_listing
+from fastworkflow.intent import intent_detector
+from fastworkflow import model_pipeline_training, run_listing
 from fastworkflow._workflows.command_metadata_extraction import intent_detection
 from fastworkflow._workflows.command_metadata_extraction.intent_detection import CommandNamePrediction
-from fastworkflow.intent_detector import (
+from fastworkflow.intent.intent_detector import (
     Candidate,
     ClassifierEngine,
     Engine,
@@ -29,7 +30,7 @@ from fastworkflow.intent_detector import (
     ScopeAnswer,
     ScopeWalk,
 )
-from fastworkflow.nlu_labels import PARAMETER_VALUE_LABEL, WILDCARD_LABEL
+from fastworkflow.intent.nlu_labels import PARAMETER_VALUE_LABEL, WILDCARD_LABEL
 from tests.test_turn_result_capture import (  # noqa: F401 - shared fixture
     initialized_fastworkflow,
 )

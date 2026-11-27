@@ -43,7 +43,7 @@ Every file:line below was verified against that tree; re-verification one-liners
 
 - **Workflow**: a directory with `_commands/*.py` command files; fastWorkflow wraps your app with it.
 - **CME**: the internal `command_metadata_extraction` workflow (in `fastworkflow/_workflows/`) that runs intent detection + parameter extraction as a pseudo-command named `wildcard`. Every session owns a private CME workflow instance.
-- **WEC**: `WorkflowExecutionContext` (`fastworkflow/workflow_execution_context.py`) — the transport-free execution core. One user message in, one turn out.
+- **WEC**: `WorkflowExecutionContext` (`fastworkflow/engine/workflow_execution_context.py`) — the transport-free execution core. One user message in, one turn out.
 - **Topology A / B**: A = CLI `ChatSession` with queues + a worker thread (blocking `ask_user`); B = bare WEC embedded by FastAPI (`ask_user` suspends and resumes on the next message).
 - **`___command_info/`**: per-workflow trained artifacts — `command_directory.json`, `routing_definition.json`, `<cmd>_param_labeled.json`, and per-context model folders (`tinymodel.pth/`, `largemodel.pth/`, `label_encoder.pkl`, `threshold.json`).
 - **`___convo_info/`**: per-workflow runtime NLU caches (learned utterance→command mappings, suggested commands) in RocksDB (`speedict.Rdict`) files.
@@ -68,7 +68,7 @@ Every file:line below was verified against that tree; re-verification one-liners
 | T4 | Parameter extraction loops: keeps replying "missing information" with fields stuck at NOT_FOUND | Field metadata too weak for the LLM extractor, agent parroting `examples` values (deliberately rejected), or the sentinel env vars changed | Try the same command with explicit `<param>value</param>` XML (agent mode parses this by regex before any LLM call); check `MISSING_INFORMATION_ERRMSG`/`NOT_FOUND` env values are the template defaults | Improve `Field(description=, examples=, pattern=)` in the command's `Signature.Input`; in deterministic mode type `abort` to escape the state |
 | T5 | CLI spinner hangs forever in agent mode when the agent asks the user a question | **OPEN, NEEDS RUNTIME VERIFICATION** — fix-5fv hypothesis: blocking `ask_user` enqueues the question on the output queue with **no trace sentinel**, and the CLI drains the trace queue for a sentinel before reading output | Run any agent-mode CLI session and force a clarification (omit a required param). If it hangs: hypothesis confirmed — update bd fix-5fv | No shipped fix. Workaround: `--assistant` mode, or `/`-prefix the command (deterministic path emits its sentinel at turn end) |
 | T6 | FastAPI returns 409 on a retry; or 202 with a `turn_key` and docs say "poll /turns" but GET /turns 404s | 409 = a *different* turn is already active on the channel (by design). 202 = deferred execution; **GET /turns does not exist — fix-85g Step 2 is unbuilt** | `grep -n "@app.get" fastworkflow/run_fastapi_mcp/__main__.py` — routes are `/`, `/probes/*`, `/conversations` only | Recover a 202 by **re-sending the byte-identical request** — the idempotency key rejoins the same execution. Never treat `runtime.lock.locked()` as the busy signal (see T6 detail) |
-| T7 | `DeprecationWarning: WorkflowExecutionContext.process_message() is deprecated` in CLI runs | Expected: `ChatSession` itself still calls `process_message` internally | `grep -n "process_message" fastworkflow/chat_session.py` → lines 361, 374, 452, 456 | Harmless; not your bug. New embedder code should call `process_turn()` |
+| T7 | `DeprecationWarning: WorkflowExecutionContext.process_message() is deprecated` in CLI runs | Expected: `ChatSession` itself still calls `process_message` internally | `grep -n "process_message" fastworkflow/engine/chat_session.py` → lines 361, 374, 452, 456 | Harmless; not your bug. New embedder code should call `process_turn()` |
 | T8 | An intent model is weak for one specific command; that command has almost no training utterances | `generate_diverse_utterances` returns `[]` on litellm `RateLimitError` — **dropping even the seed utterances** for that command, silently (one `logger.error` line) | grep the train log for `LiteLLM Rate limiting error!`; inspect utterance counts per command in `___command_info/command_directory.json` | Re-run `fastworkflow train` when not rate-limited; consider a slower model/key. No retry logic exists on main |
 | T9 | LLM outputs look frozen — refine/agent/param-extraction returns identical answers despite prompt/code changes | DSPy disk/memory cache serving stale completions | Delete or disable the cache and re-run; if output changes, it was the cache | `rm -rf ~/.dspy_cache` (dspy 3.2.1 location) or `dspy.configure_cache(enable_disk_cache=False, enable_memory_cache=False)`. WARNING: `docs/DSPY_CACHE_GUIDE.md` is partly rotten (see T9 detail) |
 | T10 | RocksDB errors ("IO error ... LOCK", "Resource temporarily unavailable") or mysterious `LOG`/`.sst` files appearing | Two processes/threads opened the same `Rdict` (RocksDB is single-writer), or you are looking at normal RocksDB internals | `fuser`/`lsof` on the `.db` dir; check for a second server/test process on the same workflow | Ensure one writer per channel/workflow; kill the other process. `LOG`/`.sst`/`MANIFEST` files inside `___convo_info` and `___workflow_contexts` are normal RocksDB internals, all gitignored — never commit, safe to delete only with the owning process stopped |
@@ -86,13 +86,13 @@ exact first-token match → Levenshtein fuzzy match (threshold 0.3) → local mo
 1. **Stale persisted snapshots** (fixed in v2.22.1, commit b5747df): before the fix, `routing_definition.json`
    had *no* staleness check and `command_directory.json` used newest-mtime (blind to deletions/renames);
    add/remove/rename of a command caused import errors until artifacts were hand-deleted.
-   Now `compute_commands_source_fingerprint` (`fastworkflow/command_directory.py:627`) stamps both JSONs and
-   `RoutingRegistry._persisted_definition_is_fresh` (`fastworkflow/command_routing.py:385`) forces rebuild on mismatch.
+   Now `compute_commands_source_fingerprint` (`fastworkflow/core/command_directory.py:627`) stamps both JSONs and
+   `RoutingRegistry._persisted_definition_is_fresh` (`fastworkflow/core/command_routing.py:385`) forces rebuild on mismatch.
    *Experiment:* check the `source_fingerprint` field in both JSONs matches a fresh
    `compute_commands_source_fingerprint(<wf>)` call. A missing field = pre-2.22.1 artifact → rebuilt on next load.
 2. **In-process cache staleness** (still open): `get_cached_command_directory` is `@lru_cache(maxsize=32)`
-   (`fastworkflow/command_directory.py:657-658`) and `RoutingRegistry.get_definition` returns
-   `cls._definitions[path]` when present (`fastworkflow/command_routing.py:357-360`) — **the fingerprint is only
+   (`fastworkflow/core/command_directory.py:657-658`) and `RoutingRegistry.get_definition` returns
+   `cls._definitions[path]` when present (`fastworkflow/core/command_routing.py:357-360`) — **the fingerprint is only
    checked on cache miss**. Editing commands while a server/CLI process is running is never picked up.
    *Experiment:* restart the process; if behavior changes, this was it.
    *Fix:* restart, or `fastworkflow.RoutingRegistry.clear_registry()` (clears definitions, the global command-class
@@ -230,7 +230,7 @@ cache-sensitive.
 ### T10 — speedict/RocksDB notes
 
 Where Rdict still lives (post v2.21.4 hot-path removal, commit 6880b0a): the `enablecache` decorator
-(`fastworkflow/workflow.py:57`), the NLU suggested-commands state (`intent_detection.py`), the conversation store (`run_fastapi_mcp/conversation_store.py:45`).
+(`fastworkflow/core/workflow.py:57`), the NLU suggested-commands state (`intent_detection.py`), the conversation store (`run_fastapi_mcp/conversation_store.py:45`).
 All open/close per operation because **RocksDB is single-writer** — two concurrent writers on one DB error out
 (hence the "one writer per channel / sticky routing" rule; enforcement is open issue fix-5ka).
 `LOG`, `*.sst`, `MANIFEST-*`, `CURRENT`, `LOCK` files inside `___convo_info/`, `___workflow_contexts/` are normal
@@ -301,8 +301,8 @@ owner ruling (T3). Re-verify volatile facts before relying on them:
 
 ```bash
 # T1: fingerprint + lru cache + freshness check still where cited
-grep -n "def compute_commands_source_fingerprint\|@lru_cache" fastworkflow/command_directory.py   # expect 627, 657
-grep -n "_persisted_definition_is_fresh\|def clear_registry" fastworkflow/command_routing.py       # expect 368/385, 410
+grep -n "def compute_commands_source_fingerprint\|@lru_cache" fastworkflow/core/command_directory.py   # expect 627, 657
+grep -n "_persisted_definition_is_fresh\|def clear_registry" fastworkflow/core/command_routing.py       # expect 368/385, 410
 # T2: fail-fast guard
 grep -n "is_workflow_trained" fastworkflow/run_cli/__main__.py fastworkflow/model_pipeline_training.py
 # T3: ErrorCorrection mismatch still present?
@@ -312,11 +312,11 @@ ls fastworkflow/_workflows/command_metadata_extraction/___command_info/         
 grep -n "MISSING_INFORMATION_ERRMSG\|examples and extracted_value" fastworkflow/_workflows/command_metadata_extraction/parameter_extraction.py
 # T5: fix-5fv still open? sentinel emitter unchanged?
 bd show fix-5fv | head -5
-grep -n "_maybe_enqueue_trace_sentinel\|def _ask_user_tool" fastworkflow/workflow_execution_context.py fastworkflow/workflow_agent.py
+grep -n "_maybe_enqueue_trace_sentinel\|def _ask_user_tool" fastworkflow/engine/workflow_execution_context.py fastworkflow/workflow_agent.py
 # T6: GET /turns still missing? stream endpoint still on lock.locked()?
 grep -n "@app.get\|lock.locked()" fastworkflow/run_fastapi_mcp/__main__.py
 # T7: ChatSession still on process_message?
-grep -n "self._core.process_message" fastworkflow/chat_session.py
+grep -n "self._core.process_message" fastworkflow/engine/chat_session.py
 # T8: RateLimitError still drops seeds?
 grep -n -A2 "RateLimitError" fastworkflow/train/generate_synthetic.py
 # T9: dspy cache dir for the installed version; cache utility still where cited

@@ -16,13 +16,13 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow import approval_annotations as aa
-from fastworkflow.approval_annotations import (
+from fastworkflow.core import approval_annotations as aa
+from fastworkflow.core.approval_annotations import (
     REQUIRED_ALWAYS, REQUIRED_UNTIL_DELEGATED, command_approval)
 from fastworkflow.planning import command_preview
-from fastworkflow.command_directory import CommandLoadError
-from fastworkflow.command_metadata_api import CommandMetadataAPI
-from fastworkflow.command_routing import RoutingRegistry
+from fastworkflow.core.command_directory import CommandLoadError
+from fastworkflow.core.command_metadata_api import CommandMetadataAPI
+from fastworkflow.core.command_routing import RoutingRegistry
 from fastworkflow.examples.library.application.library import Library
 from fastworkflow.run_listing import command_shortlist_text
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401 - shared fixture

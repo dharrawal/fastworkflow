@@ -396,7 +396,7 @@ def _observed_context(context: dict) -> dict:
     """The CME context's keys, and the parameter loop of the turn's waiting record (the pending question) as the loop's
     own state, under ``parameter_loop``."""
     from fastworkflow.parameters import parameter_clarification
-    from fastworkflow import waiting
+    from fastworkflow.core import waiting
 
     shown = {key: value for key, value in context.items() if key != waiting.PORT_KEY}
     if (loop := parameter_clarification.pending(context)) is not None:

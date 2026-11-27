@@ -316,7 +316,7 @@ def inheritance_bases(folder: Path) -> dict[str, frozenset[str]]:
     """Each context's transitive base contexts (each context's declared ``inherits``,
     ``CommandContextModel.declared_bases``). A base's commands are listed under each context that inherits them
     (Book and Member list Record's commands)."""
-    from fastworkflow.command_context_model import CommandContextModel
+    from fastworkflow.core.command_context_model import CommandContextModel
 
     raw = CommandContextModel.declared_bases(folder)
 
@@ -355,7 +355,7 @@ def open_workflow(source: Path, label: str, scratch: Path, *, context_path: str 
     context); otherwise the workflow's own root is used.
     """
     import fastworkflow
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     folder = scratch / label
     if folder.exists():
@@ -393,7 +393,7 @@ class Built:
 
 def gather_contexts(opened: OpenedWorkflow) -> list[str]:
     """The contexts gather visits: the lookup-path scopes, then every context reachable by descend edges."""
-    from fastworkflow.context_navigation import exact_name_scopes
+    from fastworkflow.core.context_navigation import exact_name_scopes
     from fastworkflow.run_listing import _reachable_contexts
 
     scopes = [scope.context_name for scope in exact_name_scopes(opened.app)]
@@ -633,7 +633,7 @@ def sweep_thresholds(opened: OpenedWorkflow, requests: Sequence[Request], thresh
 def context_full_chars(opened: OpenedWorkflow, name: str) -> int | None:
     """The FULL listing's characters with the workflow entered in context *name* (None if it cannot be entered)."""
     from fastworkflow import workflow_agent
-    from fastworkflow.context_identity import context_class_for
+    from fastworkflow.core.context_identity import context_class_for
 
     app = opened.app
     previous = app._current_command_context
@@ -755,7 +755,7 @@ def run_spec(spec: Spec, scratch: Path, thresholds: Sequence[int] | None, *, req
             "summary": summarise(rows, reqs),
         }
         if thresholds:
-            from fastworkflow.command_routing import RoutingRegistry
+            from fastworkflow.core.command_routing import RoutingRegistry
 
             crd = RoutingRegistry.get_definition(opened.app.folderpath)
             contexts = {name: None for name in sorted(crd.contexts) if name != "*"}

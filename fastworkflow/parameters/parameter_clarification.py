@@ -19,7 +19,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Callable, Iterable, Optional
 
-from fastworkflow import no_agent_mode, waiting
+from fastworkflow.core import no_agent_mode, waiting
 from fastworkflow.parameters import read, reply as replies
 
 KIND_PLANNING = "planning"

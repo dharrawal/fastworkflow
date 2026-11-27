@@ -353,7 +353,7 @@ def test_a_failing_reviewer_never_fails_the_run(monkeypatch):
 def test_the_execution_context_attaches_a_check_whenever_the_run_has_a_plan(monkeypatch):
     from types import SimpleNamespace
 
-    from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+    from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
     ctx = WorkflowExecutionContext.__new__(WorkflowExecutionContext)
     ctx._workflow_tool_agent = SimpleNamespace(finish_reviewer="stale")

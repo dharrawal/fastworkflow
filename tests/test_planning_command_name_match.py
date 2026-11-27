@@ -31,11 +31,11 @@ from fastworkflow._workflows.command_metadata_extraction.intent_detection import
     MATCHER_LAYER_KNOWN_NAME_FOREIGN_CONTEXT,
     CommandNamePrediction,
 )
-from fastworkflow.command_executor import CommandExecutor, _resolve_planning_command_name
-from fastworkflow.command_routing import RoutingRegistry
+from fastworkflow.engine.command_executor import CommandExecutor, _resolve_planning_command_name
+from fastworkflow.core.command_routing import RoutingRegistry
 from fastworkflow.model_pipeline_training import trained_command_labels
 from fastworkflow.workflow_agent import planner_commands_text
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 from tests.test_intent_detection_foreign_context import (
     _refusing_router as refusing_router,
 )
@@ -168,7 +168,7 @@ def test_free_text_after_a_root_planning_name_still_matches_the_name(
 def test_the_misunderstanding_question_offers_a_planning_command_of_the_context_too(planning_name_env):
     """Every command the user can name is a candidate of the misunderstanding question, planning commands among them
     (it used to be the misunderstanding stage's own matching set)."""
-    from fastworkflow import intent_loop
+    from fastworkflow.intent import intent_loop
 
     names = [choice["name"] for choice in intent_loop.command_choices(planning_name_env.wf)]
     assert COUNT_BOOKS in names
@@ -204,7 +204,7 @@ def test_a_sibling_planning_command_is_named_after_its_owner(predictor, classifi
 
 
 def test_the_inventory_lists_planning_commands_with_their_owners(planning_name_env):
-    from fastworkflow import intent_loop
+    from fastworkflow.intent import intent_loop
 
     inventory = intent_loop.command_inventory(planning_name_env.folder)
 

@@ -12,7 +12,8 @@ import json
 
 import pytest
 
-from fastworkflow import intent_loop, waiting
+from fastworkflow.intent import intent_loop
+from fastworkflow.core import waiting
 from fastworkflow.parameters import parameter_clarification
 from fastworkflow._workflows.command_metadata_extraction import parameter_reply
 from fastworkflow._workflows.command_metadata_extraction._commands import wildcard

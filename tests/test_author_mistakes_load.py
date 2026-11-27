@@ -21,8 +21,8 @@ import fastworkflow
 from fastworkflow import ModuleType, workflow_agent
 from fastworkflow.planning import command_preview
 from fastworkflow.planning import planning_commands as pc
-from fastworkflow.command_routing import RoutingRegistry
-from fastworkflow.workflow import MissingGetParentError
+from fastworkflow.core.command_routing import RoutingRegistry
+from fastworkflow.core.workflow import MissingGetParentError
 from tests.test_field_sources import ROOT, _build_workflow
 
 
@@ -278,8 +278,8 @@ _WARNING = "is not the workflow's root and has no enclosing record"
 
 @pytest.fixture
 def warnings_logged(monkeypatch):
-    wf_module = sys.modules["fastworkflow.workflow"]
-    from fastworkflow import context_navigation
+    wf_module = sys.modules["fastworkflow.core.workflow"]
+    from fastworkflow.core import context_navigation
     seen: list[str] = []
     monkeypatch.setattr(wf_module.logger, "warning", lambda msg, *a, **k: seen.append(str(msg)))
     monkeypatch.setattr(wf_module, "_WARNED_NO_ENCLOSING_RECORD", set(), raising=False)
@@ -321,8 +321,8 @@ _NONE_PARENT = ("class Context:\n    parents = [\"TodoList\"]\n\n    @classmetho
 
 
 def _lookup_twice(app):
-    from fastworkflow import context_navigation
-    from fastworkflow.intent_detector import scopes_for
+    from fastworkflow.core import context_navigation
+    from fastworkflow.intent.intent_detector import scopes_for
 
     for _ in range(2):
         # a class with no get_parent at all raises AttributeError from every walk (bd fix-ftdl.3: one climb)
@@ -393,6 +393,6 @@ def test_the_warning_is_silent_for_a_workflow_with_no_root(tmp_path, warnings_lo
 
 
 def test_the_warning_does_not_change_routing(tmp_path, warnings_logged, setup_test_environment):
-    from fastworkflow import context_navigation
+    from fastworkflow.core import context_navigation
     app, *_ = _todo_app(tmp_path, edit_item_class=_NONE_PARENT)
     assert context_navigation.live_context_chain(app) == ("TodoItem", "*")

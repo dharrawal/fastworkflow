@@ -25,7 +25,7 @@ satisfied.
 constructor:
 
 ```python
-# fastworkflow/command_executor.py (before 2.30.0)
+# fastworkflow/engine/command_executor.py (before 2.30.0)
             input_for_param_extraction = InputForParamExtraction(command=action.command)
             is_valid, error_msg, _, _ = input_for_param_extraction.validate_parameters(
                 workflow, action.command_name, input_obj

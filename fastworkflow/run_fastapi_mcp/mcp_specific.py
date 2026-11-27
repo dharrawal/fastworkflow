@@ -11,7 +11,7 @@ import mcp.types as mcp_types
 from fastapi_mcp import FastApiMCP
 
 from fastworkflow.run_fastapi_mcp.turns import ExecState
-from fastworkflow.turn import TurnStatus
+from fastworkflow.core.turn import TurnStatus
 
 # The mount calls the app in process, over the same ASGI transport and base URL fastapi-mcp uses by default.
 # What differs is the time-out policy, which is stated here instead of inherited from the library's default

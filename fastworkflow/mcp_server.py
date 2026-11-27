@@ -11,13 +11,13 @@ import os
 from typing import Dict, Any, List, Optional, Union
 from pydantic import BaseModel
 import fastworkflow
-from fastworkflow.active_workflow import get_active_workflow
-from fastworkflow.command_executor import CommandExecutor
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
-from fastworkflow.command_directory import CommandDirectory
-from fastworkflow.command_routing import RoutingDefinition, RoutingRegistry, ModuleType
+from fastworkflow.engine.active_workflow import get_active_workflow
+from fastworkflow.engine.command_executor import CommandExecutor
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.core.command_directory import CommandDirectory
+from fastworkflow.core.command_routing import RoutingDefinition, RoutingRegistry, ModuleType
 from uuid import uuid4
-from fastworkflow.command_metadata_api import CommandMetadataAPI
+from fastworkflow.core.command_metadata_api import CommandMetadataAPI
 from fastworkflow.utils import python_utils
 
 logger = logging.getLogger(__name__)
@@ -343,7 +343,7 @@ def create_mcp_server_for_workflow(workflow_path: str) -> FastWorkflowMCPServer:
     from fastworkflow.model_pipeline_training import is_workflow_trained
     trained, missing_contexts = is_workflow_trained(workflow_path)
     # A context with no trained head may run on the model matcher (intent_detector.startup_report decides).
-    from fastworkflow import intent_detector
+    from fastworkflow.intent import intent_detector
     from fastworkflow.utils.logging import logger as _logger
     engine_problems, engine_notices = intent_detector.startup_report(workflow_path, missing_contexts, build=True)
     for notice in engine_notices:

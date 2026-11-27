@@ -1270,7 +1270,7 @@ def cmd_meta(args):
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import single_intent_model as runner
     import fastworkflow
-    from fastworkflow.command_routing import RoutingRegistry, is_visible_planning
+    from fastworkflow.core.command_routing import RoutingRegistry, is_visible_planning
 
     env = runner.environment_for(args.workflow, None, None)
     fastworkflow.init(env_vars=dict(env))

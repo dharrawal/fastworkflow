@@ -43,7 +43,7 @@ def test_each_offline_arm_enters_the_layout_its_worker_asks_for_and_records_it(t
     import shutil
 
     import fastworkflow
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
     from fastworkflow.model_pipeline_training import (
         construction_records,
         experiment_planning_heads,

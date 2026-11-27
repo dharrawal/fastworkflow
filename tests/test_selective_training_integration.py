@@ -32,16 +32,16 @@ import pytest
 from dotenv import dotenv_values
 
 import fastworkflow
-from fastworkflow.command_context_model import CommandContextModel
-from fastworkflow.command_directory import CommandDirectory
-from fastworkflow.command_routing import RoutingDefinition, RoutingRegistry
+from fastworkflow.core.command_context_model import CommandContextModel
+from fastworkflow.core.command_directory import CommandDirectory
+from fastworkflow.core.command_routing import RoutingDefinition, RoutingRegistry
 from tests.context_declarations import declare_inherits
 from fastworkflow.model_pipeline_training import (
     CommandRouter,
     TrainingDataError,
     get_artifact_path,
 )
-from fastworkflow.nlu_labels import WILDCARD_LABEL
+from fastworkflow.intent.nlu_labels import WILDCARD_LABEL
 from fastworkflow.train import (
     artifact_versioning,
     determinism,

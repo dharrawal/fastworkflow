@@ -29,9 +29,9 @@ from fastworkflow.model_pipeline_training import (
     GLOBAL_CONTEXT_FOLDER,
 )
 from fastworkflow.train.generate_param_examples import generate_dspy_examples, missing_value_example
-from fastworkflow.command_directory import CommandDirectory, get_cached_command_directory
-from fastworkflow.command_routing import RoutingDefinition, RoutingRegistry
-from fastworkflow.command_context_model import CommandContextModel
+from fastworkflow.core.command_directory import CommandDirectory, get_cached_command_directory
+from fastworkflow.core.command_routing import RoutingDefinition, RoutingRegistry
+from fastworkflow.core.command_context_model import CommandContextModel
 from fastworkflow.train import (
     artifact_versioning,
     determinism,

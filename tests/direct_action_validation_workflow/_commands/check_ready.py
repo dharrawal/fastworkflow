@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Optional
 
 import fastworkflow
-from fastworkflow.workflow import Workflow
+from fastworkflow.core.workflow import Workflow
 from pydantic import BaseModel, Field, model_validator
 
 HOOK_NOT_READY = "workflow is not ready. Set context['ready'] first."

@@ -14,11 +14,11 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow.command_directory import CommandDirectory
+from fastworkflow.core.command_directory import CommandDirectory
 from fastworkflow.planning import planning_commands as pc
 from fastworkflow.review.review_engine import AWAITING, CONFIRMED, EXPIRED, REVISED, open_review
 from fastworkflow.review.review_proposals import SubTaskProposal
-from fastworkflow.turn import TurnStatus
+from fastworkflow.core.turn import TurnStatus
 from tests.test_approval_binding import (  # noqa: F401 - the real agent on the library copy, and the guards
     _added, _ask, _finish, annotated_library, no_live_model, no_model_call_for_parameters, todo)
 from tests.test_review_engine import _tasks  # noqa: F401

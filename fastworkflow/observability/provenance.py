@@ -596,7 +596,7 @@ def capture_workflow_provenance(
     `command_directory` and both artifact values in
     `train.artifact_versioning`. Callers get them from::
 
-        from fastworkflow.command_directory import compute_commands_source_fingerprint
+        from fastworkflow.core.command_directory import compute_commands_source_fingerprint
         from fastworkflow.train.artifact_versioning import (
             legacy_layout_in_use, resolve_current_version)
 

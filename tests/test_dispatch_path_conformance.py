@@ -23,8 +23,8 @@ from dotenv import dotenv_values
 
 import fastworkflow
 from fastworkflow.observability import tracing
-from fastworkflow.command_executor import CommandExecutor
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.command_executor import CommandExecutor
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 from fastworkflow.workflow_agent import _execute_workflow_query
 
 from tests.todo_list_workflow.application.todo_manager import TodoListManager
@@ -43,7 +43,7 @@ def todo_workflow_path() -> str:
 @pytest.fixture
 def initialized_fastworkflow():
     fastworkflow.init({})
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     RoutingRegistry.clear_registry()
     yield
@@ -181,7 +181,7 @@ def hello_initialized():
         pytest.skip("hello_world is not trained on this machine")
     env = dotenv_values("fastworkflow/examples/fastworkflow.env")
     fastworkflow.init(dict(env))
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     RoutingRegistry.clear_registry()
     yield

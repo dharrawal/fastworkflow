@@ -31,7 +31,7 @@ from fastworkflow.utils import dspy_utils
 from fastworkflow.parameters.extraction_attempts import FirstAttemptGreedy
 from fastworkflow.parameters.input_validation import bound_fields, is_pydantic_model, set_field_unvalidated
 from fastworkflow.utils.dspy_logger import DSPyForward
-from fastworkflow.command_directory import CommandDirectory
+from fastworkflow.core.command_directory import CommandDirectory
 from fastworkflow.planning import planning_commands
 from fastworkflow.parameters import ask, rules
 from fastworkflow.parameters.rules import allowed_member, is_union, literal_values, pattern_refusal

@@ -14,8 +14,8 @@ import json
 import pytest
 
 from fastworkflow.review import approval_binding as ab
-from fastworkflow import waiting as wm
-from fastworkflow.turn import TurnStatus
+from fastworkflow.core import waiting as wm
+from fastworkflow.core.turn import TurnStatus
 from tests.test_approval_binding import _ask, _finish, annotated_library, todo  # noqa: F401 - fixtures
 from tests.test_no_agent_decisions import Conditional
 from tests.test_no_agent_mode import _plan
@@ -26,7 +26,7 @@ from tests.test_round1_gate import EMMA, JOKE, _open_review, _split_into, gated,
 from tests.test_step_helpers import _build_planning_command, library_env  # noqa: F401
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401
 from tests.test_waiting_kinds import _no_agent_joke_decisions, no_param_model  # noqa: F401
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 pytestmark = pytest.mark.usefixtures("initialized_fastworkflow")
 

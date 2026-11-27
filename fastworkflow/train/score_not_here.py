@@ -47,7 +47,7 @@ import sys
 from collections import Counter
 from typing import Any, Iterable, Optional, Sequence
 
-from fastworkflow.nlu_labels import is_non_routable, label_of
+from fastworkflow.intent.nlu_labels import is_non_routable, label_of
 
 SCHEMA_VERSION = 1
 Z_95 = 1.959963984540054

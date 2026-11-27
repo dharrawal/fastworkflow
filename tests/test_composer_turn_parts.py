@@ -12,7 +12,7 @@ import pytest
 
 from fastworkflow.run_chatbot import composer as gui
 from fastworkflow.run_chatbot.composer import AnswerCardRequest, ResultData
-from fastworkflow.workflow_execution_context import _heading_title
+from fastworkflow.engine.workflow_execution_context import _heading_title
 from tests.test_composer_parts import result, section, sent  # noqa: F401
 
 

@@ -21,8 +21,8 @@ import shutil
 import pytest
 
 import fastworkflow
-from fastworkflow import intent_detector
-from fastworkflow.command_executor import CommandExecutor
+from fastworkflow.intent import intent_detector
+from fastworkflow.engine.command_executor import CommandExecutor
 from tests.test_turn_result_capture import (  # noqa: F401 - shared fixtures
     initialized_fastworkflow,
 )

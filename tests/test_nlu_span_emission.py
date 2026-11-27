@@ -23,8 +23,8 @@ from dotenv import dotenv_values
 
 import fastworkflow
 from fastworkflow.observability import tracing
-from fastworkflow.command_executor import CommandExecutor
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.command_executor import CommandExecutor
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 
 HELLO_WORLD = str(
@@ -47,7 +47,7 @@ CLASSIFIER_REQUEST = (
 def initialized_fastworkflow():
     env = dotenv_values("fastworkflow/examples/fastworkflow.env")
     fastworkflow.init(dict(env))
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     RoutingRegistry.clear_registry()
     yield
@@ -174,7 +174,7 @@ class TestStructuredValidationDiagnostics:
         return InputForParamExtraction.create(workflow, command_name, "")
 
     def test_missing_fields_are_structured(self):
-        from fastworkflow.command_routing import RoutingRegistry
+        from fastworkflow.core.command_routing import RoutingRegistry
 
         wf = fastworkflow.Workflow.create(
             HELLO_WORLD, workflow_id_str=f"nluspan-miss-{uuid.uuid4().hex}"
@@ -197,7 +197,7 @@ class TestStructuredValidationDiagnostics:
         # The fuzzy user lookup is the workflow's validate_extracted_parameters hook (fix-3rsq.one-hook), so its
         # outcome is the validation_hook diagnostic: ran, is_valid, changed_fields (the value it rewrote in place)
         # and refused_fields (the fields it refused, with suggestions in the message). No db_lookup events.
-        from fastworkflow.command_routing import RoutingRegistry
+        from fastworkflow.core.command_routing import RoutingRegistry
 
         wf = fastworkflow.Workflow.create(
             MESSAGING_APP, workflow_id_str=f"nluspan-db-{uuid.uuid4().hex}"
@@ -259,7 +259,7 @@ class TestStructuredValidationDiagnostics:
         assert "db_lookup" not in diagnostics
 
     def test_diagnostics_none_changes_nothing(self):
-        from fastworkflow.command_routing import RoutingRegistry
+        from fastworkflow.core.command_routing import RoutingRegistry
 
         wf = fastworkflow.Workflow.create(
             HELLO_WORLD, workflow_id_str=f"nluspan-none-{uuid.uuid4().hex}"

@@ -11,8 +11,8 @@ import json
 import pytest
 
 from fastworkflow.observability import tracing
-from fastworkflow import waiting as waiting_module
-from fastworkflow.turn import TurnStatus
+from fastworkflow.core import waiting as waiting_module
+from fastworkflow.core.turn import TurnStatus
 from tests.test_approval_binding import (  # noqa: F401 - fixtures
     annotated_library, no_live_model, no_model_call_for_parameters, todo)
 from tests.test_planning_command_phases import RecordingSink  # noqa: F401

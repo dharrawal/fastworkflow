@@ -188,7 +188,7 @@ def inspect(workflow_dir: str, with_fingerprint: bool = True) -> dict:
     # ---- fingerprint freshness ----------------------------------------
     if with_fingerprint:
         try:
-            from fastworkflow.command_directory import (
+            from fastworkflow.core.command_directory import (
                 compute_commands_source_fingerprint,
             )
 

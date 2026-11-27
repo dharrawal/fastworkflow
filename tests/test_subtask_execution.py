@@ -4,10 +4,10 @@ from unittest.mock import MagicMock
 
 import dspy
 
-from fastworkflow.turn import TurnStatus
+from fastworkflow.core.turn import TurnStatus
 from fastworkflow.utils.react import fastWorkflowReAct
-from fastworkflow.workflow_execution_context import MAX_HANDOFFS
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import MAX_HANDOFFS
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 import pytest
 from tests.test_turn_result_capture import (  # noqa: F401 - shared fixtures
     _make_agent_ctx,
@@ -457,7 +457,7 @@ def test_an_empty_run_answer_is_skipped_and_not_counted_as_a_part(
 
 
 def test_join_parts_labels_runs_and_drops_word_for_word_repeats():
-    from fastworkflow.workflow_execution_context import _join_parts
+    from fastworkflow.engine.workflow_execution_context import _join_parts
 
     assert _join_parts(["only"]) == "only"
     assert _join_parts(["a", "a", "b"]) == "Part 1 of 2:\na\n\nPart 2 of 2:\nb"
@@ -470,7 +470,7 @@ def test_join_parts_labels_runs_and_drops_word_for_word_repeats():
 
 
 def test_heading_title_cases():
-    from fastworkflow.workflow_execution_context import _heading_title
+    from fastworkflow.engine.workflow_execution_context import _heading_title
 
     assert _heading_title("find X") == "find X"
     # a long text with a clause break: cut at the first clause that has 3 words or more

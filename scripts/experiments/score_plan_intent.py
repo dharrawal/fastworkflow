@@ -217,7 +217,8 @@ def before(answers: Answers, workflow, context: str, text: str, mode: str) -> di
 
 def after(answers: Answers, workflow, context: str, text: str, mode: str) -> dict:
     """What the product code gives the same part: ``resolution.part_intent`` and its callers' reading."""
-    from fastworkflow import intent_detector, turn_cache
+    from fastworkflow.intent import intent_detector
+    from fastworkflow.core import turn_cache
     from fastworkflow._workflows.plan_metadata_extraction import resolution
 
     live = intent_detector._matcher_distribution
@@ -336,7 +337,8 @@ def main(argv: list[str] | None = None) -> int:
         if not args.record:
             env.pop("JEV_API_KEY", None)                 # a rerun reads the file and can never call out
         fastworkflow.init(env_vars=env)
-        from fastworkflow import intent_detector, turn_cache
+        from fastworkflow.intent import intent_detector
+        from fastworkflow.core import turn_cache
 
         if args.record and not intent_detector.matcher_available():
             print("JEV_API_KEY is not set in the env files given: nothing can be recorded.", file=sys.stderr)

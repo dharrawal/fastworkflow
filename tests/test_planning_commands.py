@@ -17,10 +17,10 @@ import fastworkflow
 from fastworkflow.planning import planning_commands, command_preview
 from fastworkflow import workflow_agent
 from fastworkflow.capability_answer import context_commands
-from fastworkflow.command_executor import CommandExecutor, CommandNotFoundError
-from fastworkflow.command_metadata_api import CommandMetadataAPI
-from fastworkflow.command_routing import RoutingRegistry
-from fastworkflow.context_navigation import home_contexts
+from fastworkflow.engine.command_executor import CommandExecutor, CommandNotFoundError
+from fastworkflow.core.command_metadata_api import CommandMetadataAPI
+from fastworkflow.core.command_routing import RoutingRegistry
+from fastworkflow.core.context_navigation import home_contexts
 from fastworkflow.mcp_server import FastWorkflowMCPServer
 from fastworkflow.model_pipeline_training import trained_command_labels
 from fastworkflow.planning.plan_frame import TURN_MAX_STEPS_ENV
@@ -32,7 +32,7 @@ from fastworkflow.workflow_agent import (
     _what_can_i_do,
     planner_commands_text,
 )
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 from fastworkflow.examples.library._commands.Book.list_loans import Signature as ListLoans
 from fastworkflow.examples.library._commands.Library.book_loans import Signature as BookLoans
 from fastworkflow.examples.library._commands.Library.book_by_title import Signature as BookByTitle
@@ -42,7 +42,7 @@ from fastworkflow.examples.library._commands.Library.open_book import Signature 
 from fastworkflow.planning import run
 from fastworkflow.planning import phase
 from fastworkflow.planning.planning_commands import PlanningCommandFormatError
-from fastworkflow.turn import TurnStatus
+from fastworkflow.core.turn import TurnStatus
 from fastworkflow.utils import python_utils
 
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401 - the fixture, imported by name
@@ -1043,11 +1043,11 @@ ASSISTANT_PLANNING_REFUSAL = (
 @pytest.fixture
 def planning_dispatch_library(tmp_path, initialized_fastworkflow):
     """Library copy with ``Library/count_books`` and ``Library/note_member``; real ``CommandExecutor`` dispatch."""
-    from fastworkflow.command_metadata_api import CommandMetadataAPI
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_metadata_api import CommandMetadataAPI
+    from fastworkflow.core.command_routing import RoutingRegistry
     from fastworkflow.mcp_server import FastWorkflowMCPServer
     from fastworkflow.workflow_agent import _what_can_i_do
-    from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+    from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
     folder = _library_workflow(
         tmp_path, extra_commands=("_commands/Library/count_books.py",
@@ -1378,7 +1378,7 @@ _PLANNING_COMMAND_FILES = (
 @pytest.fixture
 def library_training_workflow(tmp_path, initialized_fastworkflow):
     """Library copy with planning commands that declare ``plain_utterances``."""
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     folder = _library_workflow(tmp_path, extra_commands=_PLANNING_COMMAND_FILES)
     RoutingRegistry.clear_registry()
@@ -1397,7 +1397,7 @@ def test_training_seed_collection_excludes_planning_commands(library_training_wo
 
 def test_trained_command_labels_hold_planning_commands_on_their_lookup_path(library_training_workflow):
     """Phase 10 step 1 (production): Library takes its planning command, never the Book one."""
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
     from fastworkflow.model_pipeline_training import (
         PLANNING_HEADS_NOT_HERE,
         experiment_planning_heads,
@@ -1438,7 +1438,7 @@ def test_selective_training_fingerprints_exclude_planning_commands(library_train
 
 
 def test_param_example_training_list_excludes_planning_commands(library_training_workflow):
-    from fastworkflow.command_directory import CommandDirectory
+    from fastworkflow.core.command_directory import CommandDirectory
     from fastworkflow.model_pipeline_training import get_route_layer_filepath_model
     from fastworkflow.train.__main__ import _get_commands_with_parameters
 

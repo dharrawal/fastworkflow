@@ -4,7 +4,7 @@ from typing import List
 from pydantic import BaseModel, Field
 
 import fastworkflow
-from fastworkflow.workflow import Workflow
+from fastworkflow.core.workflow import Workflow
 
 # Import business-logic helper
 from ..retail_data import load_data

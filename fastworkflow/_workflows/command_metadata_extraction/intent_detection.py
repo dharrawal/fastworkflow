@@ -13,9 +13,9 @@ from fastworkflow.observability.decision_signals import (
     classifier_topk_margin,
     fuzzy_distance,
 )
-from fastworkflow import intent_clarification, intent_detector, intent_loop
+from fastworkflow.intent import intent_clarification, intent_detector, intent_loop
 from fastworkflow.model_pipeline_training import GLOBAL_CONTEXT_FOLDER
-from fastworkflow.nlu_labels import is_escalation
+from fastworkflow.intent.nlu_labels import is_escalation
 from fastworkflow.train.artifact_versioning import VERSIONS_DIRNAME
 
 

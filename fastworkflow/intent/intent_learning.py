@@ -282,7 +282,7 @@ class TeachingRow:
 
 def _is_not_a_request(norm: str) -> bool:
     """A bare value (no word in it, or one of the bare-value placeholders) or a built-in vague reply."""
-    from fastworkflow.nlu_labels import PARAMETER_VALUE_PLACEHOLDERS
+    from fastworkflow.intent.nlu_labels import PARAMETER_VALUE_PLACEHOLDERS
 
     if not re.search(r"[a-z]", norm):
         return True

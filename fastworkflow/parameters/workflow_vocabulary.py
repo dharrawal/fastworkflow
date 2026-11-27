@@ -54,7 +54,7 @@ from dataclasses import dataclass, field as dataclass_field
 from pathlib import Path
 from typing import Any, Literal, Mapping, get_args, get_origin
 
-from fastworkflow.command_directory import CommandDirectory, compute_commands_source_fingerprint
+from fastworkflow.core.command_directory import CommandDirectory, compute_commands_source_fingerprint
 from fastworkflow.utils import python_utils
 from fastworkflow.utils.logging import logger
 

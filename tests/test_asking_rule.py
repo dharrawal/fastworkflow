@@ -15,11 +15,11 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow import no_agent_mode
+from fastworkflow.core import no_agent_mode
 from fastworkflow.parameters import parameter_clarification as loops
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import ParameterExtraction, park
 from fastworkflow.parameters.signatures import INVALID_FLOAT_VALUE, NOT_FOUND
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 HELLO = str(Path(__file__).parent.joinpath("hello_world_workflow").resolve())
 COMMAND = "add_two_numbers"
@@ -42,7 +42,7 @@ def test_the_loop_has_no_policy_and_no_pending_flag():
 @pytest.fixture
 def session(tmp_path, no_planner_key):
     fastworkflow.init({"FASTWORKFLOW_STATE_ROOT": str(tmp_path / "workflow_contexts")})
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     RoutingRegistry.clear_registry()
     ctx = WorkflowExecutionContext(run_as_agent=False, session_key="asking-rule")
@@ -55,7 +55,7 @@ def session(tmp_path, no_planner_key):
 
 
 def _parked(ctx, **fields):
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     params_class = RoutingRegistry.get_definition(ctx.app_workflow.folderpath).get_command_class(
         COMMAND, fastworkflow.ModuleType.COMMAND_PARAMETERS_CLASS)

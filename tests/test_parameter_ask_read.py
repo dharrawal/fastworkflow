@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow import no_agent_mode
+from fastworkflow.core import no_agent_mode
 from fastworkflow.parameters import parameter_clarification as pcl
 from fastworkflow.planning import planning_commands as pc
 from fastworkflow.parameters.parameter_clarification import Extraction
@@ -316,7 +316,7 @@ def test_split_values_keeps_quoted_commas_together():
 def test_a_bare_no_is_not_you_misunderstood():
     """The CME's check of a reply to a parameter question (it passes no candidates) no longer reads a bare no as
     "you misunderstood"; the command's own phrases and abort still are."""
-    from fastworkflow import intent_loop
+    from fastworkflow.intent import intent_loop
 
     aliases = {"you misunderstood": intent_loop.intent_clarification.NONE, "abort": intent_loop.ABORT}
     for word in ("no", "none", "neither", "n", "nope", "something else", "yes"):

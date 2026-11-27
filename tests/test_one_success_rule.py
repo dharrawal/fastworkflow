@@ -9,7 +9,7 @@ import sys
 
 import pytest
 
-from fastworkflow.turn import TurnStatus
+from fastworkflow.core.turn import TurnStatus
 from fastworkflow.parameters.signatures import InputForParamExtraction
 from tests.conftest import script_matcher
 from tests.test_parameter_loop import HOST, no_agent, _offline, BOOK_PLAN  # noqa: F401

@@ -9,7 +9,7 @@ Absent means the agent decides, with no gate. A planning command cannot carry it
 it needs what the commands its steps run need, directly or through the planning commands they call
 (``command_writes.reached_commands``, the one inheritance rule of both marks), and each of those calls is asked about
 when it runs. The decorator and the enum live in
-``fastworkflow.command_declarations``. This module VALIDATES and EXPOSES the annotation: it is read from
+``fastworkflow.core.command_declarations``. This module VALIDATES and EXPOSES the annotation: it is read from
 the class, checked when the routing definition loads, stored on the command's metadata (so it lands in
 ``command_directory.json`` as the enum's value), and rendered as a short marker in the planner and
 executor listings. Nothing here enforces anything; the approval gate in ``approval_binding`` reads it.
@@ -21,8 +21,8 @@ import os
 from typing import Optional
 
 import fastworkflow
-from fastworkflow.command_routing import RoutingRegistry
-from fastworkflow.command_declarations import UserApproval, declared_approval
+from fastworkflow.core.command_routing import RoutingRegistry
+from fastworkflow.core.command_declarations import UserApproval, declared_approval
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +109,7 @@ def command_approval(workflow_folderpath: str, qualified_name: str) -> Optional[
         return None
     if not metadata.is_planning:
         return metadata.approval
-    from fastworkflow.command_writes import reached_commands
+    from fastworkflow.core.command_writes import reached_commands
 
     values = {directory[name].approval for name in reached_commands(workflow_folderpath).get(qualified_name, ())
               if name in directory}

@@ -69,7 +69,7 @@ def _train_copy(workflow: str, root: str) -> str:
     import single_intent_model as runner
 
     import fastworkflow
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
     from fastworkflow.train import workflow_model
     from fastworkflow.train.__main__ import train_workflow
     from fastworkflow.train import __main__ as trainer
@@ -86,7 +86,7 @@ def _train_copy(workflow: str, root: str) -> str:
 
 
 def _engines(workflow: str, contexts, everything):
-    from fastworkflow import intent_detector
+    from fastworkflow.intent import intent_detector
 
     return {context: intent_detector.ClassifierEngine(
         intent_detector._command_router(intent_detector.head_folder(workflow, context)), reachable=everything)
@@ -106,8 +106,8 @@ def _score(workflow: str, cases, everything) -> dict:
 
 def _play(workflow: str, stream, everything, every: int) -> dict:
     """The stream through the recording hook and the product refit. Returns what happened."""
-    from fastworkflow import intent_detector
-    from fastworkflow import intent_learning as learning
+    from fastworkflow.intent import intent_detector
+    from fastworkflow.intent import intent_learning as learning
     from fastworkflow.train import head_refit
 
     intent_detector.HEAD_RELOAD_CHECK_SECONDS = 0.0
@@ -142,9 +142,9 @@ def _run(args) -> int:
     import single_intent_model as runner
 
     import fastworkflow
-    from fastworkflow import intent_detector
-    from fastworkflow import intent_learning as learning
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.intent import intent_detector
+    from fastworkflow.intent import intent_learning as learning
+    from fastworkflow.core.command_routing import RoutingRegistry
     from fastworkflow.train import artifact_versioning as av
 
     out = os.path.join(args.out, "learning_from_use")

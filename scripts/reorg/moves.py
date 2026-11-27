@@ -133,8 +133,8 @@ def remap(dotted: str, mapping: dict[str, str]) -> str | None:
 
 
 def text_rules(moves: list[Move]) -> list[tuple[re.Pattern, str]]:
-    """Dotted paths and file paths, longest old path first, each bounded so ``fastworkflow.turn`` does not
-    match ``fastworkflow.turn_cache`` and an already rewritten path is never matched again."""
+    """Dotted paths and file paths, longest old path first, each bounded so ``fastworkflow.core.turn`` does not
+    match ``fastworkflow.core.turn_cache`` and an already rewritten path is never matched again."""
     rules: list[tuple[re.Pattern, str]] = []
     rows = [m for m in moves if m.new is not None and m.new != m.old]
     for m in sorted(rows, key=lambda r: len(r.old), reverse=True):

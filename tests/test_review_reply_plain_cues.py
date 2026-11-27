@@ -117,7 +117,7 @@ def _reply(gated, monkeypatch, text):
 
     # A workflow with no command that changes data: the turn's ad hoc part then needs no explicit yes (bd fix-ftdl.8.4),
     # so the plain cues are read as they are on any turn with no write.
-    monkeypatch.setattr("fastworkflow.command_writes.write_commands", lambda path: frozenset())
+    monkeypatch.setattr("fastworkflow.core.command_writes.write_commands", lambda path: frozenset())
     record = _open_review_two_step(gated, monkeypatch)
     return record, reply_to_proposal(gated.ctx, gated.store, record, text)
 

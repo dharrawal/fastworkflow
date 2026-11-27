@@ -5,8 +5,8 @@ agent's runs scripted (the seams that file already uses). The answer text is the
 """
 import pytest
 
-from fastworkflow.turn import TurnStatus
-from fastworkflow.workflow_execution_context import (
+from fastworkflow.core.turn import TurnStatus
+from fastworkflow.engine.workflow_execution_context import (
     TURN_PARTS_ARTIFACT, WorkflowExecutionContext, _heading_title)
 import fastworkflow
 from tests.test_subtask_execution import _agent_with_steps, _split  # noqa: F401
@@ -176,7 +176,7 @@ def test_a_continued_part_lists_its_runs_as_offsets_that_agree_with_the_labels_i
 
 def test_a_repeated_run_is_dropped_from_the_text_and_from_the_runs(
         initialized_fastworkflow, todo_workflow_path, monkeypatch):
-    from fastworkflow.workflow_execution_context import _join_parts, _part_runs
+    from fastworkflow.engine.workflow_execution_context import _join_parts, _part_runs
     for parts in (["a", "a"], ["a", "b", "b"], ["a"], ["a", "b", "a"]):
         text, runs = _join_parts(parts), _part_runs(parts)
         assert [text[r["start"]:r["end"]] for r in runs] == (

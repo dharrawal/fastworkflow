@@ -7,7 +7,7 @@ import shutil
 
 import pytest
 
-from fastworkflow.command_directory import (
+from fastworkflow.core.command_directory import (
     CommandDirectory,
     CommandMetadata,
     compute_commands_source_fingerprint,

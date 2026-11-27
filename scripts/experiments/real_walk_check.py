@@ -111,8 +111,8 @@ def main() -> int:
     env.pop("JEV_API_KEY", None)
     env["FW_LM_CACHE"] = "0"
     import fastworkflow
-    from fastworkflow import intent_detector as idt
-    from fastworkflow import intent_loop
+    from fastworkflow.intent import intent_detector as idt
+    from fastworkflow.intent import intent_loop
     from fastworkflow import workflow_agent
     from dspy.utils import DummyLM
 

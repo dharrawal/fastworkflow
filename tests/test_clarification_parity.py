@@ -28,8 +28,8 @@ from __future__ import annotations
 import pytest
 
 import fastworkflow
-from fastworkflow import waiting as waiting_module
-from fastworkflow.workflow_execution_context import AWAITING_ANSWER_REFUSAL_MESSAGE, UsePlanError
+from fastworkflow.core import waiting as waiting_module
+from fastworkflow.engine.workflow_execution_context import AWAITING_ANSWER_REFUSAL_MESSAGE, UsePlanError
 from tests.test_parameter_form_reply_contract import session as _cme_session  # noqa: F401 - fixture
 from tests.test_parameter_loop import (  # noqa: F401 - fixtures and helpers
     A_NOTE, HOST, no_agent, annotated_library, todo, gated, initialized_fastworkflow, _offline)

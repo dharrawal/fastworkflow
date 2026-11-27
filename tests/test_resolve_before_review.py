@@ -17,11 +17,11 @@ import json
 import pytest
 
 from fastworkflow.review import review_proposals
-from fastworkflow import waiting
+from fastworkflow.core import waiting
 from fastworkflow.parameters.parameter_clarification import ParameterLoop
 from fastworkflow._workflows.plan_metadata_extraction import resolution
-from fastworkflow.turn import TurnStatus
-from fastworkflow.workflow_execution_context import NOT_RUN_ARTIFACT
+from fastworkflow.core.turn import TurnStatus
+from fastworkflow.engine.workflow_execution_context import NOT_RUN_ARTIFACT
 from tests.conftest import script_matcher
 from tests.test_approval_binding import annotated_library, todo  # noqa: F401
 from tests.test_parameter_loop import (  # noqa: F401 - the no-agent context and its helpers
@@ -137,7 +137,7 @@ def test_an_unattended_turn_with_one_candidate_asks_nothing_and_binds_nothing(no
 def test_a_list_of_one_is_a_confirmation_of_that_one_command():
     """The single-candidate form of the ONE question text (the deterministic path has no review to confirm it): it is
     answered by the name, yes or cancel, and never says "more than one"."""
-    from fastworkflow import intent_clarification
+    from fastworkflow.intent import intent_clarification
 
     one = intent_clarification.plan_choice_question(
         "tell me a joke", [{"name": FIND_BOOK, "description": ""}], ambiguous=True)
@@ -152,7 +152,7 @@ def test_a_list_of_one_is_a_confirmation_of_that_one_command():
 
 
 def _learned(env) -> list[dict]:
-    from fastworkflow import intent_learning
+    from fastworkflow.intent import intent_learning
 
     return intent_learning.rows(env.ctx._app_workflow.folderpath)
 
@@ -373,7 +373,7 @@ def test_with_an_agent_model_cancelling_the_question_drops_the_part_and_the_revi
 def _on_the_command_line(ctx):
     """The context as ``fastworkflow run_cli`` holds it: the core of a real ``ChatSession``, with that session's message,
     output and trace queues (the CLI transport, where the agent's own ``ask_user`` blocks on the message queue)."""
-    from fastworkflow.chat_session import ChatSession
+    from fastworkflow.engine.chat_session import ChatSession
 
     session = ChatSession(run_as_agent=True)
     session._core = ctx

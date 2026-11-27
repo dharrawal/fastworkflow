@@ -4,11 +4,11 @@ from pydantic import BaseModel, Field
 
 import fastworkflow
 from fastworkflow import Action
-from fastworkflow import intent_loop
+from fastworkflow.intent import intent_loop
 from fastworkflow.parameters import parameter_clarification
-from fastworkflow import waiting
-from fastworkflow.command_executor import CommandExecutor
-from fastworkflow.nlu_labels import PARAMETER_VALUE_PLACEHOLDERS
+from fastworkflow.core import waiting
+from fastworkflow.engine.command_executor import CommandExecutor
+from fastworkflow.intent.nlu_labels import PARAMETER_VALUE_PLACEHOLDERS
 
 from fastworkflow.utils.logging import logger
 
@@ -50,7 +50,7 @@ class Signature:
 
     # These are the PARAMETER_EXTRACTION stage's bare-value literals. They belong
     # to nlu_labels.PARAMETER_VALUE_LABEL, not to this command's INTENT_DETECTION
-    # escalation class; see fastworkflow/nlu_labels.py for the stage split.
+    # escalation class; see fastworkflow/intent/nlu_labels.py for the stage split.
     plain_utterances = list(PARAMETER_VALUE_PLACEHOLDERS)
 
     @staticmethod
@@ -153,7 +153,7 @@ def _record_choice(workflow, app_workflow, record: dict, command_name: str, cont
     you_misunderstood corrects the last settled request (kept in the app workflow's context, which outlives the
     command): that request is the row's text, and the answer it got is the row's ``rejected_label``. Never raises."""
     try:
-        from fastworkflow import intent_learning as learning
+        from fastworkflow.intent import intent_learning as learning
 
         how = learning.HOW_AGENT_CHOICE if _agentic(workflow) else learning.HOW_USER_CHOICE
         text, evidence, rejected = record.get("request") or "", record.get("evidence"), None
@@ -355,7 +355,7 @@ class ResponseGenerator:
         ran_on_name = ran_on_clause = None
         ran_on = app_workflow.record
         if ran_on is not app_workflow._current_command_context:
-            from fastworkflow.context_identity import identity_of
+            from fastworkflow.core.context_identity import identity_of
             from fastworkflow.observation_offloading.labels import context_clause
 
             ran_on_name, ran_on_label = identity_of(app_workflow, ran_on)

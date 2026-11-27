@@ -90,7 +90,7 @@ from typing import Iterable, Mapping, Optional, Sequence
 
 from pydantic import BaseModel
 
-from fastworkflow.nlu_labels import WILDCARD_LABEL
+from fastworkflow.intent.nlu_labels import WILDCARD_LABEL
 from fastworkflow.utils.logging import logger
 
 try:

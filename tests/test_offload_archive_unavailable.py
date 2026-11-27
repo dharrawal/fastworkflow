@@ -43,7 +43,7 @@ from fastworkflow.observation_offloading.state import (
     reset_observation_state,
     snapshot_events,
 )
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 NOT_A_DATABASE = b"this file is not a sqlite database\n" * 8
 

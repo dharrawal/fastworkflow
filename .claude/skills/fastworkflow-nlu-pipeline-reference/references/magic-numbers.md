@@ -61,7 +61,7 @@ executing path today; "dead" = present but unreached.
 | 0.7 | Levenshtein threshold inside `DatabaseValidator.fuzzy_match` (NOTE: passed to a DISTANCE-thresholded function — 0.7 is very permissive; smells like a similarity/distance confusion, unconfirmed intent) | `signatures.py:86` | live |
 | 3 | difflib `get_close_matches` n | `signatures.py:95` | live |
 | -sys.maxsize / -sys.float_info.max | int/float "invalid" sentinels | `signatures.py:31-32`, `parameter_extraction.py:16-17` | live |
-| 2 | agent-call attempts on `AdapterParseError` | `fastworkflow/workflow_execution_context.py:700` | live |
+| 2 | agent-call attempts on `AdapterParseError` | `fastworkflow/engine/workflow_execution_context.py:700` | live |
 | 2000 | max_tokens for refine LM | `fastworkflow/build/genai_postprocessor.py:239` | live |
 
 ## Adjacent (owned by other skills, listed for completeness)
@@ -79,5 +79,5 @@ grep -n "0.5129\|alpha = 0.15\|linspace\|threshold=0.3\|0.85\|threshold=0.90\|N=
   fastworkflow/model_pipeline_training.py \
   fastworkflow/_workflows/command_metadata_extraction/intent_detection.py \
   fastworkflow/parameters/signatures.py \
-  fastworkflow/workflow_execution_context.py
+  fastworkflow/engine/workflow_execution_context.py
 ```

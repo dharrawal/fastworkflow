@@ -21,13 +21,13 @@ from unittest.mock import patch
 import pytest
 
 import fastworkflow
-from fastworkflow import intent_loop
+from fastworkflow.intent import intent_loop
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import (
     ParameterExtraction,
 )
-from fastworkflow.command_routing import RoutingRegistry
+from fastworkflow.core.command_routing import RoutingRegistry
 from fastworkflow.parameters.signatures import InputForParamExtraction
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 TESTS = Path(__file__).parent
 FOLDER = str((TESTS / "plain_required_workflow").resolve())

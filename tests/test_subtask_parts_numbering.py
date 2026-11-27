@@ -6,8 +6,8 @@ import re
 
 import pytest
 
-from fastworkflow.turn import TurnStatus
-from fastworkflow.workflow_execution_context import TURN_PARTS_ARTIFACT
+from fastworkflow.core.turn import TurnStatus
+from fastworkflow.engine.workflow_execution_context import TURN_PARTS_ARTIFACT
 from tests.test_command_output_sub_task import (  # noqa: F401 - the module's fixtures and helpers
     COUNT, HOURS, THREE, _finish, _ran, _split_into, annotated_library, extraction_without_a_model, gated,
     no_draft_extraction, no_live_model, no_model_call_for_parameters, todo)

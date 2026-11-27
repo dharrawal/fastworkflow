@@ -39,7 +39,7 @@ from dotenv import dotenv_values
 
 import fastworkflow
 from fastworkflow.observability import tracing
-from fastworkflow import intent_loop
+from fastworkflow.intent import intent_loop
 from fastworkflow._workflows.command_metadata_extraction import intent_detection
 from fastworkflow._workflows.command_metadata_extraction import parameter_extraction
 from fastworkflow._workflows.command_metadata_extraction.intent_detection import (
@@ -57,7 +57,7 @@ from fastworkflow._workflows.command_metadata_extraction.intent_detection import
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import (
     slot_binding_uncertainty,
 )
-from fastworkflow.command_executor import CommandExecutor
+from fastworkflow.engine.command_executor import CommandExecutor
 from tests.test_nlu_span_emission import CLASSIFIER_REQUEST
 from fastworkflow.observability.decision_signals import (
     SIGNAL_DOMAINS,
@@ -65,9 +65,9 @@ from fastworkflow.observability.decision_signals import (
     DecisionUncertainty,
     classifier_confidence,
 )
-from fastworkflow.nlu_labels import PARAMETER_VALUE_LABEL, WILDCARD_LABEL
-from fastworkflow.intent_clarification import misspelt
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.intent.nlu_labels import PARAMETER_VALUE_LABEL, WILDCARD_LABEL
+from fastworkflow.intent.intent_clarification import misspelt
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 HELLO_WORLD = str(
     Path(__file__).parent.parent / "fastworkflow" / "examples" / "hello_world"
@@ -88,7 +88,7 @@ MATCHER_LAYERS = (
 def initialized_fastworkflow():
     env = dotenv_values("fastworkflow/examples/fastworkflow.env")
     fastworkflow.init(dict(env))
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     RoutingRegistry.clear_registry()
     yield
@@ -368,7 +368,7 @@ def test_suppression_is_exactly_what_the_ambiguity_prompt_does():
         == ESCALATION_OUTCOME_SUPPRESSED_BY_AMBIGUITY
     )
     assert CommandNamePrediction.escalation_signals_in(predictions) == [WILDCARD_LABEL]
-    from fastworkflow import intent_clarification
+    from fastworkflow.intent import intent_clarification
 
     offered = [{"name": name} for name in intent_loop._usable(predictions, set())]
     message = intent_clarification.plan_choice_question("x", offered, ambiguous=True, for_agent=True)

@@ -13,7 +13,7 @@ review-only, 48/48 closed). Whether v3.0 is scheduled at all is an OPEN question
 
 | Shipped (in code today) | Where | Unbuilt (spec only) | Spec section |
 |---|---|---|---|
-| `TurnResult`/`TurnOutput`/`TurnStatus` types, `mint_turn_key`, artifact collect/merge, warn-only eager artifact validation | `fastworkflow/turn.py` (264 lines) | `turn_accumulator.py` as a separate module (accumulator lives inline in WEC today) | §15 |
+| `TurnResult`/`TurnOutput`/`TurnStatus` types, `mint_turn_key`, artifact collect/merge, warn-only eager artifact validation | `fastworkflow/core/turn.py` (264 lines) | `turn_accumulator.py` as a separate module (accumulator lives inline in WEC today) | §15 |
 | WEC turn accumulator + `process_turn`/`process_action_turn` | `workflow_execution_context.py:145-240, 484-495, 595-610` | `turn_serializer.py` (serializer + envelope + reader + projections) | §6, §15 |
 | Topic-5 artifact merge at finalize | `wec:786-791` | `stores/` package: `base.py`, `sanitize.py`, `pending.py`, `conversation_turn.py` (**ConversationTurnStore**), `artifact_blob.py` (**ArtifactBlobStore**) | §6, §15 |
 | `process_message` DeprecationWarning | `wec:469-482` | `process_message` REMOVAL (loud AttributeError + migration guide) | §14 v3.0 |

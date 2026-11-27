@@ -89,7 +89,7 @@ def _train_copy(workflow: str, copy_root: str) -> str:
 
 
 def _entry_only(folder: str) -> list[str]:
-    from fastworkflow import context_navigation
+    from fastworkflow.core import context_navigation
 
     try:
         return sorted(context_navigation.context_entry_commands(folder))
@@ -113,10 +113,10 @@ def cmd_local(args) -> int:
     os.environ.pop("JEV_API_KEY", None)
     env["FW_LM_CACHE"] = "0"
     fastworkflow.init(env_vars=env)
-    from fastworkflow import intent_detector as idt
+    from fastworkflow.intent import intent_detector as idt
     from fastworkflow import model_pipeline_training as heads
     from fastworkflow import workflow_agent
-    from fastworkflow.nlu_labels import PARAMETER_VALUE_LABEL, is_escalation, label_of
+    from fastworkflow.intent.nlu_labels import PARAMETER_VALUE_LABEL, is_escalation, label_of
     from fastworkflow.train import artifact_versioning
     from fastworkflow.train import heldout_evaluation as he
 
@@ -231,7 +231,7 @@ def cmd_ask(args) -> int:
     import fastworkflow
 
     fastworkflow.init(env_vars=env)
-    from fastworkflow import intent_detector as idt
+    from fastworkflow.intent import intent_detector as idt
 
     data = json.load(open(args.cases, encoding="utf-8"))
     header, cases = data["header"], data["cases"]
@@ -350,7 +350,7 @@ def cmd_verify(args) -> int:
     import fastworkflow
 
     fastworkflow.init(env_vars=env)
-    from fastworkflow import intent_detector as idt
+    from fastworkflow.intent import intent_detector as idt
 
     rows = {}
     for line in Path(args.answers).read_text(encoding="utf-8").splitlines():

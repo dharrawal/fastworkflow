@@ -7,7 +7,7 @@ import ast
 import fastworkflow
 from fastworkflow.build.command_file_generator import validate_python_syntax_in_dir, validate_command_file_components_in_dir, verify_commands_against_context_model, validate_command_imports
 from fastworkflow.build import ast_class_extractor
-from fastworkflow.command_directory import declares_signature
+from fastworkflow.core.command_directory import declares_signature
 from fastworkflow.build.command_file_generator import generate_command_files as real_generate_command_files
 from fastworkflow.build.context_model_generator import (
     derive_inherits, existing_context_files, generate_context_model as real_generate_context_model)

@@ -7,8 +7,8 @@ import shutil
 import tempfile
 
 import fastworkflow
-from fastworkflow.command_routing import RoutingDefinition
-from fastworkflow.command_directory import CommandDirectory
+from fastworkflow.core.command_routing import RoutingDefinition
+from fastworkflow.core.command_directory import CommandDirectory
 
 
 # Helper to create a temporary _commands directory *inside* project root so that

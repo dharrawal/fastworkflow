@@ -19,7 +19,7 @@ import pytest
 from dotenv import dotenv_values
 
 import fastworkflow
-from fastworkflow.command_routing import RoutingRegistry
+from fastworkflow.core.command_routing import RoutingRegistry
 from fastworkflow.model_pipeline_training import (
     BUILT_IN_VAGUE_REPLIES,
     BUILT_IN_VAGUE_WEIGHT,

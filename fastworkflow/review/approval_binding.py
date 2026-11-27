@@ -31,9 +31,9 @@ from typing import Any, Optional
 import fastworkflow
 from fastworkflow.review import approval_grants, review_engine
 from fastworkflow.session import state_paths
-from fastworkflow.approval_annotations import (APPROVAL_VALUES, REQUIRED_ALWAYS,
+from fastworkflow.core.approval_annotations import (APPROVAL_VALUES, REQUIRED_ALWAYS,
                                                REQUIRED_UNTIL_DELEGATED, command_approval)
-from fastworkflow.context_identity import context_identity
+from fastworkflow.core.context_identity import context_identity
 # The engine's public names, re-exported: the approval surface the gate, the hosts and the tests use.
 from fastworkflow.review.review_engine import (  # noqa: F401
     ACTIVE_STATES,
@@ -611,7 +611,7 @@ def resolve_reply(chat_session: Any, workflow: Any, message: str) -> Optional[Re
     if output.success:
         # An approved write inside a planning command's phase counts against its step, as a run that was not asked
         # about does (``CommandExecutor._invoke_command_impl``): a repeat is then refused, not asked again.
-        from fastworkflow import command_writes
+        from fastworkflow.core import command_writes
 
         command_writes.record_phase_write(chat_session, workflow.folderpath, cmd)
     text = output.command_response.response or ""
@@ -629,7 +629,7 @@ def _resolution(record: PendingAction, surface: Surface, verdict: str) -> dict:
 
 def _execute_review(workflow, record: PendingAction):
     """Run the review command once for an accepted proposal record (the approved execution)."""
-    from fastworkflow.command_executor import CommandExecutor
+    from fastworkflow.engine.command_executor import CommandExecutor
 
     action = fastworkflow.Action(command_name=REVIEW_COMMAND, command=REVIEW_COMMAND,
                                  parameters={"items": record.binding.get("items_text", "")})
@@ -639,7 +639,7 @@ def _execute_review(workflow, record: PendingAction):
 
 def _execute_stored(workflow, record: PendingAction):
     """Run the stored binding once, through the same executor the agent's call uses."""
-    from fastworkflow.command_executor import CommandExecutor
+    from fastworkflow.engine.command_executor import CommandExecutor
 
     action = fastworkflow.Action(command_name=record.command, command=record.raw_command,
                                  parameters=dict(record.binding.get("params") or {}))

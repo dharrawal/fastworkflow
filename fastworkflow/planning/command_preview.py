@@ -110,8 +110,8 @@ from typing import Any, Callable, Literal, Mapping, Optional, Union, get_args, g
 
 from pydantic import BaseModel
 
-from fastworkflow import object_model_view
-from fastworkflow.command_context_model import CommandContextModelValidationError
+from fastworkflow.core import object_model_view
+from fastworkflow.core.command_context_model import CommandContextModelValidationError
 from fastworkflow.planning import planning_commands
 from fastworkflow.planning.planning_commands import MAX_GRID, input_grid  # noqa: F401 - MAX_GRID bounds input_grid
 from fastworkflow.planning.planning_phases import (output_members, over_path_problem, over_path_reads_property,
@@ -1347,7 +1347,7 @@ def phase_command_names(workflow_folder: str) -> dict[str, Any]:
     (``planning_phases.parameter_classes``, as ``CodeSteps`` reads them; none when the routing
     cannot be read), for the "Pages:" line (``pages_line``)."""
     import fastworkflow
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     def read(folder: str, contexts: Optional[tuple] = None) -> list[str]:
         try:
@@ -1798,7 +1798,7 @@ def render_previews(workflow_folder: str) -> dict[str, str]:
     giving each such file's error.
     """
     from fastworkflow import workflow_agent
-    from fastworkflow.command_directory import check_no_planning_commands_folder
+    from fastworkflow.core.command_directory import check_no_planning_commands_folder
 
     folder = os.path.abspath(workflow_folder)
     try:
@@ -1891,11 +1891,11 @@ def load_problems(workflow_folder: str, *, runtime: bool = False) -> list[LoadPr
     """
     if runtime:
         # The problems only a process that serves turns has (no agent model and no Jev key); training does not.
-        from fastworkflow import no_agent_mode
+        from fastworkflow.core import no_agent_mode
 
         return load_problems(workflow_folder) + _workflow_wide(no_agent_mode.runtime_problems())
     from fastworkflow import workflow_agent
-    from fastworkflow.command_directory import check_no_planning_commands_folder, helper_file_problems
+    from fastworkflow.core.command_directory import check_no_planning_commands_folder, helper_file_problems
 
     folder = os.path.abspath(workflow_folder)
     try:
@@ -1932,7 +1932,7 @@ def _startup_problems(folder: str, definition: Any) -> list[str]:
     """The workflow's ``startup_action.json`` when it cannot start the workflow: it does not parse, names no command
     of the workflow, or names a command that does not load. Nothing when the folder has no such file."""
     import fastworkflow
-    from fastworkflow.command_directory import command_load_errors
+    from fastworkflow.core.command_directory import command_load_errors
 
     try:
         action = fastworkflow.workflow_startup_action(folder)
@@ -1958,7 +1958,7 @@ def missing_startup_action_problem(workflow_folder: str) -> Optional[str]:
     command runs only as an action (``CommandDirectory.runs_only_as_action``), so nothing would ever run it and the
     workflow would stand on no record. None when it has no such command. Not a ``load_problems`` line: a server
     session may still pass its own startup action."""
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     directory = RoutingRegistry.get_definition(os.path.abspath(workflow_folder)).command_directory
     core = set(directory.core_command_names)
@@ -1981,7 +1981,7 @@ def _definition_problems(folder: str, planning: list[str]) -> tuple[Any, list[st
     definition imports every command file and checks the retired declarations, so a file that does not
     import or a retired spelling fails it. Such a failure is reported here rather than raised, and a file
     the planning problems already name is left out, so ``load_problems`` lists it once."""
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     try:
         return RoutingRegistry.get_definition(folder), []
@@ -2228,7 +2228,7 @@ def check_kind_list_warnings(workflow_folder: str) -> list[str]:
     description lists two or more kind words: the kind-selector detection of
     ``workflow_vocabulary.description_kind_options``. A fixed set of kinds is a ``Literal``. Nothing here
     changes extraction or the vocabulary."""
-    from fastworkflow.command_directory import CommandDirectory
+    from fastworkflow.core.command_directory import CommandDirectory
     from fastworkflow.parameters import workflow_vocabulary as wv
 
     folder = os.path.abspath(workflow_folder)

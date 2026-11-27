@@ -30,7 +30,7 @@ this document over CLAUDE.md and README where they disagree** — known doc rot 
 the end.
 
 > **2026-08-02 — the biggest change since this skill was written.** `wildcard` is no
-> longer a catch-all. `fastworkflow/nlu_labels.py` splits it into two reserved labels with
+> longer a catch-all. `fastworkflow/intent/nlu_labels.py` splits it into two reserved labels with
 > different meanings and different training rules; §2 has the detail. Anything you
 > remember about "the wildcard class" is at best half right now.
 >
@@ -235,7 +235,7 @@ fully-qualified (`Context/command`); the runtime reduces them with
 commands + core commands + up to two *reserved* labels that name no command. Until wave 1
 of `fix-551` there was one, `wildcard`, doing two unrelated jobs in two different NLU
 stages, which meant the escalation classifier was trained on the literal `"france"`.
-`fastworkflow/nlu_labels.py` (standard-library only, so the trainer and the runtime can
+`fastworkflow/intent/nlu_labels.py` (standard-library only, so the trainer and the runtime can
 both import it) now owns the vocabulary:
 
 | Label | Stage | Meaning | Trained in which contexts | Members |
@@ -564,7 +564,7 @@ facts:
 
 ```bash
 # 2026-08-02: the two reserved labels and which one escalates
-sed -n '46,77p' fastworkflow/nlu_labels.py
+sed -n '46,77p' fastworkflow/intent/nlu_labels.py
 grep -rn "WILDCARD_LABEL\|PARAMETER_VALUE_LABEL" fastworkflow/ --include=*.py
 
 # 2026-08-02: the escalation class is dropped where there are no ancestors

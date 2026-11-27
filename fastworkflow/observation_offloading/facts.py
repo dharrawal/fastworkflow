@@ -183,7 +183,7 @@ def workflow_signatures(workflow_folderpath: str) -> dict[str, Any]:
     Commands without a ``Signature`` are left out.
     """
     import fastworkflow
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     routing = RoutingRegistry.get_definition(workflow_folderpath)
     names = {name for commands in routing.contexts.values() for name in commands}

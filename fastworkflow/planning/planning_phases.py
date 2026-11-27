@@ -2668,7 +2668,7 @@ class CodeSteps:
     def _succeeded(self, step_index: int, observation: Any) -> bool:
         """No failure marker and every command run of the step succeeded; the reply for
         entering the context the workflow is already in ran nothing and counts as done."""
-        from fastworkflow.context_navigation import ALREADY_IN_CONTEXT
+        from fastworkflow.core.context_navigation import ALREADY_IN_CONTEXT
         from fastworkflow.observation_offloading.finish_check import run_failed
 
         text = str(observation or "")
@@ -2682,8 +2682,8 @@ class CodeSteps:
 
     def _path_to(self, command: str) -> Optional[list[str]]:
         """The no-value moves to a context where *command* runs; [] when it runs here."""
-        from fastworkflow.command_executor import AlreadyInContextError, CommandNotFoundError
-        from fastworkflow.context_navigation import code_path
+        from fastworkflow.engine.command_executor import AlreadyInContextError, CommandNotFoundError
+        from fastworkflow.core.context_navigation import code_path
         from fastworkflow.workflow_agent import _explicit_agent_command
 
         workflow = self.workflow()
@@ -3499,7 +3499,7 @@ def judge_result(raw: Any, *, command_name: str, output_model: type[BaseModel] |
     call's ``CommandResponse``, or None for ``ANSWER_BY_MODEL`` (a command with no declared Output). Raises
     ``TypeError`` for a return the rule refuses. The runtime (``call_result``) and the preview
     (``command_preview.result_answer``) judge with it."""
-    from fastworkflow.command_executor import command_response_of
+    from fastworkflow.engine.command_executor import command_response_of
     from fastworkflow.planning import ANSWER_BY_MODEL
 
     if raw is ANSWER_BY_MODEL:

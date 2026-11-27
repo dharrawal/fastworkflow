@@ -13,7 +13,7 @@ import pytest
 
 from fastworkflow.review import review_proposals
 from fastworkflow.review.review_proposals import MEANS_FROM_SCRATCH, MEANS_PLANNING
-from fastworkflow.turn import TurnStatus
+from fastworkflow.core.turn import TurnStatus
 from tests.test_approval_binding import (  # noqa: F401 - the real agent on the annotated library copy, and the guards
     _finish, annotated_library, no_live_model, no_model_call_for_parameters, todo)
 from tests.test_round1_gate import EMMA, JOKE, _open_review, _split_into, gated  # noqa: F401

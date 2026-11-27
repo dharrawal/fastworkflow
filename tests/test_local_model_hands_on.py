@@ -19,12 +19,12 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow import intent_detector, intent_loop
+from fastworkflow.intent import intent_detector, intent_loop
 from fastworkflow._workflows.command_metadata_extraction import intent_detection
 from fastworkflow._workflows.command_metadata_extraction._commands import wildcard
-from fastworkflow.command_routing import RoutingRegistry
+from fastworkflow.core.command_routing import RoutingRegistry
 from fastworkflow.model_pipeline_training import CommandRouter, train
-from fastworkflow.workflow import running_command
+from fastworkflow.core.workflow import running_command
 from fastworkflow.train import determinism, utterance_cache
 from fastworkflow.train import intent_model_layout as layout
 from fastworkflow.train import workflow_model as wm
@@ -114,7 +114,7 @@ def test_the_head_trained_here_is_the_new_rule_and_never_answers_not_here_for_a_
 
     router = CommandRouter(intent_detector.head_folder(app.folderpath, "Book"))
     labels, details = router.predict_with_details(BRANCH_REQUEST)
-    assert labels != [fastworkflow.nlu_labels.WILDCARD_LABEL] and len(labels) > 1
+    assert labels != [fastworkflow.intent.nlu_labels.WILDCARD_LABEL] and len(labels) > 1
     assert details["confident"] is False and details["p_out"] > details["p_in"]
     assert details["outside_labels"][0] == "Library/list_branches"
 
@@ -205,7 +205,7 @@ def test_choosing_the_ancestor_command_at_the_question_runs_it_in_the_ancestor_s
 def test_a_global_command_chosen_at_the_question_is_bound_to_the_root_record(library_on_a_book):
     """A pick is found where it lives: the global scope is asked first, so a global command the question offered (the
     head ranked it ahead of the Book's own) runs on the root record. Only the routing is read: nothing is executed."""
-    from fastworkflow import intent_loop
+    from fastworkflow.intent import intent_loop
 
     app, cme, library = library_on_a_book
     assert intent_detector.global_first_applies(app)
@@ -222,7 +222,7 @@ def test_a_pick_of_a_command_the_scope_does_not_have_runs_in_the_scope_that_has_
     """The Book scope does not run `list_branches`: the pick is found in the scope that has it (its record is bound);
     a command the scope has stays there; a framework command is answered by the current scope; a name no scope of
     the path has is found nowhere. The span records a pick of another scope (`chosen_command_elsewhere`)."""
-    from fastworkflow import intent_loop
+    from fastworkflow.intent import intent_loop
 
     app, cme, library = library_on_a_book
     elsewhere = intent_loop.choose(app, "Library/list_branches")

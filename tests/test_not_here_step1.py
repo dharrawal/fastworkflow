@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow.command_routing import RoutingRegistry
+from fastworkflow.core.command_routing import RoutingRegistry
 from fastworkflow.model_pipeline_training import choose_not_here_sample, not_here_seed_rows, trained_command_labels
 from fastworkflow.train import determinism
 from fastworkflow.train import not_here_step1 as step1

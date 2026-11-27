@@ -38,7 +38,7 @@ from fastworkflow.observation_offloading.state import (
     reset_observation_state,
     snapshot_events,
 )
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 REDACTION_ENV = archive_module.REDACTION_ENV
 

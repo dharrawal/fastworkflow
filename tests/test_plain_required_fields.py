@@ -32,10 +32,10 @@ from fastworkflow.parameters import parameter_clarification
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import (
     ParameterExtraction,
 )
-from fastworkflow.command_directory import CommandLoadError
-from fastworkflow.command_executor import CommandExecutor
-from fastworkflow.command_metadata_api import CommandMetadataAPI
-from fastworkflow.command_routing import RoutingDefinition
+from fastworkflow.core.command_directory import CommandLoadError
+from fastworkflow.engine.command_executor import CommandExecutor
+from fastworkflow.core.command_metadata_api import CommandMetadataAPI
+from fastworkflow.core.command_routing import RoutingDefinition
 from fastworkflow.parameters import signatures
 from fastworkflow.parameters.signatures import (
     INVALID_FLOAT_VALUE,
@@ -305,7 +305,7 @@ def fresh_load(workflow, monkeypatch):
     monkeypatch.setattr(RoutingDefinition, "_GLOBAL_COMMAND_CLASS_CACHE", {})
     warnings: list[str] = []
     definition = fastworkflow.RoutingRegistry.get_definition(FOLDER)
-    monkeypatch.setattr(fastworkflow.command_routing.logger, "warning",
+    monkeypatch.setattr(fastworkflow.core.command_routing.logger, "warning",
                         lambda msg, *a, **k: warnings.append(str(msg)))
 
     def load(command_name: str):

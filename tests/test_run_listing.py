@@ -25,7 +25,7 @@ from fastworkflow.planning.planning_commands import PlanningCommandInputError
 from fastworkflow.run_listing import (
     COMMAND_SHORTLIST, FULL, FULL_LISTING_MAX_CHARS, ARMS, THRESHOLD, check_planned_arguments,
     listing_arm, planning_candidates, run_listing_text, shortlist_for)
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401 - shared fixture
 
 ROOT = Path(__file__).resolve().parent
@@ -654,7 +654,7 @@ def test_the_production_arm_is_threshold_and_one_constant_switches_it():
 def test_the_framework_commands_are_hidden_from_every_run_listing(copy_of):
     """The framework's planning commands (review_subtasks) are system machinery (fix-3rsq.plan-review.1):
     the loader has them, and no run's listing names them, under any arm, or gathers them for a sub-task that names one."""
-    from fastworkflow.command_directory import CommandDirectory
+    from fastworkflow.core.command_directory import CommandDirectory
 
     library = _library_in(copy_of, name="framework_hidden")
     assert "review_subtasks" in CommandDirectory.load(library.folderpath).map_command_2_metadata   # not vacuous

@@ -10,9 +10,9 @@ import inspect
 import logging
 
 import fastworkflow
-from fastworkflow.command_routing import RoutingDefinition
-from fastworkflow.command_directory import CommandDirectory
-from fastworkflow.entry_declarations import declared_occupiable
+from fastworkflow.core.command_routing import RoutingDefinition
+from fastworkflow.core.command_directory import CommandDirectory
+from fastworkflow.core.entry_declarations import declared_occupiable
 from fastworkflow.utils import python_utils
 
 
@@ -20,7 +20,7 @@ def _approval_marker(subject_workflow_path: str, qualified_name: str) -> str:
     """The short listing marker of an approval-annotated command, "" for an unannotated one.
 
     Imported here: approval_annotations reads the routing definition, which this module sits above."""
-    from fastworkflow.approval_annotations import approval_marker
+    from fastworkflow.core.approval_annotations import approval_marker
 
     return approval_marker(subject_workflow_path, qualified_name)
 
@@ -593,7 +593,7 @@ class CommandMetadataAPI:
         }
 
         with contextlib.suppress(Exception):
-            from fastworkflow.command_context_model import CommandContextModel
+            from fastworkflow.core.command_context_model import CommandContextModel
             if vals := CommandContextModel.declared_bases(subject_workflow_path).get(active_context_name):
                 context_info["inheritance"] = vals
 
@@ -685,7 +685,7 @@ class CommandMetadataAPI:
             # records' contexts with their bases, then the global scope) are callable here by name, with
             # the scope each comes from. The live chain is read now, from the live object.
             if navigation_workflow is not None:
-                from fastworkflow.context_navigation import exact_name_scopes
+                from fastworkflow.core.context_navigation import exact_name_scopes
 
                 for scope in exact_name_scopes(navigation_workflow):
                     if scope.context_name == active_context_name:
@@ -770,7 +770,7 @@ class CommandMetadataAPI:
         edge into it). Contexts no edge reaches keep depth 0, as they did when nothing was
         declared. Built from the commands the workflow declares, never from a hierarchy file.
         """
-        from fastworkflow.context_navigation import collect_descend_edges
+        from fastworkflow.core.context_navigation import collect_descend_edges
 
         edges = collect_descend_edges(subject_workflow_path)
         targets = {edge.target for edge in edges}
@@ -829,8 +829,8 @@ class CommandMetadataAPI:
         context class's docstring, or, when it has none, the commands the context
         adds. Empty when the routing definition cannot be read.
         """
-        from fastworkflow.context_identity import context_class_for
-        from fastworkflow.context_navigation import exact_name_scopes, navigation_steps_to_context
+        from fastworkflow.core.context_identity import context_class_for
+        from fastworkflow.core.context_navigation import exact_name_scopes, navigation_steps_to_context
 
         try:
             lines: List[str] = []
@@ -951,7 +951,7 @@ class CommandMetadataAPI:
         steps: str | None = None
         if navigation_workflow is not None:
             with contextlib.suppress(Exception):
-                from fastworkflow.context_navigation import navigation_steps_to_context
+                from fastworkflow.core.context_navigation import navigation_steps_to_context
 
                 steps = navigation_steps_to_context(
                     navigation_workflow, active_context_name, owning_context_name
@@ -1042,7 +1042,7 @@ class CommandMetadataAPI:
             "display_name": ("global" if active_context_name == "*" else active_context_name),
         }
         with contextlib.suppress(Exception):
-            from fastworkflow.command_context_model import CommandContextModel
+            from fastworkflow.core.command_context_model import CommandContextModel
             if vals := CommandContextModel.declared_bases(subject_workflow_path).get(active_context_name):
                 context_info["inheritance"] = vals
 

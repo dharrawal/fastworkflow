@@ -317,7 +317,7 @@ def _learn_main(args):
 
 
 def _learned_main(args):
-    from . import intent_learning
+    from fastworkflow.intent import intent_learning
 
     workflow_path = os.path.abspath(args.workflow_folderpath)
     if args.action == "stats":

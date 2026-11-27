@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow.command_routing import RoutingRegistry
+from fastworkflow.core.command_routing import RoutingRegistry
 from fastworkflow.model_pipeline_training import (
     FLATTENED,
     HEAD_SCOPES,
@@ -39,7 +39,7 @@ from fastworkflow.model_pipeline_training import (
     scoped_head_split,
     trained_command_labels,
 )
-from fastworkflow.nlu_labels import PARAMETER_VALUE_LABEL, WILDCARD_LABEL
+from fastworkflow.intent.nlu_labels import PARAMETER_VALUE_LABEL, WILDCARD_LABEL
 from fastworkflow.train import artifact_versioning, determinism, not_here_pilot
 from fastworkflow.train import selective_training as st
 from fastworkflow.train import utterance_cache

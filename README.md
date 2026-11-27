@@ -526,7 +526,7 @@ The execution core is synchronous and transport-free. Create one `WorkflowExecut
 ```python
 import fastworkflow
 from dotenv import dotenv_values
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 # Load env + secrets once at startup
 env_vars = {

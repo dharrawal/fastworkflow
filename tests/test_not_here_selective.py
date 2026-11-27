@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow.command_routing import RoutingRegistry
+from fastworkflow.core.command_routing import RoutingRegistry
 from fastworkflow.train import artifact_versioning
 from fastworkflow.train import selective_training as st
 from fastworkflow.train import utterance_cache

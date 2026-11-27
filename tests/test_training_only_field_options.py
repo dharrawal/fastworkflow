@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field
 
 import fastworkflow
 from fastworkflow.planning import planning_commands as pc
-from fastworkflow.command_routing import RoutingRegistry
+from fastworkflow.core.command_routing import RoutingRegistry
 
 LIBRARY = Path(fastworkflow.__file__).resolve().parent / "examples" / "library"
 HELLO = Path(__file__).resolve().parent / "hello_world_workflow"
@@ -279,7 +279,7 @@ def test_a_planning_command_with_the_declarations_loads_without_problems(library
 
 
 def test_the_command_listings_are_byte_identical(library_pair):
-    from fastworkflow.command_metadata_api import CommandMetadataAPI
+    from fastworkflow.core.command_metadata_api import CommandMetadataAPI
 
     cme = fastworkflow.get_internal_workflow_path("command_metadata_extraction")
 

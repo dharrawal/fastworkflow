@@ -23,7 +23,7 @@ from tests.test_plan_match_ambiguity import (  # noqa: F401
     AUTHOR, BY_TITLE, LOANS, _ambiguous_review, _items, _proposal, _single, no_heads)
 from tests.test_round1_gate import EMMA, JOKE, gated, no_draft_extraction  # noqa: F401
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401
-from fastworkflow.turn import TurnStatus
+from fastworkflow.core.turn import TurnStatus
 
 pytestmark = pytest.mark.usefixtures("initialized_fastworkflow")
 

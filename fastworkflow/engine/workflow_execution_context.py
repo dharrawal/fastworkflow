@@ -36,13 +36,14 @@ import litellm  # noqa: F401  (must precede dspy; see fastworkflow/utils/dspy_ut
 import dspy
 
 import fastworkflow
-import fastworkflow.turn
-from fastworkflow import active_workflow
+import fastworkflow.core.turn
+from fastworkflow.engine import active_workflow
 from fastworkflow.planning import planning_commands
 from fastworkflow.observability import metrics, tracing
 from fastworkflow.review import approval_binding
-from fastworkflow import intent_loop, no_agent_mode, turn_cache
-from fastworkflow import waiting as waiting_module
+from fastworkflow.intent import intent_loop
+from fastworkflow.core import no_agent_mode, turn_cache
+from fastworkflow.core import waiting as waiting_module
 from fastworkflow.parameters import check as one_guard, reply as replies
 from fastworkflow.observation_offloading.state import current_execute_alias
 from fastworkflow.session.session_state_store import SCHEMA_VERSION, IncompatibleSessionState
@@ -50,7 +51,7 @@ from fastworkflow.session.state_serialization import validate_state
 from fastworkflow.planning.plan_frame import PlanFrame, runs_outside_ranges, turn_max_steps
 from fastworkflow.observability import store as observability_store
 from fastworkflow.observability.execution_recorder import ExecutionRecorder, record_execution
-from fastworkflow.turn import TurnResult, TurnStatus, mint_turn_key
+from fastworkflow.core.turn import TurnResult, TurnStatus, mint_turn_key
 from fastworkflow.utils.logging import logger
 from fastworkflow.utils import dspy_logger, dspy_utils
 from fastworkflow.parameters.input_validation import plain_facts, stored_value, tagged_facts
@@ -103,7 +104,7 @@ def _opened_part(trajectory: dict[str, Any]) -> str:
 
 #: The artifact key under which the final answer of a split turn lists its parts (``_answer_parts``).
 TURN_PARTS_ARTIFACT = "fw_sub_tasks"
-#: The artifact key under which the turn lists its stopped or refused parts (no-agent mode; ``fastworkflow.no_agent_mode``).
+#: The artifact key under which the turn lists its stopped or refused parts (no-agent mode; ``fastworkflow.core.no_agent_mode``).
 NOT_RUN_ARTIFACT = no_agent_mode.NOT_RUN_ARTIFACT
 
 
@@ -354,7 +355,7 @@ class WorkflowExecutionContext:
         """
         Args:
             detect_no_agent_mode: If True, an unset agent model (``LLM_AGENT``) puts the context in no-agent mode
-                         (``fastworkflow.no_agent_mode``): its turns take no agent model step.
+                         (``fastworkflow.core.no_agent_mode``): its turns take no agent model step.
             session_key: Stable id (e.g. channel_id) for cme/app workflow persistence.
                          When omitted, cme uses an ephemeral uuid (CLI one-off sessions).
             mirror_action_log_to_file: DEPRECATED no-op. The cwd
@@ -391,7 +392,7 @@ class WorkflowExecutionContext:
         self._conversation_history: dspy.History = dspy.History(messages=[])
         self._action_log: list[dict[str, Any]] = []
 
-        from fastworkflow.command_executor import CommandExecutor
+        from fastworkflow.engine.command_executor import CommandExecutor
         self._CommandExecutor = CommandExecutor
 
         # One PlanFrame per planning-command call; the turn frame is at index 0. The per-call
@@ -1024,7 +1025,7 @@ class WorkflowExecutionContext:
         if command_output.sub_task is None:
             command_output.sub_task = self._executing_sub_task()
         self._turn_outputs.append(command_output)
-        fastworkflow.turn.warn_on_unserializable_artifacts(command_output)
+        fastworkflow.core.turn.warn_on_unserializable_artifacts(command_output)
 
     def _executing_sub_task(self) -> Optional[int]:
         """The 1-based number of the sub-task the turn is executing (the answer's ``### N.`` number), read from the
@@ -1266,7 +1267,7 @@ class WorkflowExecutionContext:
         return self._cme_workflow
 
     # The deterministic path's pending question (kinds ``intent`` and ``parameters``) is the turn's one waiting record
-    # (``fastworkflow.waiting``, ``docs/pending_state_design.md``). The built-in commands reach it through the port in
+    # (``fastworkflow.core.waiting``, ``docs/pending_state_design.md``). The built-in commands reach it through the port in
     # their context. The sub-task review and a paused decision step are the same record (kinds ``review`` and
     # ``decision``); the review's own slot question is nested in its payload (``waiting.SLOT_KEY``, the plan CME's
     # ``SlotPort``). ``_assistant_round``: the round began with a "/" message.
@@ -2503,14 +2504,14 @@ class WorkflowExecutionContext:
 
     @property
     def waiting(self):
-        """The one question this turn is waiting on (``fastworkflow.waiting.Waiting``) or None: the turn's record itself."""
+        """The one question this turn is waiting on (``fastworkflow.core.waiting.Waiting``) or None: the turn's record itself."""
         return self._waiting
 
     def _pending_prompt_kind(self, target) -> tuple[str, dict[str, Any]]:
         """``(question_kind, payload)`` of the prompt *target* is; raises on any lookup failure. The kind is the record's
         (``waiting.TABLE``) and its payload is built by ``prompt_payloads``; the agent's own question, and the CME's open
         command beside an ``ask_user`` entry, are ``agent`` with none."""
-        from fastworkflow import prompt_payloads
+        from fastworkflow.engine import prompt_payloads
 
         held = self._waiting
         if held is not None and held.owner != waiting_module.OWNER_CME:
@@ -3162,7 +3163,7 @@ class WorkflowExecutionContext:
 
     def _run_agent(self, message: str):
         """Fresh agent turn setup and ReAct forward call, with the turn's stage progress listened for (fix-kq49)."""
-        from fastworkflow import turn_progress
+        from fastworkflow.core import turn_progress
 
         with turn_progress.bound(self):
             return self._run_agent_unlistened(message)
@@ -3190,7 +3191,7 @@ class WorkflowExecutionContext:
             # The listing as data rides on the prediction; _finalize_agent_output puts it in the answer's artifacts.
             return dspy.Prediction(final_answer=capable[0], exhausted=False, capabilities=capable[1])
 
-        from fastworkflow import turn_progress
+        from fastworkflow.core import turn_progress
         from fastworkflow import workflow_agent
 
         turn_progress.emit(turn_progress.STAGE_SPLIT)
@@ -3323,7 +3324,7 @@ class WorkflowExecutionContext:
     def _learning_how(record, part) -> Optional[str]:
         """How a resolved part's command was settled, for `intent_learning`: a pick at a question or a pinned plan is
         the user's choice, else the link that decided it."""
-        from fastworkflow import intent_learning
+        from fastworkflow.intent import intent_learning
         from fastworkflow._workflows.plan_metadata_extraction import resolution
 
         if part.get("chosen") or record.pinned:
@@ -3337,7 +3338,7 @@ class WorkflowExecutionContext:
         confirmation of the command it showed for it (accepted), or the corrected command (switched, the drafted one
         kept as ``rejected_label``); any other part is the link's own answer, unconfirmed. A part with no command, or
         whose text the review changed, is not recorded. Never raises."""
-        from fastworkflow import intent_learning as learning
+        from fastworkflow.intent import intent_learning as learning
         from fastworkflow._workflows.plan_metadata_extraction import resolution
 
         facts = getattr(self, "_turn_part_facts", None)
@@ -3379,7 +3380,7 @@ class WorkflowExecutionContext:
         question a running part put (a refused typed call, ``after`` ``resume_part``) resumes that part
         (``_resume_parameter_loop_unlistened``)."""
         from fastworkflow.parameters import parameter_clarification
-        from fastworkflow import turn_progress
+        from fastworkflow.core import turn_progress
         from fastworkflow._workflows.plan_metadata_extraction import resolution
 
         with turn_progress.bound(self):
@@ -3402,7 +3403,7 @@ class WorkflowExecutionContext:
         whose command the user chose by answering which one, when nothing would run (no agent model, every part ad
         hoc) and when nobody can answer. Returns the suspended review or the turn's result."""
         from fastworkflow.review import review_proposals
-        from fastworkflow import turn_progress
+        from fastworkflow.core import turn_progress
         from fastworkflow._workflows.plan_metadata_extraction import resolution
 
         record = self._plan_resolution
@@ -4147,7 +4148,7 @@ class WorkflowExecutionContext:
                 or not state.get("missing_fact") or getattr(phase, "optional", False)
                 or self._phase_call is None):
             return None
-        from fastworkflow import command_writes
+        from fastworkflow.core import command_writes
         from fastworkflow.planning import planning_commands
 
         # Read before _phase_run is cleared: the steps of the phase that failed, as its runs were planned.
@@ -4222,7 +4223,7 @@ class WorkflowExecutionContext:
             exhausted=False, phase_failed=name)
 
     # ------------------------------------------------------------------
-    # No-agent mode: where a planning command stops (fastworkflow.no_agent_mode)
+    # No-agent mode: where a planning command stops (fastworkflow.core.no_agent_mode)
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -5100,7 +5101,7 @@ class WorkflowExecutionContext:
 
     def _current_record(self) -> tuple[str, str]:
         """``(clause, context name)`` of the record the workflow is on now (``""`` at the root)."""
-        from fastworkflow.context_identity import context_clause_for, context_identity
+        from fastworkflow.core.context_identity import context_clause_for, context_identity
 
         active = self.get_active_workflow() or self._app_workflow
         if active is None:
@@ -6015,10 +6016,10 @@ class WorkflowExecutionContext:
         # not interpret artifact keys — clients read whatever they need.
         # An ask_user entry's prompt-description keys (_describe_pending_prompt) describe its own, now
         # answered, prompt: they are withheld from the answer. Any other artifact still flows.
-        if artifact_responses := fastworkflow.turn.collect_artifact_responses(
+        if artifact_responses := fastworkflow.core.turn.collect_artifact_responses(
             [self._without_prompt_description(o) for o in self._turn_outputs]
         ):
-            fastworkflow.turn.merge_artifact_responses_into(
+            fastworkflow.core.turn.merge_artifact_responses_into(
                 command_response, artifact_responses
             )
         self._tag_turn_parts(result_text)

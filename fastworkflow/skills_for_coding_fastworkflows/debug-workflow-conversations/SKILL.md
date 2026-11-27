@@ -120,7 +120,7 @@ Treat a human comment as a lead to verify, not proof of the cause.
 
 
 **A. Did routing pick the right command?** Every request is decided by ONE intent loop
-(`fastworkflow/intent_loop.py`, `resolve`): exact name, foreign-name guard, fuzzy name, the
+(`fastworkflow/intent/intent_loop.py`, `resolve`): exact name, foreign-name guard, fuzzy name, the
 local model over the whole context walk, then the remote model (`JEV_API_KEY`), then a
 which-command question. The deterministic path records that decision as ONE `fw.intent`
 span (`stage: INTENT_DETECTION`), and each reply to the question as another
@@ -176,7 +176,7 @@ Repeated `ask_user_response` replans point at ambiguous command surfaces or
 missing context navigation → `design-context-models`.
 
 **D. Did the conversation stall on questions?** A turn waits on ONE record at a time
-(`fastworkflow/waiting.py`). The question shows in `record_json` on the last command output's
+(`fastworkflow/core/waiting.py`). The question shows in `record_json` on the last command output's
 artifacts: `question_kind` (`agent`, `plan_choice`, `planning_parameter`, `phase_step`, `review`,
 `approval`) with its payload while the turn is `awaiting_user`; in a "/" (deterministic) session,
 `parameter_request` or `plan_choice` on the failed output. Multiple

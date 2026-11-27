@@ -1217,7 +1217,7 @@ def is_control_signal(exc: BaseException) -> bool:
     Imports are deferred: both defining modules import this one.
     """
     from fastworkflow.utils.react import AskUserSuspend
-    from fastworkflow.workflow_execution_context import CommandCancelledError
+    from fastworkflow.engine.workflow_execution_context import CommandCancelledError
 
     return isinstance(exc, (AskUserSuspend, CommandCancelledError))
 

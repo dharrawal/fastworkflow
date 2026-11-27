@@ -11,12 +11,12 @@ import pytest
 
 import fastworkflow
 from fastworkflow.planning import command_preview
-from fastworkflow import no_agent_mode
-from fastworkflow.command_executor import CommandExecutor
+from fastworkflow.core import no_agent_mode
+from fastworkflow.engine.command_executor import CommandExecutor
 from fastworkflow.planning import run, when
 from fastworkflow.planning.planning_commands import PlanningCommandCallPlan, call_phases
-from fastworkflow.turn import TurnStatus
-from fastworkflow.workflow_execution_context import (
+from fastworkflow.core.turn import TurnStatus
+from fastworkflow.engine.workflow_execution_context import (
     NOT_RUN_ARTIFACT, TURN_PARTS_ARTIFACT, WorkflowExecutionContext)
 from tests.test_assistant_mode_planning import (  # noqa: F401 - the module fixture and the assistant-mode helpers
     LIBRARY, _assistant_ctx, initialized_fastworkflow as _assistant_init)

@@ -16,9 +16,9 @@ from __future__ import annotations
 
 import pytest
 
-from fastworkflow import no_agent_mode
+from fastworkflow.core import no_agent_mode
 from fastworkflow.parameters import read, reply as replies
-from fastworkflow.turn import TurnStatus
+from fastworkflow.core.turn import TurnStatus
 from tests.test_no_agent_decisions import (  # noqa: F401 - fixtures and the phases the decision tests use
     Conditional, MissingValue, _pending, _stops)
 from tests.test_no_agent_mode import _plan, _sent  # noqa: F401 - helpers (the autouse no-agent fixture comes with the import)

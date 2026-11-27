@@ -15,9 +15,9 @@ import json
 from pathlib import Path
 
 import fastworkflow
-from fastworkflow import command_executor
+from fastworkflow.engine import command_executor
 from fastworkflow.planning import planning_commands
-from fastworkflow.command_directory import CommandDirectory, is_visible_planning
+from fastworkflow.core.command_directory import CommandDirectory, is_visible_planning
 from fastworkflow.train.artifact_versioning import construction_record_problem, workflow_has_planning_commands
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401 - the routing registry
 

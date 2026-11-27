@@ -13,10 +13,11 @@ import pytest
 from pydantic import BaseModel, Field, model_validator
 
 import fastworkflow
-from fastworkflow import command_directory, workflow_agent
+from fastworkflow.core import command_directory
+from fastworkflow import workflow_agent
 from fastworkflow.planning import planning_commands
-from fastworkflow.command_executor import call_response_generator
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.command_executor import call_response_generator
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 from fastworkflow.planning import (StepFormError, command_inputs_for_steps, count,
                                 count_and_names_read, phase, planned, planning_command_parts, run)
 from fastworkflow.planning.planning_phases import (Placeholder, check_bindings, concatenated_steps,

@@ -23,7 +23,7 @@ import threading
 from pathlib import Path
 from collections import Counter
 
-from fastworkflow.command_routing import RoutingDefinition, RoutingRegistry
+from fastworkflow.core.command_routing import RoutingDefinition, RoutingRegistry
 from fastworkflow.train import heldout_evaluation
 from fastworkflow.train.determinism import (
     ContextTrainingStatus,
@@ -32,8 +32,8 @@ from fastworkflow.train.determinism import (
 from fastworkflow.train.artifact_versioning import PLANNING_HEADS_PRODUCTION, PLANNING_HEADS_RECORD_KEY
 from fastworkflow.train.selective_training import contexts_for_training
 from fastworkflow.utils.logging import logger
-from fastworkflow.command_directory import is_visible_planning
-from fastworkflow.nlu_labels import (
+from fastworkflow.core.command_directory import is_visible_planning
+from fastworkflow.intent.nlu_labels import (
     PARAMETER_VALUE_LABEL,
     PARAMETER_VALUE_PLACEHOLDERS,
     WILDCARD_LABEL,

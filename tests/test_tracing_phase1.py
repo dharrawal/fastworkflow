@@ -20,10 +20,10 @@ import pytest
 import fastworkflow
 from fastworkflow import TurnStatus, workflow_agent
 from fastworkflow.observability import metrics, tracing
-from fastworkflow.command_executor import CommandExecutor
+from fastworkflow.engine.command_executor import CommandExecutor
 from fastworkflow.observability import store as obs
 from fastworkflow.utils.react import AskUserSuspend, fastWorkflowReAct
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 from tests.test_turn_result_capture import no_review_gate  # noqa: F401 - the review gate is off for these turns
 from tests import span_tree
 from tests.todo_list_workflow.application.todo_manager import TodoListManager
@@ -42,7 +42,7 @@ def todo_workflow_path() -> str:
 @pytest.fixture
 def initialized_fastworkflow(monkeypatch):
     fastworkflow.init({})
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     monkeypatch.setattr(
         WorkflowExecutionContext,
@@ -520,7 +520,7 @@ class TestPlannerSpans:
         import dspy
 
         from fastworkflow import workflow_agent
-        from fastworkflow.command_metadata_api import CommandMetadataAPI
+        from fastworkflow.core.command_metadata_api import CommandMetadataAPI
 
         monkeypatch.setattr(
             CommandMetadataAPI,
@@ -828,7 +828,7 @@ class TestIdentityPlumbing:
 
     def test_turn_result_has_channel_field(self):
         # Additive TurnResult field [R1]; default None keeps old callers valid.
-        from fastworkflow.turn import TurnResult
+        from fastworkflow.core.turn import TurnResult
 
         assert "channel_id" in TurnResult.model_fields
         assert TurnResult.model_fields["channel_id"].default is None
@@ -947,7 +947,7 @@ class TestStepSpanExceptionSafety:
     def test_control_signal_from_a_tool_closes_the_step(
         self, initialized_fastworkflow, todo_workflow_path, monkeypatch
     ):
-        from fastworkflow.workflow_execution_context import CommandCancelledError
+        from fastworkflow.engine.workflow_execution_context import CommandCancelledError
 
         sink = RecordingTraceSink()
         ctx, _wf = _make_agent_ctx(todo_workflow_path, monkeypatch, sink=sink)

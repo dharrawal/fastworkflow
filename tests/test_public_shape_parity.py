@@ -54,8 +54,8 @@ from fastworkflow import (
     TurnStatus,
     mint_turn_key,
 )
-from fastworkflow.command_routing import ModuleType, RoutingRegistry
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.core.command_routing import ModuleType, RoutingRegistry
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 from tests.todo_list_workflow.application.todo_manager import TodoListManager
 

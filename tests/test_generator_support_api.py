@@ -22,7 +22,7 @@ import fastworkflow
 from fastworkflow import ModuleType
 from fastworkflow.planning import planning_commands as pc
 from fastworkflow.observability import tracing
-from fastworkflow.command_routing import RoutingRegistry
+from fastworkflow.core.command_routing import RoutingRegistry
 from fastworkflow.observability import store as obs
 from fastworkflow.parameters import signatures as S
 

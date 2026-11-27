@@ -14,7 +14,7 @@ import fastworkflow
 from fastworkflow import model_pipeline_training
 from fastworkflow._workflows.command_metadata_extraction import intent_detection
 from fastworkflow.capability_answer import CapabilityListing
-from fastworkflow.command_executor import CommandExecutor
+from fastworkflow.engine.command_executor import CommandExecutor
 from fastworkflow.train import selective_training
 
 TODO = os.path.abspath(os.path.join(os.path.dirname(__file__), "todo_list_workflow"))
@@ -57,8 +57,8 @@ def test_what_can_i_do_carries_its_listing_and_the_text_is_the_commands_own(pair
     assert direct.command_response.artifacts["capabilities"] == listing.model_dump(mode="json")
 
     # the text is what it always was: the workflow block, then the commands
-    from fastworkflow.command_context_model import get_workflow_info
-    from fastworkflow.command_metadata_api import CommandMetadataAPI
+    from fastworkflow.core.command_context_model import get_workflow_info
+    from fastworkflow.core.command_metadata_api import CommandMetadataAPI
     expected = (CommandMetadataAPI.get_workflow_definition_display_text(get_workflow_info(app.folderpath))
                 + "\n\n" + CommandMetadataAPI.get_command_display_text(
                     subject_workflow_path=app.folderpath, cme_workflow_path=cme.folderpath,
@@ -116,10 +116,10 @@ def test_abort_says_what_it_ended(pair):
 def test_the_edited_files_are_not_what_the_internal_workflows_training_fingerprint_hashes(pair):
     """Fingerprints are hashes of the CME command files and two trainer modules; the data is attached elsewhere."""
     import fastworkflow.capability_answer as capability_answer
-    import fastworkflow.command_executor as command_executor
+    import fastworkflow.engine.command_executor as command_executor
 
     sources = {fp.source_path for fp in selective_training.compute_command_fingerprints(
         fastworkflow.get_internal_workflow_path(CME)).values() if fp.source_path}
     assert sources and not sources & {command_executor.__file__, capability_answer.__file__}
     assert not {selective_training.TRAINER_SOURCE_MODULE, selective_training.GENERATOR_SOURCE_MODULE} & {
-        "fastworkflow.command_executor", "fastworkflow.capability_answer"}
+        "fastworkflow.engine.command_executor", "fastworkflow.capability_answer"}

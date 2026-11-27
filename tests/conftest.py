@@ -363,7 +363,7 @@ def script_matcher(monkeypatch, distributions) -> list[str]:
     process): only intent detection's matcher is scripted, so a turn's other model calls are whatever the test makes
     them.
     """
-    from fastworkflow import intent_detector
+    from fastworkflow.intent import intent_detector
 
     asked: list[str] = []
 
@@ -383,7 +383,8 @@ def script_matcher(monkeypatch, distributions) -> list[str]:
 def no_local_model(monkeypatch) -> None:
     """No context has a trained local intent model (the state of a workflow that has not been trained): the detection
     chain is the remote decision model alone, so a test's scripted answer (``script_matcher``) is the whole decision."""
-    from fastworkflow import intent_detector, run_listing
+    from fastworkflow.intent import intent_detector
+    from fastworkflow import run_listing
 
     monkeypatch.delenv("FW_REQUIRE_HEADS", raising=False)
     monkeypatch.setattr(intent_detector, "has_head", lambda folder: False)
@@ -405,7 +406,7 @@ def script_plan(monkeypatch, pick, *, decided_by: str = "exact_name") -> None:
     def part_intent(workflow, text, *, pinned=None, exclude=()):
         if pinned:
             return real_intent(workflow, text, pinned=pinned, exclude=exclude)
-        from fastworkflow import turn_cache
+        from fastworkflow.core import turn_cache
 
         command = turn_cache.memo(("script_plan", text), lambda: pick(text))
         if command is None or command.name in set(exclude):
@@ -434,7 +435,7 @@ def no_agent_model(monkeypatch):
     is cached, so nothing is dropped. With the agent model set, this fixture is not used: the rest of the suite is
     that proof.
     """
-    from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+    from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
     monkeypatch.delenv("LLM_AGENT", raising=False)
     monkeypatch.setattr(fastworkflow, "_env_vars",

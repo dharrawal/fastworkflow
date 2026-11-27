@@ -40,10 +40,10 @@ from typing import Any, Callable, ClassVar, Optional, Sequence, Union
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 import fastworkflow
-from fastworkflow import intent_loop
+from fastworkflow.intent import intent_loop
 from fastworkflow.parameters import parameter_clarification
 from fastworkflow.observability import tracing
-from fastworkflow.no_agent_mode import _bare, is_yes
+from fastworkflow.core.no_agent_mode import _bare, is_yes
 
 logger = logging.getLogger(__name__)
 
@@ -1969,7 +1969,7 @@ class ProposalReplyPolicy:
         was_in_slot: bool,
         initial_word: str,
     ) -> ReplyDecision:
-        from fastworkflow.command_executor import CommandExecutor
+        from fastworkflow.engine.command_executor import CommandExecutor
         from fastworkflow._workflows.plan_metadata_extraction._item_validation import explicit_out_of_range_step
         from fastworkflow.review.review_proposals import certain_removals
 
@@ -2116,8 +2116,8 @@ class ProposalReplyPolicy:
             proposal, edits, reason=READ_REASON, text=text, workflow=self._app_workflow)
 
     def _perform_plan_command(self, command_name: str, command: str, input_obj: Any) -> Any:
-        from fastworkflow.command_executor import call_response_generator
-        from fastworkflow.command_routing import ModuleType
+        from fastworkflow.engine.command_executor import call_response_generator
+        from fastworkflow.core.command_routing import ModuleType
 
         definition = fastworkflow.RoutingRegistry.get_definition(self._plan_workflow.folderpath)
         response_class = definition.get_command_class(command_name, ModuleType.RESPONSE_GENERATION_INFERENCE)
@@ -2138,7 +2138,7 @@ class ProposalReplyPolicy:
         w_out: Any,
         slot_question: str,
     ) -> ReplyDecision:
-        from fastworkflow.command_executor import CommandExecutor
+        from fastworkflow.engine.command_executor import CommandExecutor
 
         name = w_out.command_name or ""
         cmd_parameters = w_out.cmd_parameters
@@ -2221,7 +2221,7 @@ class ProposalReplyPolicy:
         *,
         preserve_drop_items: list[str] | None = None,
     ) -> ReplyDecision:
-        from fastworkflow.command_executor import CommandExecutor
+        from fastworkflow.engine.command_executor import CommandExecutor
 
         _clear_plan_cme_continuation(self._plan_cme)
         _prepare_plan_workflow(self, proposal)

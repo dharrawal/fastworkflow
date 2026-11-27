@@ -28,7 +28,7 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator,
 
 from fastworkflow.utils import subtask_pool
 from fastworkflow.observability import tracing
-from fastworkflow import turn_cache, turn_progress
+from fastworkflow.core import turn_cache, turn_progress
 from fastworkflow.review.review_step_refs import NUMBER_LIST as _NUMBER_LIST, removal_reading
 from fastworkflow.review.review_engine import (
     KIND_SUB_TASKS, Add, Change, Drop, EditParseError, EditRefused, Merge, NoEditsRead, Proposal,
@@ -495,8 +495,8 @@ class SubTaskProposal(Proposal):
         writes (``command_writes.write_commands``), ``MAY_CHANGE_DATA_BADGE`` for an ad hoc part when the workflow has a
         command that writes and an agent model is set (``no_agent_mode.agent_model_specified``: with none, an ad hoc
         part is not run here), else "". The text, the payload and ``changes_data`` read it."""
-        from fastworkflow.command_writes import write_commands
-        from fastworkflow.no_agent_mode import agent_model_specified
+        from fastworkflow.core.command_writes import write_commands
+        from fastworkflow.core.no_agent_mode import agent_model_specified
 
         writes = write_commands(workflow_folderpath) if workflow_folderpath else frozenset()
         ad_hoc_may_write = bool(writes) and agent_model_specified()
@@ -676,7 +676,7 @@ def rechecked(workflow, item: "SubTask") -> "SubTask":
     the values an earlier part produces are nobody's to give), and when they pass and no value waits on an earlier part,
     the ``Input``'s validators (``checked_arguments``, the checks the run makes on these values). Only a planning means
     has a check; anything else, or a check that cannot be made, leaves *item* as it is."""
-    from fastworkflow import intent_loop
+    from fastworkflow.intent import intent_loop
     from fastworkflow.planning import planning_commands
     from fastworkflow.parameters import ask as one_ask
 
@@ -834,7 +834,7 @@ def _prefetch_intents(workflow, subtasks: list[str]) -> bool:
     distinct text, pooling on, and the turn's memo bound (the workers write into the caller's memo). A failed prefetch
     is dropped: the loop decides that text again. Never raises.
     """
-    from fastworkflow import intent_detector
+    from fastworkflow.intent import intent_detector
     from fastworkflow._workflows.plan_metadata_extraction import resolution
 
     texts = list(dict.fromkeys(subtasks))
@@ -1022,7 +1022,8 @@ def drafted_item(workflow, item: SubTask, sub_task: str, earlier: list[SubTask],
     """*item* with its inputs drafted from *sub_task* for its means (``draft_inputs``), its planning check, and the means
     it was drafted for (``drafted_means``). With no draft (drafting off, from scratch, a failed draft) the inputs are
     empty and a planning pick's check is ``check_planned_arguments`` of no arguments."""
-    from fastworkflow import intent_loop, run_listing
+    from fastworkflow.intent import intent_loop
+    from fastworkflow import run_listing
     from fastworkflow.planning import planning_commands
 
     check = ""
@@ -1316,7 +1317,7 @@ def accepted_subtask_proposal(workflow) -> Optional[SubTaskProposal]:
 def redraft_for_look_up(workflow, item: SubTask, earlier: list[SubTask], *, planner_lm=None) -> SubTask:
     """Goal-preserving re-draft for ``look_up`` (fix-kk46.3): write commands re-match with writes excluded; read-only
     commands keep the means and re-draft inputs from the goal."""
-    from fastworkflow.command_writes import write_commands
+    from fastworkflow.core.command_writes import write_commands
 
     writes = write_commands(workflow.folderpath)
     if item.means.kind != MEANS_FROM_SCRATCH and item.means.name in writes:
@@ -2654,7 +2655,7 @@ def _known_means(text: str) -> str:
     resolver: case, spaces, ``_`` and the context prefix ignored), as ``<kind>:<qualified name>``. A name that resolves
     to no command, or to several, raises ``UnknownMeansEdit`` with the names (bd fix-ftdl.11): the step is never turned
     into an ad hoc one. Unchecked when no workflow is in scope or its commands cannot be read."""
-    from fastworkflow import no_agent_mode
+    from fastworkflow.core import no_agent_mode
     from fastworkflow.review import review_plan_switch
 
     stripped = (text or "").strip()

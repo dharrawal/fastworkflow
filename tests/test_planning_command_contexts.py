@@ -16,10 +16,11 @@ from dotenv import dotenv_values
 
 import fastworkflow
 from fastworkflow.planning import planning_commands, command_preview
-from fastworkflow import turn_cache, workflow_agent
+from fastworkflow.core import turn_cache
+from fastworkflow import workflow_agent
 from fastworkflow.build.class_analysis_structures import ClassInfo, MethodInfo
 from fastworkflow.build.command_file_template import create_command_file
-from fastworkflow.command_directory import CommandDirectory
+from fastworkflow.core.command_directory import CommandDirectory
 from fastworkflow.observation_offloading.facts import workflow_signatures
 from fastworkflow.utils import python_utils
 

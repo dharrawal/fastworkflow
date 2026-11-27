@@ -26,7 +26,7 @@ from fastworkflow.observability import tracing
 from fastworkflow.review import approval_binding as ab
 from fastworkflow.review.review_engine import AWAITING, EXPIRED, REVISED
 from fastworkflow.review.review_proposals import SubTaskProposal
-from fastworkflow.turn import TurnStatus
+from fastworkflow.core.turn import TurnStatus
 from fastworkflow.workflow_agent import initialize_workflow_tool_agent
 from tests.test_approval_binding import (  # noqa: F401 - the fixtures and the scripted agent
     Script, annotated_library, no_live_model, no_model_call_for_parameters, todo)
@@ -279,7 +279,7 @@ def test_a_goal_whose_command_succeeded_but_whose_finish_check_fails_is_not_comp
 
 def _scripted_context(annotated_library, monkeypatch):
     """A fresh agent-mode context on the annotated library, scripted as the todo fixture scripts one (the same seams)."""
-    from fastworkflow.context_identity import context_class_for
+    from fastworkflow.core.context_identity import context_class_for
     from fastworkflow.examples.library.application.library import Library
 
     ctx, wf = _make_agent_ctx(str(annotated_library), monkeypatch)
@@ -350,7 +350,7 @@ def test_the_fast_path_check_the_draft_and_the_run_share_one_head_lookup_and_one
     jev_asks = script_matcher(monkeypatch, {JOKE: {"none": 0.95}})
     # The heads are asked inside the one intent decision (fix-o1lg.1), no longer through run_listing.head_answers:
     # count that decision (and so the head lookup it makes) for the part.
-    from fastworkflow import intent_loop
+    from fastworkflow.intent import intent_loop
     head_asks: list = []
     real_decide = intent_loop.resolve
 

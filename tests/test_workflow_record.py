@@ -12,16 +12,16 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow.command_context_model import (
+from fastworkflow.core.command_context_model import (
     CommandContextModel,
     CommandContextModelError,
     context_class_problems,
 )
 from fastworkflow.planning.command_preview import load_problems
-from fastworkflow.context_identity import declared_instance_label
+from fastworkflow.core.context_identity import declared_instance_label
 from fastworkflow.session.serialization_hooks import reset_warnings
-from fastworkflow.workflow import Workflow, running_command
-from fastworkflow.command_routing import RoutingRegistry
+from fastworkflow.core.workflow import Workflow, running_command
+from fastworkflow.core.command_routing import RoutingRegistry
 
 from tests.todo_list_workflow.application.todo_manager import TodoListManager
 

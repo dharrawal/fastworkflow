@@ -2,7 +2,7 @@ import os
 import json
 import pytest
 from pathlib import Path
-from fastworkflow.command_context_model import CommandContextModel
+from fastworkflow.core.command_context_model import CommandContextModel
 
 def test_empty_context_model_is_valid(tmp_path):
     """Test that an empty context model is valid: a workflow with no context folder and no declarations."""

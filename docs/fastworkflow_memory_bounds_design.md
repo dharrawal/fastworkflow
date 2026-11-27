@@ -225,7 +225,7 @@ that keys only off the root misses it — which is why §11.2 anchors on "root i
 `messaging_app_4` has no `startup.py`, so it acquires its context only when an explicit
 `set_root_context` command runs, which is the "becomes pinned mid-session" path.
 
-`Workflow.__init__` starts with `_root_command_context = None` (`fastworkflow/workflow.py:160`), and the
+`Workflow.__init__` starts with `_root_command_context = None` (`fastworkflow/core/workflow.py:160`), and the
 root setter also populates `_current_command_context` (`workflow.py:216-217`).
 
 **What the conditional scope actually is, now that it has been built.** Release C's bound applies to any
@@ -1730,7 +1730,7 @@ Invariant 17 separately forbids holding `registry._lock` across the same I/O.
   - `save_conversation_incremental` appends above a high-water mark `[R2-11]`.
 - `fastworkflow/run_fastapi_mcp/conversation_store.py`
   - `append_conversation_turns`, replacing full-list rewrite `[R2-11 · absorption]`.
-- `fastworkflow/workflow_execution_context.py`
+- `fastworkflow/engine/workflow_execution_context.py`
   - in-memory conversation window after durable record `[R2-11]`.
 - `fastworkflow/run_fastapi_mcp/__main__.py`
   - topic/summary generation reads the durable record, not windowed memory `[R2-11]`;
@@ -1751,7 +1751,7 @@ Invariant 17 separately forbids holding `registry._lock` across the same I/O.
   - three-way launch reconciliation `[R6, R2-6]`;
   - transactional retirement over one generation `[R2-10]`;
   - credential install under the accepted turn `[R2-14]`.
-- `fastworkflow/workflow_execution_context.py`
+- `fastworkflow/engine/workflow_execution_context.py`
   - remove the `default=str` round-trip; single strict serializer at this boundary `[R2-7]`;
   - declared-projection API and enumerated restorable fields `[R2-9, R2-12]`;
   - complete logical-turn and CME continuation records, or pin `[R2-8]`.

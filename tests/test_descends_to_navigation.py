@@ -17,8 +17,8 @@ from types import SimpleNamespace
 import pytest
 
 import fastworkflow
-from fastworkflow.command_executor import CommandExecutor
-from fastworkflow.context_navigation import DescendEdge, collect_descend_edges
+from fastworkflow.engine.command_executor import CommandExecutor
+from fastworkflow.core.context_navigation import DescendEdge, collect_descend_edges
 from tests.test_step_helpers import script_command_extraction
 from tests.test_turn_result_capture import (  # noqa: F401 - shared fixtures
     initialized_fastworkflow,

@@ -194,9 +194,9 @@ def expected_cache_hits(source: str, cache_from: str) -> dict:
 def prepare_registry(folder: str):
     """The trainer's own preamble (train_workflow's first lines): rebuild the routing artifacts
     in the COPY, then return the command directory. Writes only into the copy."""
-    from fastworkflow.command_context_model import CommandContextModel
-    from fastworkflow.command_directory import CommandDirectory
-    from fastworkflow.command_routing import RoutingDefinition, RoutingRegistry
+    from fastworkflow.core.command_context_model import CommandContextModel
+    from fastworkflow.core.command_directory import CommandDirectory
+    from fastworkflow.core.command_routing import RoutingDefinition, RoutingRegistry
 
     CommandContextModel.load(folder)
     RoutingDefinition.build(folder)
@@ -211,7 +211,7 @@ def utterance_command_names(cmd_dir) -> list[str]:
     and the reserved wildcard are not labels, so they are excluded here as well.
     """
     from fastworkflow.model_pipeline_training import _requires_utterances
-    from fastworkflow.nlu_labels import WILDCARD_LABEL, label_of
+    from fastworkflow.intent.nlu_labels import WILDCARD_LABEL, label_of
 
     names = set(cmd_dir.get_execution_commands()) | set(cmd_dir.core_command_names)
     out = []

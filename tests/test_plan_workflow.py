@@ -7,8 +7,8 @@ import os
 import pytest
 
 import fastworkflow
-from fastworkflow.command_directory import CommandDirectory
-from fastworkflow.command_executor import CommandExecutor
+from fastworkflow.core.command_directory import CommandDirectory
+from fastworkflow.engine.command_executor import CommandExecutor
 from fastworkflow.review.review_engine import Change
 from fastworkflow.review.review_proposals import SubTask, SubTaskProposal
 from fastworkflow.train import selective_training

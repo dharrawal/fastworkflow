@@ -406,7 +406,7 @@ class Workflow:
     def is_context(self, context_name: str, model=None) -> bool:
         """Whether *context_name* is a context of this workflow: a folder ``_commands/<context_name>/`` holding a
         command, an entry of its inheritance file, or a context with a registered ``_<context_name>.py``."""
-        from fastworkflow.command_directory import get_cached_command_directory
+        from fastworkflow.core.command_directory import get_cached_command_directory
 
         model = model or fastworkflow.CommandContextModel.load(self._folderpath)
         return (context_name in model._command_contexts
@@ -502,7 +502,7 @@ class Workflow:
 
         # important to clear the pending question (parameter extraction error state, a which-command question): it lives
         # in the turn's waiting record, reached through the port (a context with none holds nothing of its own)
-        from fastworkflow import waiting
+        from fastworkflow.core import waiting
 
         if (port := self._context.get(waiting.PORT_KEY)) is not None:
             port.clear()

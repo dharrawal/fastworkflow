@@ -17,12 +17,12 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow import intent_loop
+from fastworkflow.intent import intent_loop
 from fastworkflow.parameters import parameter_clarification
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import model_of, park
 from fastworkflow.run_fastapi_mcp import checkpoint
 from fastworkflow.session.session_state_store import SCHEMA_VERSION
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 
 @pytest.fixture
@@ -33,7 +33,7 @@ def todo_workflow_path() -> str:
 @pytest.fixture
 def initialized_fastworkflow(tmp_path):
     fastworkflow.init({"FASTWORKFLOW_STATE_ROOT": str(tmp_path / "workflow_contexts")})
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     RoutingRegistry.clear_registry()
     yield tmp_path

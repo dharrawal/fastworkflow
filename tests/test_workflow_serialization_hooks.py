@@ -19,7 +19,7 @@ import pytest
 
 import fastworkflow
 from fastworkflow.session import serialization_hooks
-from fastworkflow.command_routing import RoutingRegistry
+from fastworkflow.core.command_routing import RoutingRegistry
 from fastworkflow.session.serialization_hooks import ProjectionOutcome
 from fastworkflow.session.state_serialization import validate_state
 from fastworkflow.utils.logging import logger

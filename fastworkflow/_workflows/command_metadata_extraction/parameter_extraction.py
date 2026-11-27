@@ -18,7 +18,7 @@ from fastworkflow.observability.decision_signals import (
     slot_binding_source,
 )
 
-from fastworkflow import no_agent_mode, waiting
+from fastworkflow.core import no_agent_mode, waiting
 from fastworkflow.parameters import parameter_clarification
 from fastworkflow.parameters.parameter_clarification import Extraction, ParameterLoop
 from fastworkflow.parameters import ask, fill, pipeline, read

@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow.command_routing import RoutingRegistry
+from fastworkflow.core.command_routing import RoutingRegistry
 from fastworkflow.model_pipeline_training import (
     HOLDOUT_EXPORT_FILENAME,
     RESERVED_CLASS_ARMS,

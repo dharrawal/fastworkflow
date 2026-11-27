@@ -24,7 +24,7 @@ def run_main(args):
 
     import fastworkflow
     from fastworkflow.utils.logging import logger
-    from fastworkflow.turn_progress import ProgressEvent
+    from fastworkflow.core.turn_progress import ProgressEvent
     from fastworkflow.run_cli.turn_wait import WaitOutcome, interrupted_message, timed_out_message, wait_for_turn
 
     # Progress bar helper
@@ -161,7 +161,7 @@ def run_main(args):
     trained, missing_contexts = is_workflow_trained(args.workflow_path)
     # A context with no trained local model may run on the model matcher (JEV_API_KEY):
     # intent_detector.startup_report is the one decision, and it says in one line what the chain is.
-    from fastworkflow import intent_detector
+    from fastworkflow.intent import intent_detector
     engine_problems, engine_notices = intent_detector.startup_report(
         args.workflow_path, missing_contexts, build=True)
     for notice in engine_notices:
@@ -208,8 +208,8 @@ def run_main(args):
         with open(args.context_file_path, 'r') as file:
             context_dict = json.load(file)
 
-    # No agent model (LLM_AGENT unset): deterministic mode, said plainly (fastworkflow.no_agent_mode).
-    from fastworkflow import no_agent_mode
+    # No agent model (LLM_AGENT unset): deterministic mode, said plainly (fastworkflow.core.no_agent_mode).
+    from fastworkflow.core import no_agent_mode
 
     run_as_agent, fallback_banner = no_agent_mode.run_mode(args.assistant)
     # (`load_problems` above ran before `init` loaded the env files, so the startup problem is read here.)

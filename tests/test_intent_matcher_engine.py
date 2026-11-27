@@ -25,14 +25,16 @@ from dspy.utils import DummyLM
 
 import fastworkflow
 from fastworkflow import model_pipeline_training
-from fastworkflow import intent_detector, run_listing, turn_cache, workflow_agent
+from fastworkflow.intent import intent_detector
+from fastworkflow import run_listing, workflow_agent
+from fastworkflow.core import turn_cache
 from fastworkflow.observability import tracing
 from fastworkflow._workflows.command_metadata_extraction import intent_detection
 from fastworkflow._workflows.command_metadata_extraction.intent_detection import (
     CommandNamePrediction, command_identity_uncertainty)
-from fastworkflow.command_executor import CommandExecutor
-from fastworkflow.intent_detector import AMBIGUOUS, MATCH, NOT_MINE, ClassifierEngine, MatcherEngine, Scope
-from fastworkflow.nlu_labels import WILDCARD_LABEL
+from fastworkflow.engine.command_executor import CommandExecutor
+from fastworkflow.intent.intent_detector import AMBIGUOUS, MATCH, NOT_MINE, ClassifierEngine, MatcherEngine, Scope
+from fastworkflow.intent.nlu_labels import WILDCARD_LABEL
 from tests.test_intent_detector import (  # noqa: F401 - shared fixtures and doubles
     LIBRARY, _fake_head, _router, library_copy, on_a_book)
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401 - shared fixture
@@ -268,7 +270,7 @@ class _CreditsExhausted(Exception):
 
 @pytest.fixture
 def fresh_outage_counter():
-    from fastworkflow import remote_outage
+    from fastworkflow.intent import remote_outage
 
     remote_outage.reset()
     yield remote_outage
@@ -850,8 +852,8 @@ def test_the_planning_candidates_are_the_contracts(library_copy):
 # The chain: the trained local model when it is confident, the model matcher otherwise, then the question
 # ---------------------------------------------------------------------------
 
-from fastworkflow.intent_detector import BARE_VALUE, ChainEngine  # noqa: E402
-from fastworkflow.nlu_labels import PARAMETER_VALUE_LABEL  # noqa: E402
+from fastworkflow.intent.intent_detector import BARE_VALUE, ChainEngine  # noqa: E402
+from fastworkflow.intent.nlu_labels import PARAMETER_VALUE_LABEL  # noqa: E402
 
 HEAD_DETAILS = {"confident": True, "confidence": 0.97, "model_tier": "tiny", "top_label": "Book/show_book",
                 "topk_labels": ["Book/show_book"], "topk_scores": [0.97]}

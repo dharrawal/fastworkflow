@@ -36,7 +36,7 @@ class TestGenAIPostProcessorUpdated(unittest.TestCase):
             f.write("""
 import fastworkflow
 from fastworkflow import CommandOutput, CommandResponse
-from fastworkflow.workflow import Workflow
+from fastworkflow.core.workflow import Workflow
 from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Optional
 

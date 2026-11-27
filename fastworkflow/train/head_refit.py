@@ -44,7 +44,7 @@ from typing import Optional
 
 import numpy as np
 
-from fastworkflow import intent_learning as learning
+from fastworkflow.intent import intent_learning as learning
 from fastworkflow.train import artifact_versioning, embedding_head as eh, intent_model_layout as layout
 
 #: The base rows' accuracy may fall by at most this much (a share, 1.5 points) when learned rows are added: they are

@@ -6,7 +6,7 @@ one-liners in SKILL.md "Provenance and maintenance" before trusting them after a
 
 ## 1. Entry: `_execute_message`
 
-`WorkflowExecutionContext._execute_message` (`fastworkflow/workflow_execution_context.py:497-522`):
+`WorkflowExecutionContext._execute_message` (`fastworkflow/engine/workflow_execution_context.py:497-522`):
 
 ```
 if self._app_workflow is None: raise RuntimeError(...)        # :499-502
@@ -43,7 +43,7 @@ Both public entry points share it:
 
 ## 3. Stage 1+2: `invoke_command` → wildcard on the CME workflow
 
-`CommandExecutor.invoke_command` (`fastworkflow/command_executor.py:27-100`):
+`CommandExecutor.invoke_command` (`fastworkflow/engine/command_executor.py:27-100`):
 - empty command → friendly nudge (`:32-39`)
 - `perform_action(chat_session.cme_workflow, Action(command_name="wildcard", command=command))` (`:41-46`)
 - if `command_output.command_handled` → a CME/core command already ran; clear

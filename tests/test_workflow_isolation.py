@@ -17,7 +17,7 @@ from types import SimpleNamespace
 import pytest
 
 import fastworkflow
-from fastworkflow.command_routing import RoutingDefinition
+from fastworkflow.core.command_routing import RoutingDefinition
 from fastworkflow.planning import run_code
 from fastworkflow.utils import python_utils
 

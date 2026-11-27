@@ -60,7 +60,7 @@ def _open_session(folder: str):
     """A real ``Workflow`` on *folder*, started as ``fastworkflow run_cli`` starts one with its startup
     action: the workflow's ``startup_action.json`` when it has one. No env file, no model."""
     import fastworkflow
-    from fastworkflow.command_executor import CommandExecutor
+    from fastworkflow.engine.command_executor import CommandExecutor
 
     if fastworkflow.RoutingRegistry is None:   # init sets the registries; {} is enough: no model is read
         fastworkflow.init({})
@@ -82,7 +82,7 @@ class _Walk:
         from fastworkflow.planning import planning_commands
         from fastworkflow import workflow_agent
         from fastworkflow.planning import planning_phases as sp
-        from fastworkflow.command_routing import RoutingRegistry
+        from fastworkflow.core.command_routing import RoutingRegistry
 
         self.folder = folder
         self.wf = workflow
@@ -118,7 +118,7 @@ class _Walk:
             return ""
 
     def clause(self) -> str:
-        from fastworkflow.context_identity import context_clause_for
+        from fastworkflow.core.context_identity import context_clause_for
 
         try:
             return context_clause_for(self.wf)
@@ -162,7 +162,7 @@ class _Walk:
         """Run one step *text* (``name k=v ...``) as the workflow's own command: ``(CommandOutput, parameters,
         routing name)``. The routing name is read before the run, which may move the workflow."""
         from fastworkflow import Action
-        from fastworkflow.command_executor import CommandExecutor
+        from fastworkflow.engine.command_executor import CommandExecutor
         from fastworkflow import ModuleType
         from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import (
             ParameterExtraction)
@@ -394,7 +394,7 @@ def run_code(workflow_folder: str, command: str, input: Optional[dict] = None,
     """
     folder = os.path.abspath(workflow_folder)
     try:
-        from fastworkflow.command_directory import check_no_planning_commands_folder
+        from fastworkflow.core.command_directory import check_no_planning_commands_folder
 
         check_no_planning_commands_folder(folder)
     except ValueError as error:
@@ -434,7 +434,7 @@ def _planning_run(walk: _Walk, key: str, given: dict) -> CodeRun:
 
 def _execution_run(walk: _Walk, command: str, input: Optional[dict]) -> CodeRun:
     from fastworkflow import Action
-    from fastworkflow.command_executor import CommandExecutor
+    from fastworkflow.engine.command_executor import CommandExecutor
 
     name = _plain(command)
     qualified = walk.qualify(name)

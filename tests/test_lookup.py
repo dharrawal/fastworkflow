@@ -29,10 +29,10 @@ import pytest
 
 import fastworkflow
 from fastworkflow import ModuleType
-from fastworkflow.command_executor import CommandExecutor
+from fastworkflow.engine.command_executor import CommandExecutor
 from fastworkflow.parameters.signatures import InputForParamExtraction
 from fastworkflow.workflow_agent import _explicit_agent_command
-from fastworkflow.workflow import running_command
+from fastworkflow.core.workflow import running_command
 
 # Fixtures and helpers reused from the sibling test modules (not copied).
 from tests.test_global_first_lookup import (  # noqa: F401 - fixtures
@@ -80,7 +80,7 @@ HOURS_CANDIDATES = [
 
 def _decided_by_name(app, phrasing: str) -> bool:
     """True when the intent loop settles *phrasing* by a command name (exact or fuzzy), with no head asked."""
-    from fastworkflow import intent_loop
+    from fastworkflow.intent import intent_loop
 
     return intent_loop.resolve(app, phrasing, core=True).decided_by in (
         intent_loop.BY_EXACT_NAME, intent_loop.BY_FUZZY_NAME)

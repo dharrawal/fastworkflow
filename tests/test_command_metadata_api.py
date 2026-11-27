@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 
 import fastworkflow
-from fastworkflow.command_metadata_api import CommandMetadataAPI
+from fastworkflow.core.command_metadata_api import CommandMetadataAPI
 
 
 def _hello_world_path() -> str:

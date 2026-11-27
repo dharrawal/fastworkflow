@@ -27,7 +27,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, Mapping, Optional
 
-from fastworkflow import no_agent_mode
+from fastworkflow.core import no_agent_mode
 from fastworkflow.parameters import read
 
 #: How a reply reads (``Reading.kind``): the four of ``parameters.read`` and the ones the remote read and the phrases add.
@@ -63,7 +63,7 @@ class Reading:
 def phrase_of(reply: str) -> Optional[str]:
     """``abort`` or ``misunderstood`` when *reply* is the plain utterance of the framework's ``abort`` or
     ``you_misunderstood`` command (the intent loop's one reader, with those two aliases), else None."""
-    from fastworkflow import intent_loop
+    from fastworkflow.intent import intent_loop
 
     stop = intent_loop.read(reply, [], aliases={
         phrase: kind for phrase, kind in intent_loop.core_aliases().items()

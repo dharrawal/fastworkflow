@@ -28,11 +28,11 @@ import pytest
 import litellm
 
 import fastworkflow
-from fastworkflow.command_context_model import CommandContextModel
-from fastworkflow.command_directory import CommandDirectory
-from fastworkflow.command_routing import RoutingDefinition, RoutingRegistry
+from fastworkflow.core.command_context_model import CommandContextModel
+from fastworkflow.core.command_directory import CommandDirectory
+from fastworkflow.core.command_routing import RoutingDefinition, RoutingRegistry
 from fastworkflow.model_pipeline_training import _get_cached_command_utterances
-from fastworkflow.nlu_labels import WILDCARD_LABEL
+from fastworkflow.intent.nlu_labels import WILDCARD_LABEL
 from fastworkflow.train.determinism import (
     ContextTrainingStatus,
     DEFAULT_TRAINING_SEED,

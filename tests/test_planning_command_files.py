@@ -250,7 +250,7 @@ def test_a_planning_command_file_imports_a_helper_of_its_folder_and_of_its_packa
 
 def test_a_workflow_that_still_has_a_skills_folder_fails_to_load(tmp_path):
     # Phase 7: _skills/ is no longer read; the load fails with the retired message, not a silent skip.
-    from fastworkflow.command_directory import CommandDirectory, get_cached_command_directory
+    from fastworkflow.core.command_directory import CommandDirectory, get_cached_command_directory
 
     folder = _write(tmp_path, {"close_out": CLOSE_OUT})
     (tmp_path / "_skills").mkdir()
@@ -614,7 +614,7 @@ def test_warm_planning_commands_never_raises_and_skips_a_workflow_without_planni
 def test_chat_session_startup_warms_the_planning_commands_of_the_workflow_it_binds(workflow_env, monkeypatch):
     """The warm-up gets the bound workflow's own ``folderpath`` string, the skill cache's key."""
     import uuid
-    from fastworkflow.chat_session import ChatSession
+    from fastworkflow.engine.chat_session import ChatSession
     from tests.test_text_planner_and_split import TODO_WORKFLOW
 
     workflow_env()

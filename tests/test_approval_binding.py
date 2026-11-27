@@ -23,12 +23,12 @@ import pytest
 
 import fastworkflow
 from fastworkflow.review import approval_binding as ab
-from fastworkflow.approval_annotations import REQUIRED_ALWAYS, REQUIRED_UNTIL_DELEGATED
+from fastworkflow.core.approval_annotations import REQUIRED_ALWAYS, REQUIRED_UNTIL_DELEGATED
 from fastworkflow.review.approval_binding import Origin, Outcome, Surface
-from fastworkflow.command_executor import CommandExecutor
+from fastworkflow.engine.command_executor import CommandExecutor
 from fastworkflow.examples.library.application.library import Library  # noqa: F401
-from fastworkflow.command_routing import RoutingRegistry
-from fastworkflow.turn import TurnStatus
+from fastworkflow.core.command_routing import RoutingRegistry
+from fastworkflow.core.turn import TurnStatus
 from fastworkflow.workflow_agent import initialize_workflow_tool_agent
 from tests.test_planning_command_phases import RecordingSink
 from tests.test_turn_result_capture import (  # noqa: F401 - shared fixtures and helpers
@@ -148,7 +148,7 @@ def todo(annotated_library, monkeypatch, tmp_path):
     ctx._cme_workflow.context["run_as_agent"] = True
     wf.context["run_as_agent"] = True
     # A book is identified by its uid in the instance label (as a record is), so two books differ.
-    from fastworkflow.context_identity import context_class_for
+    from fastworkflow.core.context_identity import context_class_for
     monkeypatch.setattr(context_class_for(wf, "Book"), "instance_label_attr", "uid", raising=False)
     agent = initialize_workflow_tool_agent(ctx)
     _set_agents(ctx, agent)
@@ -539,7 +539,7 @@ def test_an_unannotated_command_is_never_gated(todo, annotated_library):
 
 
 def test_an_mcp_tool_call_to_an_annotated_command_is_agent_originated_and_asks(todo, annotated_library):
-    from fastworkflow.command_executor import CommandExecutor as CE
+    from fastworkflow.engine.command_executor import CommandExecutor as CE
 
     result = CE.perform_mcp_tool_call(
         todo.wf, fastworkflow.MCPToolCall(name=MANDATORY, arguments={"text": "Ann"}))
@@ -751,7 +751,7 @@ def test_the_approval_payload_offers_always_only_for_a_delegatable_command(todo,
 
 
 def _pending_can_always(todo):
-    from fastworkflow import prompt_payloads
+    from fastworkflow.engine import prompt_payloads
     return prompt_payloads.payload_of(todo.ctx, todo.ctx._waiting)[1]["approval"]["can_always"]
 
 
@@ -833,7 +833,7 @@ def test_the_host_token_appears_in_no_persisted_bytes_on_the_real_store_or_sessi
 def test_a_planning_step_that_calls_an_annotated_command_gates_at_that_step_and_runs_once(todo, annotated_library):
     # note_member (a planning command of the library) runs find_member, open_member, add_note. add_note is
     # annotated mandatory, so the step gates; the reply runs it exactly once, and the phase goes on.
-    from fastworkflow.approval_annotations import command_approval
+    from fastworkflow.core.approval_annotations import command_approval
     folder = str(annotated_library)
     assert command_approval(folder, "Library/note_member") == REQUIRED_ALWAYS    # derived from its steps
     todo.wf.record = todo.library        # a planning command of the root library

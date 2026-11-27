@@ -116,7 +116,7 @@ _skills/ is no longer read; move these files into _commands/ (first make sure an
 ```
 
 The first sentence is the instruction to follow. The message is the constant
-`PLANNING_COMMANDS_FOLDER_RETIRED` in `fastworkflow/command_directory.py`.
+`PLANNING_COMMANDS_FOLDER_RETIRED` in `fastworkflow/core/command_directory.py`.
 The check runs for the workflow and for each base workflow it inherits from.
 
 ## 3. Fix the imports

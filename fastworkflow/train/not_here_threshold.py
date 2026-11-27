@@ -41,7 +41,7 @@ import math
 import sys
 from typing import Any, Iterable, Optional, Sequence
 
-from fastworkflow.nlu_labels import WILDCARD_LABEL, is_non_routable, label_of
+from fastworkflow.intent.nlu_labels import WILDCARD_LABEL, is_non_routable, label_of
 from fastworkflow.train import not_here_step1 as step1
 from fastworkflow.train import score_not_here as scorer
 

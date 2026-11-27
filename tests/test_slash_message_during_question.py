@@ -15,8 +15,8 @@ import pytest
 import fastworkflow
 from fastworkflow.review import approval_binding as ab
 from fastworkflow import workflow_agent
-from fastworkflow.turn import TurnStatus
-from fastworkflow.workflow_execution_context import (
+from fastworkflow.core.turn import TurnStatus
+from fastworkflow.engine.workflow_execution_context import (
     AWAITING_ANSWER_REFUSAL_MESSAGE, NOT_RUN_ARTIFACT, UsePlanError, WorkflowExecutionContext)
 from tests.test_approval_binding import _ask, _finish, annotated_library, todo  # noqa: F401 - fixtures
 from tests.test_no_agent_decisions import Conditional

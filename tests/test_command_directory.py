@@ -1,6 +1,6 @@
 import os
 import pytest
-from fastworkflow.command_directory import CommandDirectory, CommandMetadata
+from fastworkflow.core.command_directory import CommandDirectory, CommandMetadata
 
 @pytest.fixture(scope="module")
 def sample_workflow_path():

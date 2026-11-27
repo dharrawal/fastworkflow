@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient
 import fastworkflow
 from fastworkflow.run_fastapi_mcp import mcp_specific
 from fastworkflow.run_fastapi_mcp.mcp_specific import TURN_RESULT_SCHEMA, TURN_TOOLS, stream_turn, turn_failure
-from fastworkflow.turn import TurnStatus
+from fastworkflow.core.turn import TurnStatus
 from tests.test_approval_endpoint_surfaces import (  # noqa: F401  (fixtures and helpers)
     _configure, _session, app_module, no_live_model)
 from tests.test_fastapi_end_session import FREE_ACTION, _new_channel, client  # noqa: F401

@@ -21,8 +21,8 @@ import pytest
 
 import fastworkflow
 from fastworkflow.observability import tracing
-from fastworkflow.turn import TurnStatus
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.core.turn import TurnStatus
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 from tests import span_tree
 from tests.test_approval_binding import (  # noqa: F401
     _finish, annotated_library, no_live_model, no_model_call_for_parameters, todo)
@@ -141,7 +141,7 @@ def _summarized_by(ctx, monkeypatch, summary: str = "the summary") -> None:
     """The turn's real conversation summary (the fixture stubs it), its model a ``DummyLM``."""
     from dspy.utils import DummyLM
 
-    from fastworkflow import workflow_execution_context
+    from fastworkflow.engine import workflow_execution_context
 
     monkeypatch.setattr(ctx, "_extract_conversation_summary",
                         WorkflowExecutionContext._extract_conversation_summary.__get__(ctx))

@@ -45,7 +45,7 @@ import fastworkflow
 from fastworkflow.session import state_paths
 from fastworkflow.observability import tracing
 from fastworkflow.benchmark import setup
-from fastworkflow.command_executor import CommandExecutor
+from fastworkflow.engine.command_executor import CommandExecutor
 from fastworkflow.evaluation.distillation import DistillationSession, PlanningStep
 from fastworkflow.experiment.runner import ExperimentController
 from fastworkflow.observability import comparison as comparison_module
@@ -62,7 +62,7 @@ from fastworkflow.observability.comparison import (
 from fastworkflow.run_chatbot import selection_api
 from fastworkflow.run_chatbot import server as run_chatbot_server
 from fastworkflow.run_chatbot.server import cost_rollup, execution_ledger
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 # The recorder-side seeding helpers, reused rather than restated (the same
 # import `tests/test_selection_api.py` makes): attempt 2 below is a turn a
@@ -286,7 +286,7 @@ def todo_workflow_path() -> str:
 @pytest.fixture
 def initialized_fastworkflow():
     fastworkflow.init({})
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     RoutingRegistry.clear_registry()
     yield

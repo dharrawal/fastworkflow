@@ -56,7 +56,7 @@ from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 import fastworkflow
 from fastworkflow import model_pipeline_training as heads
-from fastworkflow.nlu_labels import (
+from fastworkflow.intent.nlu_labels import (
     PARAMETER_VALUE_LABEL,
     PARAMETER_VALUE_PLACEHOLDERS,
     WILDCARD_LABEL,

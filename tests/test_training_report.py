@@ -33,7 +33,7 @@ from fastworkflow.model_pipeline_training import (
     TrainingDataError,
     split_training_data,
 )
-from fastworkflow.nlu_labels import PARAMETER_VALUE_LABEL, WILDCARD_LABEL
+from fastworkflow.intent.nlu_labels import PARAMETER_VALUE_LABEL, WILDCARD_LABEL
 from fastworkflow.train import heldout_evaluation
 from fastworkflow.train import training_report as tr
 from fastworkflow.train.determinism import (

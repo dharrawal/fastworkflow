@@ -175,7 +175,7 @@ def _commands_fingerprint(workflow_path: str) -> str:
 
     Imported lazily to avoid a module-import cycle through command_directory.
     """
-    from fastworkflow.command_directory import compute_commands_source_fingerprint
+    from fastworkflow.core.command_directory import compute_commands_source_fingerprint
 
     try:
         return compute_commands_source_fingerprint(workflow_path)

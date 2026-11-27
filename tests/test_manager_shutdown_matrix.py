@@ -220,7 +220,7 @@ def _suspend(runtime: ChannelRuntime) -> None:
     """
     ctx = runtime.execution_context
     state = ctx.serialize_state(channel_id=runtime.channel_id)
-    from fastworkflow import waiting as waiting_module
+    from fastworkflow.core import waiting as waiting_module
 
     asked = waiting_module.Waiting(waiting_module.KIND_AGENT, question="which one?")
     ctx.apply_serialized_state({**state, "waiting": asked.to_state()})

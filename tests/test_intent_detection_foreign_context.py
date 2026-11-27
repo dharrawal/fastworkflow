@@ -32,7 +32,8 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow import intent_loop, model_pipeline_training
+from fastworkflow.intent import intent_loop
+from fastworkflow import model_pipeline_training
 from fastworkflow._workflows.command_metadata_extraction._commands import (
     wildcard as wildcard_module,
 )
@@ -157,7 +158,7 @@ def _labelling_router(label):
 
 def _fake_heads(app_workflow, *contexts):
     """A trained-looking head for each context: the router double answers for it (a scope with no head has no engine)."""
-    from fastworkflow import intent_detector
+    from fastworkflow.intent import intent_detector
 
     for context in contexts:
         folder = intent_detector.head_folder(app_workflow.folderpath, context)
@@ -363,7 +364,7 @@ def test_the_owner_still_resolves_the_name_across_separators(inventory, name, se
     """The other half: the same parse must not break the owning context."""
     text = f"list_permissions{separator}<scope>all</scope>"
     assert _foreign(inventory, "Account", text) == []
-    from fastworkflow import context_navigation
+    from fastworkflow.core import context_navigation
     assert context_navigation.token_names_command(intent_loop.first_word(text), "Account/list_permissions")
 
 
@@ -521,7 +522,7 @@ def mixed_case_folder(todolist_workflows, monkeypatch):
 def test_a_mixed_case_command_resolves_in_its_own_context(mixed_case_folder, utterance):
     """The token is lowercased and the context's own key is not. Before the fix the exact match missed and the guard
     named the current context as the foreign owner, refusing a command that belongs here."""
-    from fastworkflow import context_navigation
+    from fastworkflow.core import context_navigation
 
     assert _foreign(mixed_case_folder, "Child", utterance) == []
     assert context_navigation.token_names_command(
@@ -679,7 +680,7 @@ class TestTheDeclaredEnteringCommandIsRead:
     ):
         app_workflow, cme_workflow = declared_workflows
         monkeypatch.setattr(model_pipeline_training, "CommandRouter", _refusing_router([]))
-        from fastworkflow.context_navigation import entering_commands
+        from fastworkflow.core.context_navigation import entering_commands
 
         assert entering_commands(app_workflow.folderpath, "TodoList") == ["get_todo_list <id>"]
         output = CommandNamePrediction(cme_workflow).predict("get_properties_of_nothing_here_but_mark_completed")
@@ -689,7 +690,7 @@ class TestTheDeclaredEnteringCommandIsRead:
         assert "get_todo_list <id>" in hint
 
     def test_an_undeclared_context_resolves_to_no_entering_command(self, declared_workflows, setup_test_environment):
-        from fastworkflow.context_navigation import entering_commands
+        from fastworkflow.core.context_navigation import entering_commands
 
         app_workflow, _ = declared_workflows
         assert entering_commands(app_workflow.folderpath, "TodoItem") == []

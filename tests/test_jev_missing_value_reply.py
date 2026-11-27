@@ -19,7 +19,8 @@ from dotenv import dotenv_values
 from pydantic import BaseModel, Field
 
 import fastworkflow
-from fastworkflow import intent_loop, waiting
+from fastworkflow.intent import intent_loop
+from fastworkflow.core import waiting
 from fastworkflow.parameters import parameter_clarification
 from fastworkflow import workflow_agent
 from fastworkflow._workflows.command_metadata_extraction import parameter_reply
@@ -433,7 +434,7 @@ from pathlib import Path as _Path
 
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import park
 from fastworkflow.parameters.signatures import INVALID_FLOAT_VALUE
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 _HELLO = str(_Path(__file__).parent.joinpath("hello_world_workflow").resolve())
 _PENDING = "add_two_numbers"
@@ -443,7 +444,7 @@ _PENDING = "add_two_numbers"
 def _assistant_session(tmp_path, monkeypatch):
     """An assistant-mode session left waiting for add_two_numbers' second number."""
     fastworkflow.init({"FASTWORKFLOW_STATE_ROOT": str(tmp_path / "workflow_contexts")})
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     RoutingRegistry.clear_registry()
     ctx = WorkflowExecutionContext(run_as_agent=False, session_key="jd9o6-e2e")

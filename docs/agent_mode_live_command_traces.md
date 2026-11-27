@@ -50,7 +50,7 @@ We will introduce a lightweight event stream for trace messages, emitted synchro
 
 ### 5. Components and Integration Points
 
-- `fastworkflow/chat_session.py` ([chat_session.py](mdc:fastworkflow/chat_session.py))
+- `fastworkflow/engine/chat_session.py` ([chat_session.py](mdc:fastworkflow/engine/chat_session.py))
   - Add a new `Queue` attribute (e.g., `_command_trace_queue`) and an accessor property `command_trace_queue`.
   - The queue is created per `ChatSession` and cleared when the session stops.
 
@@ -60,7 +60,7 @@ We will introduce a lightweight event stream for trace messages, emitted synchro
     - After receiving `command_output`, emit a “Workflow -> Agent” event with `command_name`, `parameters` (best-effort serialized), `response text`, and `success`.
   - Do not change existing file logging behavior; this function should only add streaming events to the queue.
 
-- `fastworkflow/command_executor.py` ([command_executor.py](mdc:fastworkflow/command_executor.py))
+- `fastworkflow/engine/command_executor.py` ([command_executor.py](mdc:fastworkflow/engine/command_executor.py))
   - No required functional change for streaming. Continue writing `action.jsonl` records (already implemented in two code paths: early/handled and resolved execution).
   - Optional: expose utility helpers to normalize/serialize parameters for consistent rendering, but this can also live inside `workflow_agent.py` to keep scope tight.
 
@@ -203,7 +203,7 @@ CLI wiring suggestion in [__main__.py](mdc:fastworkflow/run_cli/__main__.py):
 
 ### 12. Implementation Plan (Edits Summary)
 
-1) `fastworkflow/chat_session.py`
+1) `fastworkflow/engine/chat_session.py`
    - Add `self._command_trace_queue = Queue()` in `__init__`.
    - Add property:
      ```python

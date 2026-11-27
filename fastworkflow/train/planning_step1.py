@@ -42,7 +42,7 @@ import sys
 import time
 from typing import Any, Optional, Sequence
 
-from fastworkflow.nlu_labels import label_of
+from fastworkflow.intent.nlu_labels import label_of
 from fastworkflow.train import planning_test_set as pts
 from fastworkflow.train import score_planning_match as spm
 from fastworkflow.train.not_here_pilot import PilotFailure

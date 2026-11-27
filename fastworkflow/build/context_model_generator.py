@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Dict, Iterable
 
 from fastworkflow.build.class_analysis_structures import ClassInfo
-from fastworkflow.command_context_model import REMOVED_INHERITANCE_FILE, _declarations_in_file
+from fastworkflow.core.command_context_model import REMOVED_INHERITANCE_FILE, _declarations_in_file
 from fastworkflow.migrate_context_declarations import inherits_line, needs_parents, write_inherits
 
 

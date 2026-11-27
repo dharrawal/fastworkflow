@@ -15,13 +15,13 @@ from types import SimpleNamespace
 import pytest
 
 import fastworkflow
-from fastworkflow import intent_loop
+from fastworkflow.intent import intent_loop
 from fastworkflow.planning import planning_commands as pc
 from fastworkflow.parameters import parameter_clarification as loops
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import (
     extraction_of, model_of, park, round_ordinal)
 from fastworkflow.parameters.signatures import INVALID_FLOAT_VALUE, NOT_FOUND
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 HELLO = str(Path(__file__).parent.joinpath("hello_world_workflow").resolve())
 
@@ -106,7 +106,7 @@ def test_the_open_fields_come_back_as_sentinels_and_the_given_ones_as_values():
 
 def test_a_reply_through_a_real_session_completes_the_parked_command_and_ends_the_loop(tmp_path):
     fastworkflow.init({"FASTWORKFLOW_STATE_ROOT": str(tmp_path / "workflow_contexts")})
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     RoutingRegistry.clear_registry()
     ctx = WorkflowExecutionContext(run_as_agent=False, session_key="o1lg-s7")

@@ -39,7 +39,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Iterator, Literal, Optional, Protocol, Sequence, runtime_checkable
 
 import fastworkflow
-from fastworkflow.nlu_labels import PARAMETER_VALUE_LABEL, WILDCARD_LABEL, is_escalation, label_of
+from fastworkflow.intent.nlu_labels import PARAMETER_VALUE_LABEL, WILDCARD_LABEL, is_escalation, label_of
 
 
 # ---------------------------------------------------------------- the scope decision
@@ -645,7 +645,8 @@ def _ask_matcher(utterance: str, groups: Sequence[tuple[str, Sequence[Candidate]
     """One model call: which of the commands of *groups* does *utterance* ask for. Returns
     ``{"scores": {option: probability}, "model", "latency_ms", "calls"}``, plus ``"error"`` when the call
     failed (the scores are then empty). Never raises."""
-    from fastworkflow import remote_outage, workflow_agent
+    from fastworkflow.intent import remote_outage
+    from fastworkflow import workflow_agent
     from fastworkflow.utils.logging import logger
 
     result: dict = {"scores": {}, "model": None, "latency_ms": 0.0, "calls": 0}
@@ -760,7 +761,7 @@ class MatcherEngine:
 
     def distribution(self, utterance: str) -> dict:
         """The memoised model answer for *utterance* over this engine's scope path."""
-        from fastworkflow import turn_cache
+        from fastworkflow.core import turn_cache
 
         key = ("matcher_engine", self.workflow_folderpath, self.scope_path, utterance, tuple(sorted(self.exclude)))
 
@@ -917,7 +918,7 @@ def startup_report(
         return problems, []
     notices = [chain_line(untrained)]
     try:
-        from fastworkflow import intent_learning
+        from fastworkflow.intent import intent_learning
 
         if line := intent_learning.threshold_line(workflow_folderpath):
             notices.append(line)
@@ -991,7 +992,7 @@ def enclosing_scopes(workflow, record: Optional[object]) -> Iterator[Scope]:
     Lazy on purpose: ``workflow.get_parent`` is asked for the next record only when the walk needs
     it. A record of None is the global scope and has nothing above it.
     """
-    from fastworkflow.context_navigation import live_chain
+    from fastworkflow.core.context_navigation import live_chain
 
     chain = live_chain(workflow, record)
     next(chain, None)

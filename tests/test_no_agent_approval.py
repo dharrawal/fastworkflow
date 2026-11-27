@@ -13,7 +13,7 @@ import pytest
 from fastworkflow.review import approval_binding as ab
 from fastworkflow.review.approval_binding import Surface
 from fastworkflow.planning import run, when
-from fastworkflow.turn import TurnStatus
+from fastworkflow.core.turn import TurnStatus
 from tests.test_approval_binding import (  # noqa: F401 - fixtures and helpers
     _added, annotated_library, no_live_model, no_model_call_for_parameters, todo)
 from tests.test_no_agent_mode import _no_agent, _plan  # noqa: F401 - the autouse no-agent fixture and the planner seam

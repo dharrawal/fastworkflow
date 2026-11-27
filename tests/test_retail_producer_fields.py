@@ -19,7 +19,7 @@ import fastworkflow
 from fastworkflow import ModuleType
 from fastworkflow.planning import command_preview
 from fastworkflow.planning import planning_commands as pc
-from fastworkflow.command_executor import frame_command_result, paging_line
+from fastworkflow.engine.command_executor import frame_command_result, paging_line
 from fastworkflow.observation_offloading.facts import output_page
 from fastworkflow.planning.planning_phases import _fitting_uid_column
 from tests.test_field_sources import RETAIL, ROOT

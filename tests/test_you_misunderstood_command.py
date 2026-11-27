@@ -2,7 +2,7 @@ import os
 from uuid import uuid4
 
 import fastworkflow
-from fastworkflow import intent_loop
+from fastworkflow.intent import intent_loop
 
 from fastworkflow._workflows.command_metadata_extraction._commands.ErrorCorrection.abort import (
     ResponseGenerator as AbortResponseGenerator,

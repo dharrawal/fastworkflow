@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from fastworkflow.command_routing import RoutingDefinition, RoutingRegistry
-from fastworkflow.command_directory import CommandDirectory
-from fastworkflow.command_context_model import CommandContextModel
+from fastworkflow.core.command_routing import RoutingDefinition, RoutingRegistry
+from fastworkflow.core.command_directory import CommandDirectory
+from fastworkflow.core.command_context_model import CommandContextModel
 
 
 @pytest.fixture

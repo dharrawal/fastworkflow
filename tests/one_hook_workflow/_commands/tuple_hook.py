@@ -1,7 +1,7 @@
 """An old-form hook: it returns a tuple, which is a call error now."""
 
 import fastworkflow
-from fastworkflow.workflow import Workflow
+from fastworkflow.core.workflow import Workflow
 from pydantic import BaseModel, Field, model_validator
 
 

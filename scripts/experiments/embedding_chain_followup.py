@@ -257,7 +257,7 @@ def _chain(args) -> int:
     import fastworkflow
 
     fastworkflow.init(env_vars=env_vars)
-    from fastworkflow import intent_detector as idt
+    from fastworkflow.intent import intent_detector as idt
     from score_matcher_engine import _copy_without_artifacts
 
     heads = json.load(open(args.heads, encoding="utf-8"))

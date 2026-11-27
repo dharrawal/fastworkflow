@@ -20,7 +20,7 @@ import pytest
 import fastworkflow
 from fastworkflow.review import review_engine, review_proposals
 from fastworkflow.review.review_engine import CONFIRMED, REVISED
-from fastworkflow.turn import TurnStatus
+from fastworkflow.core.turn import TurnStatus
 from fastworkflow.planning.typed_phase_facts import _command_qname_from_class
 from fastworkflow.utils.python_utils import get_module
 from fastworkflow.review.commands.review_proposal import Signature as ReviewProposal

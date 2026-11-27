@@ -34,7 +34,7 @@ import Levenshtein
 from pydantic import BaseModel
 
 import fastworkflow
-from fastworkflow.command_metadata_api import CommandMetadataAPI, _approval_marker
+from fastworkflow.core.command_metadata_api import CommandMetadataAPI, _approval_marker
 
 #: The CME command whose ``plain_utterances`` define a capability question.
 WHAT_CAN_I_DO = "IntentDetection/what_can_i_do"
@@ -278,7 +278,7 @@ class CapabilityListing(BaseModel):
 def what_can_i_do_data(workflow, for_agents: bool) -> CapabilityListing:
     """The listing of the CME command ``what_can_i_do`` run on *workflow* (the CME workflow), from the metadata its
     text is rendered from (``CommandMetadataAPI.get_enhanced_command_info``, the same sort and filter)."""
-    from fastworkflow.command_context_model import get_workflow_info
+    from fastworkflow.core.command_context_model import get_workflow_info
 
     app_workflow = workflow.context["app_workflow"]
     active = app_workflow._current_command_context_name

@@ -40,7 +40,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional, Sequence
 
-from fastworkflow import no_agent_mode
+from fastworkflow.core import no_agent_mode
 
 HUMAN = "human"
 AGENT = "agent"

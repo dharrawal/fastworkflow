@@ -12,9 +12,9 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow import context_navigation
-from fastworkflow.command_executor import CommandNotFoundError
-from fastworkflow.context_navigation import (
+from fastworkflow.core import context_navigation
+from fastworkflow.engine.command_executor import CommandNotFoundError
+from fastworkflow.core.context_navigation import (
     DescendEdge,
     live_context_chain,
     plan_navigation,

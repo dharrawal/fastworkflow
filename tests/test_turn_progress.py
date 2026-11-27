@@ -12,11 +12,11 @@ import threading
 
 import pytest
 
-from fastworkflow import turn_progress
+from fastworkflow.core import turn_progress
 from fastworkflow.run_fastapi_mcp.utils import (
     _deliver_trace_or_progress, collect_trace_events, run_process_message_with_trace_stream)
-from fastworkflow.turn import TurnStatus
-from fastworkflow.turn_progress import ProgressEvent
+from fastworkflow.core.turn import TurnStatus
+from fastworkflow.core.turn_progress import ProgressEvent
 from tests.test_approval_binding import (  # noqa: F401 - the real agent on the annotated library copy, and the guards
     annotated_library, no_live_model, no_model_call_for_parameters, todo)
 from tests.test_round1_gate import EMMA, JOKE, _split_into, gated, remote_decides_emma_and_joke  # noqa: F401

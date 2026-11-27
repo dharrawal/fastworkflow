@@ -100,7 +100,7 @@ class MessageQueue(Queue):
         self.question_pending = False
 
     def get(self, block: bool = True, timeout: float | None = None) -> Any:
-        from fastworkflow.workflow_execution_context import CommandCancelledError
+        from fastworkflow.engine.workflow_execution_context import CommandCancelledError
 
         if self._gate.muted:
             raise CommandCancelledError("the turn was interrupted, so its question was not asked")

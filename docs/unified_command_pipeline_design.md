@@ -24,7 +24,7 @@ five-context workflow stores 1.4 GB of models per version.
 
 ## 2. The detector contract
 
-One module, `fastworkflow/intent_detector.py`. It owns three things and nothing else.
+One module, `fastworkflow/intent/intent_detector.py`. It owns three things and nothing else.
 
 ### 2.1 The scope decision
 
@@ -415,7 +415,7 @@ No full suite run at any point: the files a step touches and the regression set 
   `read_reply`'s `name: value` lines; `abort`, `you misunderstood` and the Jev read of the reply act before any merge;
   `NLU_Pipeline_Stage` stayed as a marker until S10 (see the S10 bullet). The intent half of S7
   is the next bullet.
-* **S7, the intent half: ONE intent loop (bd `fix-o1lg` S7, done).** `fastworkflow/intent_loop.py` holds the whole-walk decision
+* **S7, the intent half: ONE intent loop (bd `fix-o1lg` S7, done).** `fastworkflow/intent/intent_loop.py` holds the whole-walk decision
   and the reader of a reply to "which of these is meant?" for both paths, replacing the CME's per-scope step
   (`CommandNamePrediction._predict_impl` driven by `ScopeWalk` from `wildcard.py`, with its stage-dependent candidate sets
   and the suggested-commands store in `___convo_info/cache.sqlite3`) and its own reply matching.

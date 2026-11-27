@@ -17,8 +17,9 @@ import uuid
 import pytest
 
 import fastworkflow
-from fastworkflow import context_navigation, intent_detector
-from fastworkflow.command_executor import CommandExecutor
+from fastworkflow.core import context_navigation
+from fastworkflow.intent import intent_detector
+from fastworkflow.engine.command_executor import CommandExecutor
 from fastworkflow.planning import run_code
 from fastworkflow.workflow_agent import planning_scopes
 
@@ -258,7 +259,7 @@ def test_a_context_class_with_no_get_parent_is_one_error_naming_the_context(libr
 _MOVE_THEN = '''"""{name}: open b1, then {ending}."""
 import fastworkflow
 from fastworkflow import descends_to
-from fastworkflow.workflow_execution_context import CommandCancelledError
+from fastworkflow.engine.workflow_execution_context import CommandCancelledError
 
 
 class Signature:

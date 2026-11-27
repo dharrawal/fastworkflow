@@ -2,7 +2,7 @@
 
 import fastworkflow
 from fastworkflow import CommandResponse
-from fastworkflow.workflow import Workflow
+from fastworkflow.core.workflow import Workflow
 from pydantic import BaseModel, Field
 
 

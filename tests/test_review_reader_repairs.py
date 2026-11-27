@@ -139,7 +139,7 @@ def test_a_reply_that_does_not_open_with_an_accept_and_reads_as_no_edit_asks_aga
 
 
 def test_a_rider_accept_on_a_turn_that_changes_data_still_needs_the_explicit_yes(workflow, monkeypatch):
-    monkeypatch.setattr("fastworkflow.command_writes.write_commands", lambda path: frozenset({"linked_records"}))
+    monkeypatch.setattr("fastworkflow.core.command_writes.write_commands", lambda path: frozenset({"linked_records"}))
     host, store, record = _review(workflow, _step(name="Dune", kind="book"), reader=_Reader([]))
     review = reply_to_proposal(host, store, record, "yes, but only list them, do not change anything")
     assert not review.done and record.state == re_.AWAITING
@@ -180,7 +180,7 @@ def test_on_the_plan_path_a_rider_on_a_writing_turn_asks_for_the_yes(gated, monk
     planner(gated, {"edits": []})
     record = _open_review_two_step(gated, monkeypatch)
     names = {item.means.name for item in proposal_of(record).items if item.means.name}
-    monkeypatch.setattr("fastworkflow.command_writes.write_commands", lambda path: frozenset(names))
+    monkeypatch.setattr("fastworkflow.core.command_writes.write_commands", lambda path: frozenset(names))
     review = reply_to_proposal(gated.ctx, gated.store, record, "Yes, but also list which findings are driving her risk")
     assert not review.done and record.state != CONFIRMED
     assert re_.CHANGES_DATA_SENTENCE in review.text

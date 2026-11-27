@@ -20,7 +20,7 @@ from fastworkflow import workflow_agent
 from fastworkflow.observability import tracing
 from fastworkflow.planning import ANSWER_BY_MODEL, phase, run, when
 from fastworkflow.planning.planning_commands import PlanningCommandFormatError
-from fastworkflow.turn import TurnStatus
+from fastworkflow.core.turn import TurnStatus
 from tests.test_turn_result_capture import no_review_gate  # noqa: F401 - the review gate is off for these turns
 from tests.test_step_helpers import FoundBooks, OpenedBook, _build_planning_command, library_env  # noqa: F401
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401 - shared fixture

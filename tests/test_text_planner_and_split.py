@@ -10,10 +10,10 @@ from dspy.utils import DummyLM
 
 import fastworkflow
 from fastworkflow.observability import tracing
-from fastworkflow.command_routing import RoutingRegistry
+from fastworkflow.core.command_routing import RoutingRegistry
 from fastworkflow.workflow_agent import (
     build_query_with_next_steps, initialize_workflow_tool_agent, run_progress_check)
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 from tests.test_approval_binding import annotated_library, todo  # noqa: F401 - fixtures of ``gated``
 from tests.test_round1_gate import gated  # noqa: F401
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401
@@ -171,7 +171,7 @@ def test_a_zero_argument_tool_ignores_a_stray_argument(workflow_env, monkeypatch
 
 def _reentry_session(monkeypatch, workflow_env):
     import fastworkflow.workflow_agent as workflow_agent
-    from fastworkflow.command_executor import AlreadyInContextError
+    from fastworkflow.engine.command_executor import AlreadyInContextError
 
     workflow_env()
     ctx, wf = _session(RecordingTraceSink())
@@ -1025,7 +1025,8 @@ def test_a_plan_template_is_the_matched_planning_command_steps_in_a_fixed_format
 def test_match_planning_command_only_returns_a_confident_planning_command_pick(gated, monkeypatch):
     """(was ``match_planning_command``; the pick is the intent loop's: the remote model's answer decides at its accept
     bar, "none" and a doubtful score are no plan, and a failed call leaves the local model's answer.)"""
-    from fastworkflow import turn_cache, workflow_agent
+    from fastworkflow.core import turn_cache
+    from fastworkflow import workflow_agent
     from tests.conftest import no_local_model, script_matcher
 
     no_local_model(monkeypatch)
@@ -1042,7 +1043,8 @@ def test_match_planning_command_only_returns_a_confident_planning_command_pick(g
 
 @pytest.mark.usefixtures("no_planner_key")
 def test_no_jev_key_means_no_matcher_and_no_template(gated, monkeypatch):
-    from fastworkflow import turn_cache, workflow_agent
+    from fastworkflow.core import turn_cache
+    from fastworkflow import workflow_agent
     from tests.conftest import no_local_model
 
     no_local_model(monkeypatch)

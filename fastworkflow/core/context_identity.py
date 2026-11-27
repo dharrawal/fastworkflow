@@ -54,7 +54,7 @@ def context_class_for(workflow: Any, context_name: str) -> Any:
     """
     try:
         import fastworkflow
-        from fastworkflow.command_context_model import CommandContextModel
+        from fastworkflow.core.command_context_model import CommandContextModel
 
         model = CommandContextModel.load(workflow.folderpath)
         return model.get_context_class(

@@ -11,7 +11,7 @@ are all still used. In this mode:
   would need a model, it ends as a COMPLETED turn that carries a stop (``fw_not_run``), and the wording of the final
   answer is left to the client;
 - an ad hoc part (no planning command matched, the means ``from_scratch``) is not planned here. A turn somebody can
-  answer asks which planning command is meant (``question_kind`` "plan_choice", ``fastworkflow/intent_clarification.py``)
+  answer asks which planning command is meant (``question_kind`` "plan_choice", ``fastworkflow/intent/intent_clarification.py``)
   and the reply resumes that part bound to the picked plan; a turn nobody can answer, and a reply that picks none,
   ends the part as not run: it comes back as the same stop with a suggested plan.
 

@@ -15,7 +15,7 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from fastworkflow.command_context_model import REMOVED_INHERITANCE_FILE, context_folders
+from fastworkflow.core.command_context_model import REMOVED_INHERITANCE_FILE, context_folders
 
 
 @dataclass

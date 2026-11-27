@@ -1,7 +1,7 @@
 import os
 import pytest
 import fastworkflow
-from fastworkflow.command_directory import CommandDirectory, UtteranceMetadata
+from fastworkflow.core.command_directory import CommandDirectory, UtteranceMetadata
 
 
 @pytest.fixture(scope="module")

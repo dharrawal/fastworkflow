@@ -11,8 +11,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from fastworkflow import no_agent_mode
-from fastworkflow import waiting as waiting_module
+from fastworkflow.core import no_agent_mode
+from fastworkflow.core import waiting as waiting_module
 
 
 def _json_safe(value):
@@ -20,7 +20,7 @@ def _json_safe(value):
 
 
 def _approval(ctx, held) -> dict[str, Any]:
-    from fastworkflow import approval_annotations
+    from fastworkflow.core import approval_annotations
     from fastworkflow.review import approval_grants, review_engine
 
     store = review_engine.store_for(ctx._app_workflow)

@@ -51,7 +51,7 @@ from typing import ClassVar, Mapping, Optional, Sequence
 import numpy as np
 
 from fastworkflow import model_pipeline_training as heads
-from fastworkflow.nlu_labels import PARAMETER_VALUE_LABEL, WILDCARD_LABEL
+from fastworkflow.intent.nlu_labels import PARAMETER_VALUE_LABEL, WILDCARD_LABEL
 from fastworkflow.train import heldout_evaluation, intent_model_layout, workflow_model
 from fastworkflow.train.intent_model_layout import HEAD_FILENAME, SCOPES_FILENAME
 from fastworkflow.utils.logging import logger

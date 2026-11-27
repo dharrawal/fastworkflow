@@ -35,7 +35,7 @@ from fastworkflow.run_fastapi_mcp.turns import (
 )
 from fastworkflow.run_fastapi_mcp.utils import persist_pending_after_turn
 
-# Keys of the public TurnOutput projection (fastworkflow/turn.py). ``success`` is
+# Keys of the public TurnOutput projection (fastworkflow/core/turn.py). ``success`` is
 # a computed field, so it is part of the serialized shape, not something the
 # server adds on the way out.
 TURN_OUTPUT_KEYS = frozenset(

@@ -19,10 +19,10 @@ from fastworkflow.observability import tracing
 from fastworkflow._workflows.command_metadata_extraction.intent_detection import (
     ESCALATION_OUTCOMES,
 )
-from fastworkflow.command_executor import CommandExecutor
+from fastworkflow.engine.command_executor import CommandExecutor
 from tests.test_nlu_span_emission import CLASSIFIER_REQUEST
 from fastworkflow.observability.decision_signals import DecisionUncertainty
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 HELLO_WORLD = str(
     Path(__file__).parent.parent / "fastworkflow" / "examples" / "hello_world"
@@ -33,7 +33,7 @@ HELLO_WORLD = str(
 def initialized_fastworkflow():
     env = dotenv_values("fastworkflow/examples/fastworkflow.env")
     fastworkflow.init(dict(env))
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
 
     RoutingRegistry.clear_registry()
     yield

@@ -18,10 +18,10 @@ from dataclasses import dataclass
 from typing import Iterable, Iterator
 
 import fastworkflow
-from fastworkflow.command_context_model import CommandContextModel
-from fastworkflow.command_declarations import declared_descend
-from fastworkflow.command_routing import RoutingRegistry
-from fastworkflow.entry_declarations import declared_occupiable
+from fastworkflow.core.command_context_model import CommandContextModel
+from fastworkflow.core.command_declarations import declared_descend
+from fastworkflow.core.command_routing import RoutingRegistry
+from fastworkflow.core.entry_declarations import declared_occupiable
 
 logger = logging.getLogger(__name__)
 
@@ -474,7 +474,7 @@ def render_already_in_context(token: str, current: str, workflow) -> str:
     same context again, over and over. Say it is already there, and what it can
     run there instead.
     """
-    from fastworkflow.context_identity import context_clause_for
+    from fastworkflow.core.context_identity import context_clause_for
 
     label = display_context_name(current)
     instance = context_clause_for(workflow).partition(" ")[2]

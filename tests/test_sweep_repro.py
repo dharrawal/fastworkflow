@@ -12,11 +12,11 @@ from typing import Optional
 import pytest
 from pydantic import BaseModel, Field
 
-from fastworkflow import intent_loop
-from fastworkflow.command_executor import CommandExecutor
+from fastworkflow.intent import intent_loop
+from fastworkflow.engine.command_executor import CommandExecutor
 from fastworkflow.parameters import check
 from fastworkflow.review.review_proposals import MEANS_FROM_SCRATCH
-from fastworkflow.turn import TurnStatus
+from fastworkflow.core.turn import TurnStatus
 from tests.conftest import script_matcher
 from tests.test_agent_command_not_text import ctx, todo_workflow_path  # noqa: F401 - an agent-mode context over the todo workflow
 from tests.test_parameter_form_reply_contract import PARTIAL, session  # noqa: F401 - the CME on plain_required_workflow

@@ -212,7 +212,7 @@ def persist_train_run_metrics(
 
         workflow_fingerprint: Optional[str] = None
         try:
-            from fastworkflow.command_directory import (
+            from fastworkflow.core.command_directory import (
                 compute_commands_source_fingerprint,
             )
 

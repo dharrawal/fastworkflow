@@ -24,7 +24,7 @@ from fastworkflow.planning.planning_commands import planning_command
 from fastworkflow.review.review_engine import AWAITING, CONFIRMED, DECLINED, EXPIRED, PROPOSAL_TTL_SECONDS, proposal_of
 from fastworkflow.review.review_proposals import SubTaskProposal
 from fastworkflow.run_listing import check_planned_arguments
-from fastworkflow.turn import TurnStatus
+from fastworkflow.core.turn import TurnStatus
 from tests.test_approval_binding import (  # noqa: F401 - the real agent on the annotated library copy, and the guards
     _finish, annotated_library, no_live_model, no_model_call_for_parameters, todo)
 from tests.conftest import script_matcher

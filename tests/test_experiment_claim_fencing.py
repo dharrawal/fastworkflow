@@ -23,13 +23,13 @@ from fastworkflow.session.checkpoint_store import (
     ChannelCheckpointStore,
     CheckpointIdentity,
 )
-from fastworkflow.command_executor import CommandExecutor
+from fastworkflow.engine.command_executor import CommandExecutor
 from fastworkflow.experiment.runner import ExperimentController
 from fastworkflow.run_fastapi_mcp import checkpoint
 from fastworkflow.run_fastapi_mcp.utils import refuse_registered_token_reissue
 from fastworkflow.session.session_state_store import SCHEMA_VERSION as PENDING_SCHEMA_VERSION
-from fastworkflow.turn import TurnOutput, TurnResult, TurnStatus
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.core.turn import TurnOutput, TurnResult, TurnStatus
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 
 @pytest.fixture

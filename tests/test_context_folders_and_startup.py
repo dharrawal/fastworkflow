@@ -20,9 +20,11 @@ from dotenv import dotenv_values
 
 import fastworkflow
 from fastworkflow.planning import command_preview
-from fastworkflow import context_navigation, intent_detector, workflow_agent
+from fastworkflow.core import context_navigation
+from fastworkflow.intent import intent_detector
+from fastworkflow import workflow_agent
 from fastworkflow.planning import planning_commands as pc
-from fastworkflow.command_routing import RoutingRegistry
+from fastworkflow.core.command_routing import RoutingRegistry
 from tests.test_field_sources import ROOT, _build_workflow
 from tests.test_one_rule_for_author_mistakes import _exec
 
@@ -264,7 +266,8 @@ def _on_the_root(folder: str, name: str):
 
 @pytest.mark.usefixtures("no_planner_key")
 def test_a_command_with_no_signature_is_reached_by_no_name_and_no_words(tmp_path):
-    from fastworkflow import intent_loop, run_listing
+    from fastworkflow.intent import intent_loop
+    from fastworkflow import run_listing
     from fastworkflow.review import review_plan_switch
 
     folder = _build_workflow(tmp_path, "wf_startup_name")
@@ -344,7 +347,7 @@ def test_a_failing_field_validator_refuses_its_field_on_both_kinds_of_command(tm
 
 
 def test_a_refusal_from_a_command_body_names_its_field_on_the_failed_answer():
-    from fastworkflow.command_executor import call_response_generator
+    from fastworkflow.engine.command_executor import call_response_generator
     from fastworkflow.planning.planning_phases import run_call_result
 
     class ResponseGenerator:

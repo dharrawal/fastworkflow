@@ -18,7 +18,7 @@ from fastworkflow.workflow_agent import (
     _post_ask_user_response,
     classify_user_reply,
 )
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 from tests.test_jev_field_given import jev_env  # noqa: F401  (fixture: real Jev, skipped without a key)
 
 

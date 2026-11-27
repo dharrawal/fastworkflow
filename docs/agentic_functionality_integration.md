@@ -139,7 +139,7 @@ This enhances usability by enabling natural language interactions that autonomou
 - Included in dynamic description with refined details.
 
 ## 4. Implementation Details
-- **ChatSession Changes** (`fastworkflow/chat_session.py`):
+- **ChatSession Changes** (`fastworkflow/engine/chat_session.py`):
   - Add `run_as` param; mode-specific loops in `start()`.
 - **Agent Module** (`fastworkflow/workflow_agent.py`):
   - Similar to run_agent/agent_module.py, but integrated.

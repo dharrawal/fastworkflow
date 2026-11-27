@@ -1,5 +1,5 @@
 import fastworkflow
-from fastworkflow.workflow import Workflow
+from fastworkflow.core.workflow import Workflow
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
 from pydantic import BaseModel, ConfigDict, Field
 

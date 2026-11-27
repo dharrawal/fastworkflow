@@ -25,8 +25,9 @@ import dataclasses
 from dataclasses import dataclass, field, fields
 from typing import Any, Iterable, Optional
 
-from fastworkflow import intent_loop, turn_cache, waiting
-from fastworkflow.intent_loop import (  # noqa: F401 - the names this module's callers read from here
+from fastworkflow.intent import intent_loop
+from fastworkflow.core import turn_cache, waiting
+from fastworkflow.intent.intent_loop import (  # noqa: F401 - the names this module's callers read from here
     AMBIGUOUS, BY_CLASSIFIER, BY_EXACT_NAME, BY_FUZZY_NAME, BY_MATCHER, BY_NOTHING, BY_PINNED, BY_QUESTION,
     FAST_PATH_DECIDERS, KIND_EXECUTION, KIND_PLANNING, MATCH, MAX_ALTERNATIVES, NONE, Ranked)
 
@@ -229,7 +230,7 @@ def _intent_question(resolution: PlanResolution, plan, turn: Turn) -> Optional[s
     An ambiguity is asked in both modes, its candidates (execution and planning commands) as the choices. A part
     nothing serves is asked about only with no agent model, the planning commands available here as the choices
     (``no_agent_mode.available_plans``, the closest first); with an agent model the agent plans it."""
-    from fastworkflow import no_agent_mode
+    from fastworkflow.core import no_agent_mode
 
     part = resolution.parts[resolution.index]
     item = plan.items[resolution.index]

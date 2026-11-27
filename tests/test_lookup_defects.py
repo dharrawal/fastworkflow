@@ -24,9 +24,9 @@ import fastworkflow
 from fastworkflow import model_pipeline_training
 from fastworkflow._workflows.command_metadata_extraction import intent_detection
 from fastworkflow._workflows.command_metadata_extraction._commands import wildcard
-from fastworkflow.command_executor import CommandExecutor
-from fastworkflow.command_metadata_api import CommandMetadataAPI
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.command_executor import CommandExecutor
+from fastworkflow.core.command_metadata_api import CommandMetadataAPI
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 from tests.todo_list_workflow.application.todo_item import TodoItem
 from tests.todo_list_workflow.application.todo_list import TodoList
 from tests.todo_list_workflow.application.todo_manager import TodoListManager
@@ -65,7 +65,7 @@ def todo_chain(tmp_path):
 
 def _fake_heads(app, *contexts: str) -> None:
     """A trained-looking head for each context: the router double answers for it (a scope with no head has no engine)."""
-    from fastworkflow import intent_detector
+    from fastworkflow.intent import intent_detector
 
     for context in contexts:
         folder = intent_detector.head_folder(app.folderpath, context)

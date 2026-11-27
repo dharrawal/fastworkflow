@@ -198,7 +198,7 @@ def calibrated_commit_threshold(workflow_folderpath: str) -> Optional[float]:
     """THE place a commit threshold calibrated on recorded real requests is read from (fix-o5wi.6): the value
     `fastworkflow learn` stored for the workflow's current head lineage (`intent_learning`), or None. It can only be
     lower than the default (the evidence is censored: see `intent_learning.calibrate`)."""
-    from fastworkflow import intent_learning
+    from fastworkflow.intent import intent_learning
 
     return intent_learning.calibrated_threshold(workflow_folderpath)
 
@@ -221,7 +221,7 @@ def threshold_in_force(model_dir: str, trained: float) -> tuple[float, str]:
     ``INTENT_COMMIT_THRESHOLD`` is not set: an explicit setting always wins. The reason is ``setting``, ``calibrated``
     or ``trained``."""
     import fastworkflow
-    from fastworkflow import intent_learning
+    from fastworkflow.intent import intent_learning
 
     if str(fastworkflow.get_env_var(COMMIT_THRESHOLD_SETTING, default="") or "").strip():
         return trained, "setting"

@@ -8,13 +8,14 @@ import pytest
 from dspy.utils import DummyLM
 
 import fastworkflow
-from fastworkflow import intent_loop, waiting
+from fastworkflow.intent import intent_loop
+from fastworkflow.core import waiting
 from fastworkflow.parameters import parameter_clarification
 from fastworkflow.review import review_engine as re_
 from fastworkflow.review import review_proposals
 from fastworkflow.review.review_engine import CONFIRMED, DECLINED, REVISED
 from fastworkflow.review.review_proposals import Means, ProposedEdit, SubTask, SubTaskInput, SubTaskProposal
-from fastworkflow.turn import TurnStatus
+from fastworkflow.core.turn import TurnStatus
 
 from tests.test_approval_binding import _finish, annotated_library, no_live_model, todo  # noqa: F401
 from tests.conftest import script_matcher
@@ -118,7 +119,7 @@ def _open_review_two_step(gated, monkeypatch) -> re_.ReviewRecord:
 def _no_writes(monkeypatch) -> None:
     """The workflow has no command that changes data, so the turn's ad hoc part (JOKE) does not need the explicit yes
     (bd fix-ftdl.8.4: with one, an ad hoc part may change data) and an accept paraphrase confirms."""
-    monkeypatch.setattr("fastworkflow.command_writes.write_commands", lambda path: frozenset())
+    monkeypatch.setattr("fastworkflow.core.command_writes.write_commands", lambda path: frozenset())
 
 
 def test_policy_decide_confirm_paraphrase(gated, monkeypatch):
@@ -248,7 +249,7 @@ def test_cap_turn_confirm_paraphrase(gated, monkeypatch):
 
 def test_restart_during_edit_item_slot(gated, monkeypatch, planner):
     import uuid
-    from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+    from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
     record = _open_review_two_step(gated, monkeypatch)
     planner(

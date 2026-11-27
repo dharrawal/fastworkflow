@@ -8,10 +8,10 @@ import os
 from pathlib import Path
 
 import fastworkflow
-from fastworkflow.command_directory import get_cached_command_directory, is_visible_planning
+from fastworkflow.core.command_directory import get_cached_command_directory, is_visible_planning
 from fastworkflow.utils import python_utils
 from fastworkflow.utils.logging import logger
-from fastworkflow.workflow_inheritance_model import WorkflowInheritanceModel
+from fastworkflow.core.workflow_inheritance_model import WorkflowInheritanceModel
 
 #: Workflow folders already told that their ``context_hierarchy_model.json`` is ignored.
 #: ``CommandContextModel.load`` runs on every ``Workflow.get_parent`` call, so the warning is

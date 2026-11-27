@@ -24,10 +24,10 @@ import fastworkflow
 from fastworkflow import model_pipeline_training
 from fastworkflow.planning import planning_commands
 from fastworkflow._workflows.command_metadata_extraction import intent_detection
-from fastworkflow.command_executor import CommandExecutor
-from fastworkflow.command_routing import RoutingRegistry
+from fastworkflow.engine.command_executor import CommandExecutor
+from fastworkflow.core.command_routing import RoutingRegistry
 from fastworkflow.parameters.signatures import InputForParamExtraction
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 from tests.test_intent_detection_foreign_context import (
     _refusing_router as refusing_router,
 )

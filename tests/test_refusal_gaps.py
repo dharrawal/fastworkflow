@@ -12,11 +12,11 @@ import socket
 import pytest
 
 from fastworkflow.review import approval_binding
-from fastworkflow import no_agent_mode
+from fastworkflow.core import no_agent_mode
 from fastworkflow.review.approval_binding import Surface
-from fastworkflow.turn import TurnStatus
+from fastworkflow.core.turn import TurnStatus
 from fastworkflow.workflow_agent import load_planning_command_map
-from fastworkflow.workflow_execution_context import NOT_RUN_ARTIFACT, WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import NOT_RUN_ARTIFACT, WorkflowExecutionContext
 from fastworkflow.workflow_agent import build_query_with_next_steps as REAL_BUILD
 from tests.scripted_extractor import ScriptedExtractor
 from tests.test_approval_binding import annotated_library, todo  # noqa: F401

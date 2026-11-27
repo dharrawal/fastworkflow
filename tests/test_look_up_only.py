@@ -20,7 +20,7 @@ import pytest
 from fastworkflow.review import review_proposals
 from fastworkflow.review.review_engine import CONFIRMED, REVISED, proposal_of
 from fastworkflow.review.review_proposals import Means, SubTask, SubTaskProposal
-from fastworkflow.turn import TurnStatus
+from fastworkflow.core.turn import TurnStatus
 from tests.test_approval_binding import (  # noqa: F401 - the real agent with a scripted model, and the guards
     _COPY_IGNORE, LIBRARY, _finish, no_live_model, todo)
 from tests.test_command_writes import writes_env  # noqa: F401 - the library's planning commands, real dispatch
@@ -193,7 +193,7 @@ def test_a_look_up_part_that_becomes_ad_hoc_stays_read_only(gated, monkeypatch):
 def test_with_no_agent_model_a_look_up_part_ends_as_not_run_naming_the_write(no_agent_model, gated, monkeypatch):
     # No agent model: code runs the part's command as its one step; the refusal ends the part as not run, its reason
     # carrying the refusal, and the other part runs.
-    from fastworkflow.workflow_execution_context import NOT_RUN_ARTIFACT, WorkflowExecutionContext
+    from fastworkflow.engine.workflow_execution_context import NOT_RUN_ARTIFACT, WorkflowExecutionContext
 
     def never(self):
         raise AssertionError("the agent LM was built in no-agent mode")

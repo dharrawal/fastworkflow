@@ -18,8 +18,8 @@ import time
 import pytest
 
 import fastworkflow
-from fastworkflow import intent_detector
-from fastworkflow import intent_learning as learning
+from fastworkflow.intent import intent_detector
+from fastworkflow.intent import intent_learning as learning
 from fastworkflow.train import artifact_versioning as av
 from fastworkflow.train import embedding_head as eh
 from fastworkflow.train import head_refit

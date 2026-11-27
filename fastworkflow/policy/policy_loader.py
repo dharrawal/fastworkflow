@@ -137,7 +137,7 @@ def with_workflow_writes(
     commands known to write, the table's write rules would silently never fire."""
     if not workflow_folderpath:
         return facts
-    from fastworkflow.command_writes import write_commands
+    from fastworkflow.core.command_writes import write_commands
 
     try:
         names = write_commands(workflow_folderpath)

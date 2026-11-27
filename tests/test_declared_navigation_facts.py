@@ -8,10 +8,11 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import fastworkflow
-from fastworkflow import ModuleType, entry_declarations
-from fastworkflow import context_navigation
-from fastworkflow import command_metadata_api
-from fastworkflow.command_metadata_api import CommandMetadataAPI
+from fastworkflow import ModuleType
+from fastworkflow.core import entry_declarations
+from fastworkflow.core import context_navigation
+from fastworkflow.core import command_metadata_api
+from fastworkflow.core.command_metadata_api import CommandMetadataAPI
 
 
 class _FakeContext:

@@ -613,7 +613,7 @@ def test_a_first_reply_accept_through_the_review_is_confirmed_without_reading_st
     monkeypatch.setattr(review_proposals, "removal_reading", lambda text, count: calls.append(text) or real(text, count))
     # A workflow with no command that changes data: the plan's ad hoc steps then need no explicit yes (bd fix-ftdl.8.4),
     # so every accept here is read as an accept.
-    monkeypatch.setattr("fastworkflow.command_writes.write_commands", lambda path: frozenset())
+    monkeypatch.setattr("fastworkflow.core.command_writes.write_commands", lambda path: frozenset())
     record = _open(gated, _four_step_plan())
     gated.ctx.process_turn(reply)
     assert record.state == re_.CONFIRMED

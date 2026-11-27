@@ -217,7 +217,7 @@ def test_an_input_validator_that_reads_the_context_names_it_when_built_without_o
     a message naming the validator and the fix (not 'NoneType' object is not subscriptable); with a context
     the validator runs unchanged, and the guard is applied once however often the command is loaded."""
     import os
-    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.core.command_routing import RoutingRegistry
     from fastworkflow.parameters.signatures import ModuleType
 
     folder = os.path.join(os.path.dirname(fastworkflow.__file__), "examples", "simple_workflow_template")

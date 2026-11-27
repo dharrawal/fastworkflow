@@ -25,8 +25,8 @@ import fastworkflow
 from fastworkflow.planning import command_preview
 from fastworkflow import workflow_agent
 from fastworkflow.planning import planning_commands as pc
-from fastworkflow.command_context_model import context_folders
-from fastworkflow.command_routing import RoutingRegistry
+from fastworkflow.core.command_context_model import context_folders
+from fastworkflow.core.command_routing import RoutingRegistry
 from fastworkflow.planning import run_code
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

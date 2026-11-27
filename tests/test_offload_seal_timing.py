@@ -54,7 +54,7 @@ from fastworkflow.observation_offloading.state import (
     scope_for_host,
 )
 from fastworkflow.utils.react import AskUserSuspend
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 REDACTION_ENV = archive_module.REDACTION_ENV
 REDACTION_ON = archive_module.REDACTION_ON

@@ -24,13 +24,13 @@ import pytest
 
 import fastworkflow
 from fastworkflow import model_pipeline_training
-from fastworkflow.command_routing import RoutingDefinition
-from fastworkflow import intent_loop
+from fastworkflow.core.command_routing import RoutingDefinition
+from fastworkflow.intent import intent_loop
 from fastworkflow._workflows.command_metadata_extraction import intent_detection
 from fastworkflow._workflows.command_metadata_extraction.intent_detection import (
     CommandNamePrediction,
 )
-from fastworkflow.intent_clarification import misspelt
+from fastworkflow.intent.intent_clarification import misspelt
 
 # tests/todo_list_workflow exposes two commands sharing the 'add_child_todo'
 # prefix, which is the ordinary shape of a generated command set.
@@ -79,7 +79,7 @@ def todolist_workflows(tmp_path):
         workflow_context={"app_workflow": app_workflow},
     )
     # The workflow stands on a TodoList below its manager, with a head for each of the two scopes.
-    from fastworkflow import intent_detector
+    from fastworkflow.intent import intent_detector
     from tests.todo_list_workflow.application.todo_list import TodoList
     from tests.todo_list_workflow.application.todo_manager import TodoListManager
 
@@ -247,7 +247,7 @@ def test_a_tie_in_a_reply_to_the_which_command_question_is_unclear_never_the_fir
 ):
     """fix-0xn's open half, decided by fix-o1lg S7: the reply reader is ONE reader, and two names that match equally
     well are unclear on both paths (the CME used to take whichever came first)."""
-    from fastworkflow import intent_loop
+    from fastworkflow.intent import intent_loop
 
     tied = sorted(f"TodoList/{name}" for name in TIED_COMMANDS)
     assert intent_loop.read(TIED_PREFIX, tied).kind == "unclear"

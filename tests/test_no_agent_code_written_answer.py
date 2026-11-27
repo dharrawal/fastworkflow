@@ -5,9 +5,9 @@ from __future__ import annotations
 
 import sys
 
-from fastworkflow import no_agent_mode
+from fastworkflow.core import no_agent_mode
 from fastworkflow.planning import run
-from fastworkflow.turn import TurnStatus
+from fastworkflow.core.turn import TurnStatus
 from tests.test_no_agent_mode import (  # noqa: F401 - the autouse no-agent fixture, helpers and fixtures
     NoResult, _no_agent, _plan, _stops)
 from tests.test_step_helpers import (  # noqa: F401

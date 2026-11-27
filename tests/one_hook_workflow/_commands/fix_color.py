@@ -1,7 +1,7 @@
 """Execution command whose hook corrects a value in place (written back, recorded as validation_hook)."""
 
 import fastworkflow
-from fastworkflow.workflow import Workflow
+from fastworkflow.core.workflow import Workflow
 from pydantic import BaseModel, Field, model_validator
 
 
