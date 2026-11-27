@@ -200,7 +200,7 @@ def _product(args: argparse.Namespace) -> int:
     import fastworkflow
     import single_intent_model as runner
     from fastworkflow.intent import intent_detector
-    from fastworkflow import model_pipeline_training as heads
+    from fastworkflow.train import model_pipeline_training as heads
     from fastworkflow.train import artifact_versioning, determinism, embedding_head, utterance_cache
     from fastworkflow.train import intent_model_layout as layout
     from fastworkflow.train import workflow_model as wm

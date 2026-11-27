@@ -143,7 +143,7 @@ class _ScriptedAgent:
         self.trajectory: dict = {}
 
     def __call__(self, **_kwargs):
-        from fastworkflow.workflow_agent import _execute_workflow_query
+        from fastworkflow.agent.workflow_agent import _execute_workflow_query
 
         script = self._pending.pop(0)
         if script.dspy_call:
@@ -189,7 +189,7 @@ def _script_the_llm_boundaries(monkeypatch, ctx, scripts: list[_PassScript]) -> 
     plans = [script.plan for script in scripts]
 
     monkeypatch.setattr(
-        "fastworkflow.workflow_agent.initialize_workflow_tool_agent",
+        "fastworkflow.agent.workflow_agent.initialize_workflow_tool_agent",
         lambda chat_session, **_kwargs: _ScriptedAgent(chat_session, pending),
     )
 
@@ -209,10 +209,10 @@ def _script_the_llm_boundaries(monkeypatch, ctx, scripts: list[_PassScript]) -> 
         return user_query
 
     monkeypatch.setattr(
-        "fastworkflow.workflow_agent.build_query_with_next_steps", scripted_planner
+        "fastworkflow.agent.workflow_agent.build_query_with_next_steps", scripted_planner
     )
     monkeypatch.setattr(
-        "fastworkflow.workflow_agent._what_can_i_do", lambda session: "commands"
+        "fastworkflow.agent.workflow_agent._what_can_i_do", lambda session: "commands"
     )
     monkeypatch.setattr(
         "fastworkflow.utils.dspy_utils.get_lm", lambda *args, **kwargs: None

@@ -23,7 +23,7 @@ import fastworkflow
 from fastworkflow import ModuleType
 from fastworkflow.observability import tracing
 from fastworkflow.utils.logging import logger
-from fastworkflow.model_pipeline_training import get_route_layer_filepath_model
+from fastworkflow.train.model_pipeline_training import get_route_layer_filepath_model
 from fastworkflow.utils.fuzzy_match import (
     best_window_distance, find_best_matches, normalize_text, normalized_levenshtein_distance,
 )
@@ -1024,7 +1024,7 @@ def fields_not_given(statement: str, model_class: Type[BaseModel], values: dict)
     try:
         if not _field_given_enabled():
             return {}
-        from fastworkflow.workflow_agent import _jev_lm   # read at call time (workflow_agent imports this module)
+        from fastworkflow.agent.workflow_agent import _jev_lm   # read at call time (workflow_agent imports this module)
         lm = _jev_lm()
         if lm is None:
             return {}
@@ -1341,7 +1341,7 @@ Today's date is {today}.
     def _option_command(self, app_workflow, subject_command_name: str, cmd_parameters: BaseModel):
         """The checks of the command's ``Input`` options as a ``PlanningCommandCommand`` (2.46): its fields
         that carry an option, for an execution command; a planning command's own description otherwise."""
-        from fastworkflow.workflow_agent import identifier_patterns
+        from fastworkflow.agent.workflow_agent import identifier_patterns
 
         folderpath = getattr(app_workflow, "folderpath", None)
         identifiers = identifier_patterns(folderpath) if folderpath else ()
@@ -1371,7 +1371,7 @@ Today's date is {today}.
         (``extract_arguments``); None runs ``check_verdicts`` here.
         """
         # workflow_agent imports this module (through command_executor), so it is read at call time.
-        from fastworkflow.workflow_agent import _jev_lm
+        from fastworkflow.agent.workflow_agent import _jev_lm
 
         # the request as the user wrote it: the command word an agent's text starts with is not part of it
         # (``fill.without_own_command_word``, the text the extraction's check stage reads too)

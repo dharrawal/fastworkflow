@@ -10,9 +10,9 @@ spied on, not replaced, so the real dispatch runs for anything not refused.
 
 import pytest
 
-from fastworkflow import workflow_agent
+from fastworkflow.agent import workflow_agent
 from fastworkflow.engine.command_executor import CommandExecutor
-from fastworkflow.workflow_agent import initialize_workflow_tool_agent
+from fastworkflow.agent.workflow_agent import initialize_workflow_tool_agent
 from tests.test_tracing_phase1 import (  # noqa: F401
     _make_agent_ctx,
     initialized_fastworkflow,
@@ -81,7 +81,7 @@ def test_whitespace_text_is_an_empty_command_at_the_executor(ctx):
 
 def test_blank_text_answers_no_trained_head(ctx):
     """The sub-task gate's head lookup answers blank text with nothing, without calling a head's predict."""
-    from fastworkflow import run_listing
+    from fastworkflow.agent import run_listing
 
     workflow = ctx.get_active_workflow()
     for text in ("", "   "):

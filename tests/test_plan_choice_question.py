@@ -20,9 +20,9 @@ import pytest
 
 from fastworkflow.intent import intent_clarification as choice
 from fastworkflow.core import no_agent_mode
-from fastworkflow import workflow_agent
+from fastworkflow.agent import workflow_agent
 from fastworkflow.core.turn import TurnStatus
-from fastworkflow.workflow_agent import build_query_with_next_steps as REAL_BUILD
+from fastworkflow.agent.workflow_agent import build_query_with_next_steps as REAL_BUILD
 from fastworkflow.engine.workflow_execution_context import NOT_RUN_ARTIFACT
 from tests.test_approval_binding import _finish, annotated_library, todo  # noqa: F401
 from tests.test_parameter_loop import (  # noqa: F401 - the no-agent context and its helpers
@@ -415,7 +415,7 @@ def test_with_an_agent_model_no_plan_choice_is_asked(todo, monkeypatch):  # noqa
     monkeypatch.setenv("FW_DRAFT_ARGUMENTS", "off")
     monkeypatch.setattr(workflow_agent, "_jev_lm", lambda *args, **kwargs: None)
     script_matcher(monkeypatch, {})                              # the remote model gives no answer
-    monkeypatch.setattr("fastworkflow.workflow_agent.split_into_subtasks", lambda user_query, **kwargs: [user_query])
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.split_into_subtasks", lambda user_query, **kwargs: [user_query])
     planner = _TextPlanner([], adapter=dspy.JSONAdapter())
     monkeypatch.setattr(workflow_agent, "build_query_with_next_steps",
                         lambda *args, **kwargs: REAL_BUILD(*args, **{**kwargs, "planner_lm": planner}))

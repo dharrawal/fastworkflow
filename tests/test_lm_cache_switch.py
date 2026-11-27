@@ -8,7 +8,7 @@ answers and run-to-run variance is understated.
 import pytest
 
 import fastworkflow
-from fastworkflow import workflow_agent
+from fastworkflow.agent import workflow_agent
 from fastworkflow.utils import dspy_utils
 
 

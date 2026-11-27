@@ -20,7 +20,7 @@ import pytest
 
 import fastworkflow
 from fastworkflow.intent import intent_detector
-from fastworkflow import model_pipeline_training as heads
+from fastworkflow.train import model_pipeline_training as heads
 from fastworkflow.core.command_routing import RoutingRegistry
 from fastworkflow.intent.nlu_labels import PARAMETER_VALUE_LABEL, PARAMETER_VALUE_PLACEHOLDERS, WILDCARD_LABEL
 from fastworkflow.train import artifact_versioning

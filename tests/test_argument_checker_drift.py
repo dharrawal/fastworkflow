@@ -45,7 +45,7 @@ import fastworkflow
 from fastworkflow.planning import planning_commands as pc
 from fastworkflow.parameters import check
 from fastworkflow.parameters import check as one_guard
-from fastworkflow import workflow_agent
+from fastworkflow.agent import workflow_agent
 from fastworkflow.parameters import argument_checks
 from fastworkflow.parameters.signatures import INVALID_INT_VALUE, NOT_FOUND
 from tests.test_planning_command_argument_screens import TRANSFER_LOAN

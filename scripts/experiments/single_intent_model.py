@@ -213,7 +213,7 @@ def heads_folder(workflow: str, scope: str) -> str:
 
 def build_router(kind: str, root: str, scope: str):
     if kind in ("shipped", "heads"):
-        from fastworkflow.model_pipeline_training import CommandRouter
+        from fastworkflow.train.model_pipeline_training import CommandRouter
 
         return CommandRouter(heads_folder(root, scope))
     from fastworkflow.train.workflow_model import WorkflowModelRouter

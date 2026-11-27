@@ -516,7 +516,7 @@ def test_a_workflow_with_input_and_output_ui_hints_loads_without_problems_and_se
     from pathlib import Path
 
     from fastworkflow.planning import command_preview
-    from fastworkflow.mcp_server import command_schema_listing
+    from fastworkflow.run_fastapi_mcp.mcp_server import command_schema_listing
 
     hello = Path(__file__).resolve().parent / "hello_world_workflow"
     folder = tmp_path / "hello_ui"

@@ -3,7 +3,7 @@ import re
 
 import pytest
 
-from fastworkflow.split_merge import merge_subtasks, request_subjects, subjects_in, without_repeated_clauses
+from fastworkflow.agent.split_merge import merge_subtasks, request_subjects, subjects_in, without_repeated_clauses
 
 
 # ------------------------------------------------------------------ subjects
@@ -335,13 +335,13 @@ def test_a_request_sentence_whose_record_no_sub_task_names_is_put_back_in_place(
 
 # ------------------------------------------------------------------ referents (chosen by the caller)
 def test_the_unnamed_subjects_are_the_request_subjects_a_sub_task_leaves_out():
-    from fastworkflow.split_merge import unnamed_subjects
+    from fastworkflow.agent.split_merge import unnamed_subjects
     q = "Ann Lee leaves on Friday. Then tag the customer `on-leave`."
     assert unnamed_subjects(q, "Tag the customer `on-leave`.") == ["Ann Lee"]
 
 
 def test_a_record_listed_with_the_one_a_sub_task_names_is_not_its_unnamed_subject():
-    from fastworkflow.split_merge import unnamed_subjects
+    from fastworkflow.agent.split_merge import unnamed_subjects
     q = ("Northwind Ltd is closing. Walk its whole roster: every person on it. Ann Lee and Bob Kerr leave at the end "
          "of the month, so each of them down to their first login listed. And Cid Moss has asked for the right "
          "Payroll_Admin: what it exposes and who holds it.")
@@ -353,7 +353,7 @@ def test_a_record_listed_with_the_one_a_sub_task_names_is_not_its_unnamed_subjec
 
 
 def test_a_referent_replaces_the_one_pointing_phrase_or_is_appended():
-    from fastworkflow.split_merge import with_referent
+    from fastworkflow.agent.split_merge import with_referent
     assert with_referent("Raj Patel from that team is leaving.", "Hart Mills Ltd") == \
         "Raj Patel from Hart Mills Ltd is leaving."
     assert with_referent("Confirm whether Raj Patel is among its holders.", "Payroll_Approver") == \
@@ -368,7 +368,7 @@ def test_a_referent_replaces_the_one_pointing_phrase_or_is_appended():
 
 
 def test_a_definite_description_of_the_referent_gets_the_record_written_after_it():
-    from fastworkflow.split_merge import with_referent
+    from fastworkflow.agent.split_merge import with_referent
     text = "Tag the customer `on-leave` and show me its tags before and after."
     # the caller found that "the customer" stands for the record: written in there, and the one "its" too
     assert with_referent(text, "Ann Lee", "the customer") == \
@@ -383,7 +383,7 @@ def test_a_definite_description_of_the_referent_gets_the_record_written_after_it
 
 
 def test_definite_descriptions_leave_out_plurals_common_words_of_phrases_and_named_ones():
-    from fastworkflow.split_merge import definite_descriptions
+    from fastworkflow.agent.split_merge import definite_descriptions
     assert definite_descriptions("Tag the customer `on-leave` and show me its tags.") == ["the customer"]
     assert definite_descriptions("Show me the customer's tags.") == ["the customer"]
     assert definite_descriptions(
@@ -464,7 +464,7 @@ def test_an_asking_sentence_is_not_written_before_jobs_that_name_a_record():
 
 
 def test_statements_and_asks():
-    from fastworkflow.split_merge import _asks, _is_statement
+    from fastworkflow.agent.split_merge import _asks, _is_statement
     for statement in ("Ann Lee leaves at the end of the week.", "I am closing out Field Sales for the year.",
                       "Field Sales and Sons 1 is being folded into another unit."):
         assert _is_statement(statement)

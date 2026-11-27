@@ -113,7 +113,7 @@ def main() -> int:
     import fastworkflow
     from fastworkflow.intent import intent_detector as idt
     from fastworkflow.intent import intent_loop
-    from fastworkflow import workflow_agent
+    from fastworkflow.agent import workflow_agent
     from dspy.utils import DummyLM
 
     # Importing the product loads a dotenv file into os.environ (a key may come back), so the drop is done AFTER the

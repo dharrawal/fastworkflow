@@ -19,7 +19,7 @@ from dspy.utils import DummyLM
 
 import fastworkflow
 from fastworkflow.intent import remote_outage
-from fastworkflow import workflow_agent
+from fastworkflow.agent import workflow_agent
 from fastworkflow.observability import tracing
 from fastworkflow.core.turn import TurnStatus
 from tests.test_approval_binding import (  # noqa: F401

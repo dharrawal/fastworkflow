@@ -144,7 +144,7 @@ def _split_file(folder: Path, text: str) -> str:
 
 
 def test_the_default_splitter_examples_as_data():
-    from fastworkflow.workflow_agent import SplitIntoSubtasks, split_examples
+    from fastworkflow.agent.workflow_agent import SplitIntoSubtasks, split_examples
 
     examples = split_examples(None)
     assert len(examples) == 3
@@ -157,7 +157,7 @@ def test_the_default_splitter_examples_as_data():
 
 
 def test_a_workflows_own_examples_replace_the_defaults(tmp_path):
-    from fastworkflow.workflow_agent import SplitExample, split_examples
+    from fastworkflow.agent.workflow_agent import SplitExample, split_examples
 
     folder = _split_file(tmp_path / "shop", '''
 split_examples = [
@@ -174,7 +174,7 @@ split_examples = [
 
 
 def test_a_split_file_without_instructions_has_no_examples_of_its_own(tmp_path):
-    from fastworkflow.workflow_agent import split_examples
+    from fastworkflow.agent.workflow_agent import split_examples
 
     folder = _split_file(tmp_path / "library", "import re\nidentifier_patterns = [re.compile(r'\\bM-[0-9]+')]\n")
     assert split_examples(folder, workflow_only=True) == ()

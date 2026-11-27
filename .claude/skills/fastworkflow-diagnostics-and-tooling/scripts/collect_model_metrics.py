@@ -17,7 +17,7 @@ WHAT THIS MEASURES (be honest with yourself):
       documented, not papered over.
 
 Per utterance it applies the SAME decision rule as runtime CommandRouter.predict
-(fastworkflow/model_pipeline_training.py:321-334): predict with TinyBERT, fall
+(fastworkflow/train/model_pipeline_training.py:321-334): predict with TinyBERT, fall
 back to DistilBERT below threshold.json's confidence_threshold, then return a
 single label only above the used model's ambiguous threshold, else top-k.
 
@@ -54,7 +54,7 @@ def load_labeled_utterances(info_dir: Path, context_commands: list[str]) -> list
 
 def evaluate_context(workflow_dir: Path, ctx_name: str, ctx_commands: list[str]) -> dict:
     # Import late: pulls in torch/transformers (slow).
-    from fastworkflow.model_pipeline_training import (
+    from fastworkflow.train.model_pipeline_training import (
         CommandRouter,
         predict_single_sentence,
     )

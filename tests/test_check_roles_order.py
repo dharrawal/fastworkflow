@@ -12,7 +12,7 @@ from __future__ import annotations
 import pytest
 
 from fastworkflow.planning import planning_commands as sc
-from fastworkflow import workflow_agent
+from fastworkflow.agent import workflow_agent
 from fastworkflow.parameters.signatures import InputForParamExtraction
 from tests.test_check_roles_one_step import REQUEST, workflow  # noqa: F401  (workflow is a fixture)
 

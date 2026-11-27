@@ -386,7 +386,7 @@ def add_migrate_contexts_parser(subparsers):
     parser.add_argument("workflow_folder", help="Path to the workflow folder")
 
     def _migrate_main(args):
-        from .migrate_context_declarations import migrate_main
+        from fastworkflow.build.migrate_context_declarations import migrate_main
         sys.exit(migrate_main(args))
 
     parser.set_defaults(func=_migrate_main)

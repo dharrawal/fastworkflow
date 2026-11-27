@@ -11,9 +11,9 @@ from uuid import uuid4
 import pytest
 
 import fastworkflow
-from fastworkflow import model_pipeline_training
+from fastworkflow.train import model_pipeline_training
 from fastworkflow._workflows.command_metadata_extraction import intent_detection
-from fastworkflow.capability_answer import CapabilityListing
+from fastworkflow.agent.capability_answer import CapabilityListing
 from fastworkflow.engine.command_executor import CommandExecutor
 from fastworkflow.train import selective_training
 
@@ -115,11 +115,11 @@ def test_abort_says_what_it_ended(pair):
 
 def test_the_edited_files_are_not_what_the_internal_workflows_training_fingerprint_hashes(pair):
     """Fingerprints are hashes of the CME command files and two trainer modules; the data is attached elsewhere."""
-    import fastworkflow.capability_answer as capability_answer
+    import fastworkflow.agent.capability_answer as capability_answer
     import fastworkflow.engine.command_executor as command_executor
 
     sources = {fp.source_path for fp in selective_training.compute_command_fingerprints(
         fastworkflow.get_internal_workflow_path(CME)).values() if fp.source_path}
     assert sources and not sources & {command_executor.__file__, capability_answer.__file__}
     assert not {selective_training.TRAINER_SOURCE_MODULE, selective_training.GENERATOR_SOURCE_MODULE} & {
-        "fastworkflow.engine.command_executor", "fastworkflow.capability_answer"}
+        "fastworkflow.engine.command_executor", "fastworkflow.agent.capability_answer"}

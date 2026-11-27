@@ -4,8 +4,8 @@ Integration tests for ReAct agent with available_commands injection.
 
 import pytest
 import dspy
-from fastworkflow.utils.react import fastWorkflowReAct
-from fastworkflow.utils.chat_adapter import CommandsSystemPreludeAdapter
+from fastworkflow.agent.react import fastWorkflowReAct
+from fastworkflow.agent.chat_adapter import CommandsSystemPreludeAdapter
 
 
 def test_react_accepts_available_commands_parameter():

@@ -14,7 +14,7 @@ from dspy.utils import DummyLM
 from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 
 from fastworkflow.planning import command_preview
-from fastworkflow import workflow_agent
+from fastworkflow.agent import workflow_agent
 from fastworkflow.observability import tracing
 from fastworkflow.planning import planning_commands as pc
 from fastworkflow.planning.plan_frame import TURN_MAX_STEPS_ENV
@@ -450,7 +450,7 @@ def test_verify_checks_nothing_without_a_classifier_and_takes_the_verdict_with_o
         tmp_path, monkeypatch):
     request = "Check the titles Dune of Payroll"
     # no classifier (no JEV_API_KEY): the field's value stands
-    monkeypatch.setattr("fastworkflow.workflow_agent._jev_lm", lambda: None)
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent._jev_lm", lambda: None)
     instance = GroupInput(name="Payroll", checked=True, titles=["Dune"])
     assert _exec(request).validate_parameters(None, "Library/show_group", instance)[0]
     assert instance.checked is True
@@ -462,7 +462,7 @@ def test_verify_checks_nothing_without_a_classifier_and_takes_the_verdict_with_o
         seen.append((command.name, [p.name for p in command.params if p.verify]))
         return {"checked": (False, 0.99)}
 
-    monkeypatch.setattr("fastworkflow.workflow_agent._jev_lm", lambda: object())
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent._jev_lm", lambda: object())
     monkeypatch.setattr(pc, "check_verdicts", verdicts)
     instance = GroupInput(name="Payroll", checked=True, titles=["Dune"])
     assert _exec(request).validate_parameters(None, "Library/show_group", instance)[0]

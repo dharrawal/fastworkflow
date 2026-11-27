@@ -50,7 +50,7 @@ def _no_agent(initialized_fastworkflow, no_agent_model, no_planner_key, gated, m
         session._phased_planning_command_call = None
         return user_query
 
-    monkeypatch.setattr("fastworkflow.workflow_agent.build_query_with_next_steps", plan)
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.build_query_with_next_steps", plan)
 
 
 @pytest.fixture(autouse=True)

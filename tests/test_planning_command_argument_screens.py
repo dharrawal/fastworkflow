@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from fastworkflow.planning import planning_commands as sc
-from fastworkflow import workflow_agent
+from fastworkflow.agent import workflow_agent
 
 TUTORIAL = Path(__file__).resolve().parent / "planning_tutorial_workflow"
 

@@ -14,7 +14,7 @@ Prints, per command-context folder under <workflow>/___command_info/:
 
 Interpretation:
   - Missing threshold.json for a context == that context is untrained
-    (is_workflow_trained() in fastworkflow/model_pipeline_training.py checks exactly this).
+    (is_workflow_trained() in fastworkflow/train/model_pipeline_training.py checks exactly this).
   - confidence_threshold is where TinyBERT hands off to DistilBERT.
   - *_ambiguous thresholds gate single-label return vs top-k clarification in
     CommandRouter.predict().

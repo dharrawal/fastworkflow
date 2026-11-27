@@ -106,8 +106,8 @@ exact first-token match → Levenshtein fuzzy match (threshold 0.3) → local mo
 ### T2 — Missing threshold.json / untrained-workflow late failures
 
 `threshold.json` per context folder is the marker of a trained intent model. Guards exist at two entry points
-(`fastworkflow/run_cli/__main__.py:156-172` and `fastworkflow/mcp_server.py:249-250` — both call
-`is_workflow_trained`, `fastworkflow/model_pipeline_training.py:624`), added in v2.19.0 (commit d7853a1) after
+(`fastworkflow/run_cli/__main__.py:156-172` and `fastworkflow/run_fastapi_mcp/mcp_server.py:249-250` — both call
+`is_workflow_trained`, `fastworkflow/train/model_pipeline_training.py:624`), added in v2.19.0 (commit d7853a1) after
 untrained workflows crashed on the *first message* instead of at startup. If you still see a *late* failure, you
 came in through a path without the guard (e.g. embedding WEC directly, or a test).
 *Story:* the fix-0hb incident (commit fa97b48) — a training test's teardown `rmtree`'d the real
@@ -118,7 +118,7 @@ came in through a path without the guard (e.g. embedding WEC directly, or a test
 Quick check:
 ```bash
 source .venv/bin/activate && python -c "
-from fastworkflow.model_pipeline_training import is_workflow_trained
+from fastworkflow.train.model_pipeline_training import is_workflow_trained
 print(is_workflow_trained('<workflow_path>'))"
 ```
 
@@ -127,7 +127,7 @@ print(is_workflow_trained('<workflow_path>'))"
 Verified state on c33b9a5 (2026-07-09):
 - `is_fast_workflow_trained` (`fastworkflow/train/__main__.py:225-256`) requires
   `_workflows/command_metadata_extraction/___command_info/ErrorCorrection/largemodel.pth`.
-- `train()` excludes `ErrorCorrection` from CME training (`fastworkflow/model_pipeline_training.py:821`,
+- `train()` excludes `ErrorCorrection` from CME training (`fastworkflow/train/model_pipeline_training.py:821`,
   literally `- {'ErrorCorrection', 'ErrorCorrection'}` — note the duplicate literal), so that folder is never produced;
   the repo's CME `___command_info/` contains only `IntentDetection/` and `global/`.
 - Therefore the check returns False and `train_main` (`train/__main__.py:283-287`) retrains the internal CME
@@ -155,17 +155,17 @@ also scores 0.0 for echoed example values (`fastworkflow/parameters/signatures.p
 *legitimate* input can never be extracted in agent mode — pick example values that are not real data.
 Loop-breaker in deterministic mode: type `abort` (or `you misunderstood`) — these escape hatches are matched by
 exact/fuzzy utterance only, never by the classifier. Agent exhaustion caps at `max_iters=25`
-(`fastworkflow/workflow_agent.py:387`) → `failure_reason="max_iters_exhausted"`.
+(`fastworkflow/agent/workflow_agent.py:387`) → `failure_reason="max_iters_exhausted"`.
 
 ### T5 — ask_user suspension oddities (incl. the OPEN fix-5fv CLI hang)
 
 Two topologies, two behaviors:
-- **Topology B (FastAPI/WEC):** `ask_user` raises `AskUserSuspend` (`fastworkflow/utils/react.py:18`) — a
+- **Topology B (FastAPI/WEC):** `ask_user` raises `AskUserSuspend` (`fastworkflow/agent/react.py:18`) — a
   **BaseException** subclass so the ReAct loop's `except Exception` cannot swallow it; WEC returns an
   `awaiting_user` output and the *next* message resumes the same logical turn. A message during suspension is the
   answer — it never starts a new turn. `CommandCancelledError` (`workflow_execution_context.py:42`) is BaseException
   for the same reason. **Never convert these to Exception subclasses or add broad `except BaseException`.**
-- **Topology A (CLI):** `_ask_user_tool` (`fastworkflow/workflow_agent.py:354-385`) puts the question on
+- **Topology A (CLI):** `_ask_user_tool` (`fastworkflow/agent/workflow_agent.py:354-385`) puts the question on
   `command_output_queue` and blocks on `user_message_queue.get()`.
 
 **fix-5fv (P2, OPEN, code-reading evidence only — NEEDS RUNTIME VERIFICATION, never runtime-reproduced):**
@@ -304,15 +304,15 @@ owner ruling (T3). Re-verify volatile facts before relying on them:
 grep -n "def compute_commands_source_fingerprint\|@lru_cache" fastworkflow/core/command_directory.py   # expect 627, 657
 grep -n "_persisted_definition_is_fresh\|def clear_registry" fastworkflow/core/command_routing.py       # expect 368/385, 410
 # T2: fail-fast guard
-grep -n "is_workflow_trained" fastworkflow/run_cli/__main__.py fastworkflow/model_pipeline_training.py
+grep -n "is_workflow_trained" fastworkflow/run_cli/__main__.py fastworkflow/train/model_pipeline_training.py
 # T3: ErrorCorrection mismatch still present?
-grep -n "ErrorCorrection" fastworkflow/train/__main__.py fastworkflow/model_pipeline_training.py
+grep -n "ErrorCorrection" fastworkflow/train/__main__.py fastworkflow/train/model_pipeline_training.py
 ls fastworkflow/_workflows/command_metadata_extraction/___command_info/                            # ErrorCorrection absent?
 # T4: sentinel parsing + anti-parroting
 grep -n "MISSING_INFORMATION_ERRMSG\|examples and extracted_value" fastworkflow/_workflows/command_metadata_extraction/parameter_extraction.py
 # T5: fix-5fv still open? sentinel emitter unchanged?
 bd show fix-5fv | head -5
-grep -n "_maybe_enqueue_trace_sentinel\|def _ask_user_tool" fastworkflow/engine/workflow_execution_context.py fastworkflow/workflow_agent.py
+grep -n "_maybe_enqueue_trace_sentinel\|def _ask_user_tool" fastworkflow/engine/workflow_execution_context.py fastworkflow/agent/workflow_agent.py
 # T6: GET /turns still missing? stream endpoint still on lock.locked()?
 grep -n "@app.get\|lock.locked()" fastworkflow/run_fastapi_mcp/__main__.py
 # T7: ChatSession still on process_message?

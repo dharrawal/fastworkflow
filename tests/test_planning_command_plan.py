@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field, model_validator
 
 import fastworkflow
 from fastworkflow.core import command_directory
-from fastworkflow import workflow_agent
+from fastworkflow.agent import workflow_agent
 from fastworkflow.planning import planning_commands
 from fastworkflow.engine.command_executor import call_response_generator
 from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext

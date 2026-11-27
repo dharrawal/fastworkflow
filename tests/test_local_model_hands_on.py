@@ -23,7 +23,7 @@ from fastworkflow.intent import intent_detector, intent_loop
 from fastworkflow._workflows.command_metadata_extraction import intent_detection
 from fastworkflow._workflows.command_metadata_extraction._commands import wildcard
 from fastworkflow.core.command_routing import RoutingRegistry
-from fastworkflow.model_pipeline_training import CommandRouter, train
+from fastworkflow.train.model_pipeline_training import CommandRouter, train
 from fastworkflow.core.workflow import running_command
 from fastworkflow.train import determinism, utterance_cache
 from fastworkflow.train import intent_model_layout as layout

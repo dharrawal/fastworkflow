@@ -16,10 +16,10 @@ import pytest
 from dspy.utils import DummyLM
 
 from fastworkflow.planning import command_preview
-from fastworkflow import workflow_agent
+from fastworkflow.agent import workflow_agent
 from fastworkflow.planning.planning_commands import PlanningCommandFormatError
-from fastworkflow.utils.chat_adapter import CommandsSystemPreludeAdapter
-from fastworkflow.workflow_agent import SPLIT_GENERIC_EXAMPLES, SPLIT_RULES, SplitExample, SplitIntoSubtasks
+from fastworkflow.agent.chat_adapter import CommandsSystemPreludeAdapter
+from fastworkflow.agent.workflow_agent import SPLIT_GENERIC_EXAMPLES, SPLIT_RULES, SplitExample, SplitIntoSubtasks
 from tests.workflow_settings_file import write_workflow_file
 
 pytestmark = pytest.mark.usefixtures("no_planner_key")

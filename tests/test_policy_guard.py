@@ -29,7 +29,7 @@ from fastworkflow.policy.policy_decision import (
     PolicyRow,
 )
 from fastworkflow.policy.policy_runtime import AgentPolicy
-from fastworkflow.utils.react import fastWorkflowReAct
+from fastworkflow.agent.react import fastWorkflowReAct
 from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 from tests.todo_list_workflow.application.todo_manager import TodoListManager
@@ -95,7 +95,7 @@ def _with_policy(ctx, mode=PolicyMode.ENFORCE) -> AgentPolicy:
 
 
 def _run(ctx, description: str) -> str:
-    from fastworkflow.workflow_agent import _execute_workflow_query
+    from fastworkflow.agent.workflow_agent import _execute_workflow_query
 
     return _execute_workflow_query(
         f"create_todo_list <description>{description}</description>", chat_session_obj=ctx)

@@ -18,7 +18,7 @@ import pytest
 
 import fastworkflow
 from fastworkflow.core import context_navigation
-from fastworkflow.workflow_agent import _explicit_agent_command
+from fastworkflow.agent.workflow_agent import _explicit_agent_command
 from tests.test_lookup_exact_names import GLOBAL_PROBE, _RefusingRouter, _run
 from tests.todo_list_workflow.application.todo_item import TodoItem
 from tests.todo_list_workflow.application.todo_list import TodoList
@@ -104,7 +104,7 @@ def test_the_lookup_path_from_a_nested_record_ends_at_the_root_then_global(rootl
 
 def test_a_command_of_the_root_by_exact_name_runs_from_a_nested_record(rootless, monkeypatch, setup_test_environment):
     app, cme, item, _, manager = rootless
-    monkeypatch.setattr(fastworkflow.model_pipeline_training, "CommandRouter", _RefusingRouter)
+    monkeypatch.setattr(fastworkflow.train.model_pipeline_training, "CommandRouter", _RefusingRouter)
     assert _explicit_agent_command("list_todo_lists", app) == "list_todo_lists"
 
     run = _run(app, cme, monkeypatch, "list_todo_lists")

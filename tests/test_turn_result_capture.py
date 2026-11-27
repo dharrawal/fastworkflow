@@ -59,7 +59,7 @@ def one_part_split(monkeypatch):
     With no planner model the splitter raises; before, a developer's .env that litellm loaded into the process supplied
     one. A module fixture, not part of ``_make_agent_ctx``: the modules that import that helper script their own split
     before building the context, and a patch inside the helper would replace it."""
-    monkeypatch.setattr("fastworkflow.workflow_agent.split_into_subtasks", lambda user_query, **kwargs: [user_query])
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.split_into_subtasks", lambda user_query, **kwargs: [user_query])
 
 
 @pytest.fixture
@@ -101,12 +101,12 @@ def _make_agent_ctx(todo_workflow_path, monkeypatch):
     ctx.bind_app_workflow(wf)
 
     monkeypatch.setattr(
-        "fastworkflow.workflow_agent.build_query_with_next_steps",
+        "fastworkflow.agent.workflow_agent.build_query_with_next_steps",
         lambda user_query, session, with_agent_inputs_and_trajectory=False,
         planner_lm=None, **kwargs: user_query,
     )
     monkeypatch.setattr(
-        "fastworkflow.workflow_agent._what_can_i_do",
+        "fastworkflow.agent.workflow_agent._what_can_i_do",
         lambda session: "commands",
     )
     monkeypatch.setattr(ctx, "_ensure_agent_initialized", lambda: None)
@@ -359,7 +359,7 @@ class TestAgentTurn:
         ctx, _wf = _make_agent_ctx(todo_workflow_path, monkeypatch)
         todo_list = _enter_todo_list_manager(_wf, tmp_path).create_todo_list("chores")
 
-        from fastworkflow.workflow_agent import _execute_workflow_query
+        from fastworkflow.agent.workflow_agent import _execute_workflow_query
 
         def fake_invoke(cls, session, command: str):
             # As the real get_todo_list does: it enters the list, which is the
@@ -405,7 +405,7 @@ class TestAgentTurn:
         ctx, _wf = _make_agent_ctx(todo_workflow_path, monkeypatch)
         # Every executor run hits the step cap: the hand-offs run out, and the
         # turn returns every run's partial answer; identical repeats collapse to one.
-        monkeypatch.setattr("fastworkflow.workflow_agent.run_progress_check",
+        monkeypatch.setattr("fastworkflow.agent.workflow_agent.run_progress_check",
                             lambda *args, **kwargs: "done so far")
 
         mock_agent = MagicMock()
@@ -442,7 +442,7 @@ class TestSuspendResumeTurnCapture:
         ctx, _wf = _make_agent_ctx(todo_workflow_path, monkeypatch)
         todo_list = _enter_todo_list_manager(_wf, tmp_path).create_todo_list("chores")
 
-        from fastworkflow.workflow_agent import _execute_workflow_query
+        from fastworkflow.agent.workflow_agent import _execute_workflow_query
 
         def fake_invoke(cls, session, command: str):
             # As the real get_todo_list does: it enters the list, which is the
@@ -523,7 +523,7 @@ class TestFailureCapture:
         ctx, _wf = _make_assistant_ctx(todo_workflow_path, monkeypatch)
         _enter_todo_list_manager(_wf, tmp_path)
 
-        from fastworkflow.workflow_agent import _execute_workflow_query
+        from fastworkflow.agent.workflow_agent import _execute_workflow_query
 
         def exploding_invoke(cls, session, command: str):
             raise RuntimeError("boom: storage offline")
@@ -557,7 +557,7 @@ class TestFailureCapture:
         _enter_todo_list_manager(_wf, tmp_path)
 
         from fastworkflow.engine.command_executor import CommandNotFoundError
-        from fastworkflow.workflow_agent import _execute_workflow_query
+        from fastworkflow.agent.workflow_agent import _execute_workflow_query
 
         def unroutable_invoke(cls, session, command: str):
             raise CommandNotFoundError("not available here; go_up and retry")
@@ -659,7 +659,7 @@ class TestArtifactProjection:
         ctx, _wf = _make_agent_ctx(todo_workflow_path, monkeypatch)
         _enter_todo_list_manager(_wf, tmp_path)
 
-        from fastworkflow.workflow_agent import _execute_workflow_query
+        from fastworkflow.agent.workflow_agent import _execute_workflow_query
 
         def fake_invoke(cls, session, command: str):
             return fastworkflow.CommandOutput(
@@ -698,7 +698,7 @@ class TestArtifactProjection:
         ctx, _wf = _make_agent_ctx(todo_workflow_path, monkeypatch)
         _enter_todo_list_manager(_wf, tmp_path)
 
-        from fastworkflow.workflow_agent import _execute_workflow_query
+        from fastworkflow.agent.workflow_agent import _execute_workflow_query
 
         def fake_invoke(cls, session, command: str):
             return fastworkflow.CommandOutput(

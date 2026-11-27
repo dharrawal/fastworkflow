@@ -19,8 +19,8 @@ import pytest
 import fastworkflow
 from fastworkflow.core.command_directory import CommandDirectory
 from fastworkflow.core.command_routing import RoutingDefinition, RoutingRegistry
-from fastworkflow import model_pipeline_training
-from fastworkflow.model_pipeline_training import TrainingDataError
+from fastworkflow.train import model_pipeline_training
+from fastworkflow.train.model_pipeline_training import TrainingDataError
 from fastworkflow.train import __main__ as train_orchestration
 from fastworkflow.train import artifact_versioning as av
 from fastworkflow.train import intent_model_layout

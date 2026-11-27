@@ -16,7 +16,7 @@ import pytest
 from collections import Counter
 from pathlib import Path
 
-from fastworkflow.model_pipeline_training import (
+from fastworkflow.train.model_pipeline_training import (
     TrainingDataError,
     _score_heldout_context,
     split_training_data,

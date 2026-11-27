@@ -335,7 +335,7 @@ Facts verified 2026-07-09 against v2.22.2 (commit c33b9a5). Re-verification one-
 - LLM_RESPONSE_GEN still dead: `grep -rn "LLM_RESPONSE_GEN" fastworkflow/ tests/ --include="*.py"` (expect zero hits)
 - COMMANDMETADATA spelling: `grep -rn "COMMANDMETADATA" fastworkflow/ --include="*.py"`
 - Import-time reads: `sed -n '14,16p' fastworkflow/train/generate_synthetic.py; sed -n '19,23p' fastworkflow/_workflows/command_metadata_extraction/parameter_extraction.py`
-- Intent model defaults: `sed -n '890,896p' fastworkflow/model_pipeline_training.py`
+- Intent model defaults: `sed -n '890,896p' fastworkflow/train/model_pipeline_training.py`
 - CLI flags + help-text lie + env defaults: `sed -n '177,302p' fastworkflow/cli.py` and `fastworkflow <subcommand> --help`
 - `--expect_encrypted_jwt` reachability: `grep -n "expect_encrypted_jwt" fastworkflow/cli.py fastworkflow/run_fastapi_mcp/__main__.py` (expect: absent from cli.py)
 - JWT constants + CWD-relative keys: `sed -n '21,40p' fastworkflow/run_fastapi_mcp/jwt_manager.py`

@@ -19,11 +19,11 @@ import shutil
 import pytest
 
 import fastworkflow
-from fastworkflow import model_pipeline_training
+from fastworkflow.train import model_pipeline_training
 from fastworkflow._workflows.command_metadata_extraction import intent_detection
 from fastworkflow.engine.command_executor import CommandExecutor, CommandNotFoundError, call_response_generator
 from fastworkflow.core.command_metadata_api import CommandMetadataAPI
-from fastworkflow.workflow_agent import _explicit_agent_command
+from fastworkflow.agent.workflow_agent import _explicit_agent_command
 from tests.todo_list_workflow.application.todo_item import TodoItem
 from tests.todo_list_workflow.application.todo_list import TodoList
 from tests.todo_list_workflow.application.todo_manager import TodoListManager

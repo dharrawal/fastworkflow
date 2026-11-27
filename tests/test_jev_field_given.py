@@ -14,7 +14,7 @@ from dotenv import dotenv_values
 from pydantic import BaseModel, Field
 
 import fastworkflow
-from fastworkflow import workflow_agent
+from fastworkflow.agent import workflow_agent
 from fastworkflow.parameters import signatures
 from fastworkflow.parameters.signatures import (
     FIELD_GIVEN_THRESHOLD, NOT_FOUND, InputForParamExtraction, fields_not_given,

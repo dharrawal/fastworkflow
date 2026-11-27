@@ -13,7 +13,7 @@ import json
 import pytest
 from dspy.utils import DummyLM
 
-from fastworkflow import split_merge, workflow_agent
+from fastworkflow.agent import split_merge, workflow_agent
 from fastworkflow.observability import tracing
 from fastworkflow.core.turn import TurnStatus
 from tests.test_approval_binding import (  # noqa: F401

@@ -394,7 +394,7 @@ class Built:
 def gather_contexts(opened: OpenedWorkflow) -> list[str]:
     """The contexts gather visits: the lookup-path scopes, then every context reachable by descend edges."""
     from fastworkflow.core.context_navigation import exact_name_scopes
-    from fastworkflow.run_listing import _reachable_contexts
+    from fastworkflow.agent.run_listing import _reachable_contexts
 
     scopes = [scope.context_name for scope in exact_name_scopes(opened.app)]
     return list(dict.fromkeys([*scopes, *_reachable_contexts(opened.app.folderpath, opened.app._current_command_context_name)]))
@@ -418,14 +418,14 @@ def head_seeds(opened: OpenedWorkflow, utterance: str) -> tuple[set[str], dict[s
 
 
 def build_listings(opened: OpenedWorkflow, request: Request, mode: str) -> Built:
-    from fastworkflow import run_listing
-    from fastworkflow import workflow_agent
+    from fastworkflow.agent import run_listing
+    from fastworkflow.agent import workflow_agent
 
     app = opened.app
     if mode in HEAD_MODES:
         if opened.heads is None:
             raise ValueError(f"mode {mode!r} needs the workflow's trained heads")
-        from fastworkflow.run_listing import gather, expand, planning_candidates
+        from fastworkflow.agent.run_listing import gather, expand, planning_candidates
         labels, planning_scores = head_seeds(opened, request.utterance)
         if mode == MODE_HEADS_GOLD:
             for name, probability in (planning_distribution(MODE_GOLD, request) or {}).items():
@@ -502,7 +502,7 @@ def measure_requests(opened: OpenedWorkflow, requests: Sequence[Request], thresh
 
 
 def workflow_full(opened: OpenedWorkflow) -> str:
-    from fastworkflow import workflow_agent
+    from fastworkflow.agent import workflow_agent
 
     return workflow_agent.planner_commands_text(opened.app)
 
@@ -569,7 +569,7 @@ def source_head_answers(source_folder: Path, utterances: Sequence[str]) -> dict[
     """
     import gc
 
-    from fastworkflow.model_pipeline_training import CommandRouter, ModelPipeline
+    from fastworkflow.train.model_pipeline_training import CommandRouter, ModelPipeline
     from fastworkflow.train import artifact_versioning
     from fastworkflow.train.score_lookup import discover_heads
 
@@ -632,7 +632,7 @@ def sweep_thresholds(opened: OpenedWorkflow, requests: Sequence[Request], thresh
 
 def context_full_chars(opened: OpenedWorkflow, name: str) -> int | None:
     """The FULL listing's characters with the workflow entered in context *name* (None if it cannot be entered)."""
-    from fastworkflow import workflow_agent
+    from fastworkflow.agent import workflow_agent
     from fastworkflow.core.context_identity import context_class_for
 
     app = opened.app
@@ -733,7 +733,7 @@ def app_spec(folder: Path, testset: Path) -> Spec:
 def run_spec(spec: Spec, scratch: Path, thresholds: Sequence[int] | None, *, requests: Sequence[Request] | None = None,
              threshold: int | None = None) -> dict[str, Any]:
     """Measure one workflow: summary at the production threshold, and optionally the sweep."""
-    import fastworkflow.run_listing as run_listing
+    import fastworkflow.agent.run_listing as run_listing
 
     reqs = list(requests) if requests is not None else (
         load_handwritten(spec.testset, str(spec.folder)) if spec.handwritten else load_test_set(spec.testset))
@@ -861,7 +861,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def run_listing_threshold() -> int:
-    from fastworkflow.run_listing import FULL_LISTING_MAX_CHARS
+    from fastworkflow.agent.run_listing import FULL_LISTING_MAX_CHARS
 
     return FULL_LISTING_MAX_CHARS
 

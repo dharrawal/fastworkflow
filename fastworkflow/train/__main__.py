@@ -18,8 +18,8 @@ from fastworkflow.utils.logging import logger
 from fastworkflow.utils import dspy_utils, python_utils
 from fastworkflow.parameters import workflow_vocabulary
 from fastworkflow import ModuleType
-from fastworkflow import model_pipeline_training
-from fastworkflow.model_pipeline_training import (
+from fastworkflow.train import model_pipeline_training
+from fastworkflow.train.model_pipeline_training import (
     CommandRouter,
     TrainingDataError,
     preflight_benchmark,
@@ -867,7 +867,7 @@ def _internal_workflow_trained(
     if signature is None:
         return False
     current = selective_training.compute_command_fingerprints(workflow_folderpath)
-    from fastworkflow.model_pipeline_training import BUILT_IN_VAGUE_SOURCE
+    from fastworkflow.train.model_pipeline_training import BUILT_IN_VAGUE_SOURCE
 
     if BUILT_IN_VAGUE_SOURCE in signature.command_fingerprints:
         # A head trained on the built-in vague replies signed them as an input (fix-1hs8).

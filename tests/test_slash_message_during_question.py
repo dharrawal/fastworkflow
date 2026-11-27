@@ -14,7 +14,7 @@ import pytest
 
 import fastworkflow
 from fastworkflow.review import approval_binding as ab
-from fastworkflow import workflow_agent
+from fastworkflow.agent import workflow_agent
 from fastworkflow.core.turn import TurnStatus
 from fastworkflow.engine.workflow_execution_context import (
     AWAITING_ANSWER_REFUSAL_MESSAGE, NOT_RUN_ARTIFACT, UsePlanError, WorkflowExecutionContext)

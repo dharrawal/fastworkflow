@@ -98,7 +98,7 @@ def _no_agent(_root_plan_added, gated, no_agent_model, no_planner_key, monkeypat
         raise AssertionError("the agent LM was built in no-agent mode")
 
     monkeypatch.setattr(WorkflowExecutionContext, "_agent_dspy_context", never)
-    monkeypatch.setattr("fastworkflow.workflow_agent.build_query_with_next_steps",
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.build_query_with_next_steps",
                         lambda user_query, session, **kwargs: setattr(session, "_initial_plan_text", "") or user_query)
 
 
@@ -177,7 +177,7 @@ def _stops(out):
 # ---------------------------------------------------------------- a pinned plan asks for its parameters, not for a review
 
 def test_a_chosen_plan_shows_its_parameters_to_confirm_and_never_the_review(gated, matcher, monkeypatch):
-    monkeypatch.setattr("fastworkflow.workflow_agent.split_into_subtasks",
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.split_into_subtasks",
                         lambda *a, **k: pytest.fail("a chosen plan's message is one part: it is not split"))
     lm = script_extractor(monkeypatch, *[GIVEN] * 12)
     out = gated.ctx.process_turn(EMMA, use_plan=PLAN, approval_surface=HOST)
@@ -286,7 +286,7 @@ def test_a_matched_part_with_a_required_value_unbound_is_asked_for_it_before_the
     and the reply ran the part. Now the title is asked for FIRST; the review then shows it given (nothing missing), and
     approving it runs the part with no further question."""
     Matcher(PLAN).install(monkeypatch)
-    monkeypatch.setattr("fastworkflow.workflow_agent.split_into_subtasks", lambda user_query, **kwargs: [user_query])
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.split_into_subtasks", lambda user_query, **kwargs: [user_query])
     extractor_finds_title_only_in_a_reply(monkeypatch)
     asked = gated.ctx.process_turn(JOKE, approval_surface=HOST)
 
@@ -324,7 +324,7 @@ def test_a_name_that_is_not_a_plan_of_the_context_is_refused_before_the_turn_beg
 def test_a_plan_of_a_scope_off_the_lookup_path_is_refused(gated, matcher, monkeypatch):
     """The set is the matcher's: with the library's scope off the path (tests/test_plan_scopes_listing.py has the
     ancestor and root cases that are on it), its plans are refused."""
-    from fastworkflow import workflow_agent
+    from fastworkflow.agent import workflow_agent
 
     monkeypatch.setattr(workflow_agent, "planning_scopes", lambda workflow: ("Member", ""))
     assert PLAN not in no_agent_mode.plan_names(gated.wf)

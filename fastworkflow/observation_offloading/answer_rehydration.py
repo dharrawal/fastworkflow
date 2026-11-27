@@ -29,7 +29,7 @@ Rules this module does not bend:
 
 Rehydration is what the extract step does, for every workflow; there is no flag
 to turn it off. The budget is derived from the model's context window
-(``fastworkflow.context_budget``); ``FW_ANSWER_REHYDRATION_MAX_BYTES`` remains
+(``fastworkflow.observation_offloading.context_budget``); ``FW_ANSWER_REHYDRATION_MAX_BYTES`` remains
 as a tuning override.
 """
 from __future__ import annotations
@@ -39,7 +39,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional
 
-from fastworkflow import context_budget
+from fastworkflow.observation_offloading import context_budget
 from fastworkflow.observation_offloading.archive import (
     RuntimeHandleArchive,
     RuntimeHandleScope,
@@ -90,7 +90,7 @@ def max_bytes_from_env() -> int:
 
     A fraction of the model's context window, unless
     ``FW_ANSWER_REHYDRATION_MAX_BYTES`` overrides it. See
-    ``fastworkflow.context_budget``.
+    ``fastworkflow.observation_offloading.context_budget``.
     """
     return context_budget.answer_rehydration_max_bytes()
 

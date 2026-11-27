@@ -34,7 +34,7 @@ the end.
 > different meanings and different training rules; §2 has the detail. Anything you
 > remember about "the wildcard class" is at best half right now.
 >
-> `fastworkflow/model_pipeline_training.py` is under active edit as R1 is wired in, so the
+> `fastworkflow/train/model_pipeline_training.py` is under active edit as R1 is wired in, so the
 > line numbers below drift. Prefer the symbol names; `grep -n` for them.
 
 ## When to use / when NOT to use
@@ -148,7 +148,7 @@ for an application workflow** (the framework's own workflows still use it). The 
 
 **Not sklearn.** Despite CLAUDE.md's wording, intent models are two HuggingFace
 `AutoModelForSequenceClassification` checkpoints fine-tuned with torch
-(`fastworkflow/model_pipeline_training.py` — note: repo root of the package, NOT under
+(`fastworkflow/train/model_pipeline_training.py` — note: repo root of the package, NOT under
 `train/`). sklearn contributes only `LabelEncoder`, `train_test_split`, `f1_score`
 (the `PCA` import at :5 is unused).
 
@@ -269,7 +269,7 @@ immediately at `you_misunderstood`, which an unconfident classifier already reac
 the "no out-of-scope rejection" note in §5.
 
 Assembly lives in `train()` — `grep -n "WILDCARD_LABEL\|PARAMETER_VALUE_LABEL"
-fastworkflow/model_pipeline_training.py`.
+fastworkflow/train/model_pipeline_training.py`.
 
 **Runtime tiering** (`ModelPipeline.predict_batch` :416-508, `CommandRouter.predict` :321-334):
 
@@ -551,7 +551,7 @@ Top offenders (full table with all ~25 entries:
 | Doc claim | Reality | Evidence |
 |---|---|---|
 | CLAUDE.md: intent models "DistilBERT/BERT via scikit-learn" | torch/transformers fine-tuning; sklearn = LabelEncoder/split/f1 only | `model_pipeline_training.py:3-17,956-957` |
-| (Surprise, not rot) train-time code implies training lives in `fastworkflow/train/` | The actual training loop `model_pipeline_training.py` sits at the `fastworkflow/` package root (it is also a run-time dependency: `CommandRouter`/`ModelPipeline`) | `ls fastworkflow/model_pipeline_training.py` |
+| (Surprise, not rot) train-time code implies training lives in `fastworkflow/train/` | The actual training loop `model_pipeline_training.py` sits at the `fastworkflow/` package root (it is also a run-time dependency: `CommandRouter`/`ModelPipeline`) | `ls fastworkflow/train/model_pipeline_training.py` |
 | `docs/DSPY_CACHE_GUIDE.md`: `fastworkflow.run_agent.agent_module`, root `dspy_cache_utils.py` | module gone; utility at `fastworkflow/utils/dspy_cache_utils.py` | grep |
 | env template documents `LLM_RESPONSE_GEN` | zero consumers | grep `--include=*.py` |
 | pyproject.toml:41 comment references `model_pipeline_training._load_tokenizer` | function no longer exists | grep |
@@ -568,26 +568,26 @@ sed -n '46,77p' fastworkflow/intent/nlu_labels.py
 grep -rn "WILDCARD_LABEL\|PARAMETER_VALUE_LABEL" fastworkflow/ --include=*.py
 
 # 2026-08-02: the escalation class is dropped where there are no ancestors
-grep -n "if net_ancestor_utterances" -B 12 fastworkflow/model_pipeline_training.py
+grep -n "if net_ancestor_utterances" -B 12 fastworkflow/train/model_pipeline_training.py
 
 # 2026-08-02: fixed mixed top-k escalation behaviour
 grep -n "Top-k escalation signal discarded" fastworkflow/_workflows/command_metadata_extraction/intent_detection.py
 
 # 2026-08-02: held-out evaluation and internal artifact publication
-grep -n "heldout_evaluation\." fastworkflow/model_pipeline_training.py
+grep -n "heldout_evaluation\." fastworkflow/train/model_pipeline_training.py
 fastworkflow train --help
 
 # 2026-08-02: rate limiting falls back to seeds rather than returning []
 grep -n "fell_back\|_with_retries" fastworkflow/train/generate_synthetic.py
 
 # Training hyperparameters (epochs/lr/batch/split) and threshold logic
-grep -n "num_epochs\|lr=\|batch_size=10\|test_size" fastworkflow/model_pipeline_training.py
+grep -n "num_epochs\|lr=\|batch_size=10\|test_size" fastworkflow/train/model_pipeline_training.py
 # Dead 0.5129 function still dead? (should only show the def, no call sites)
 grep -rn "find_optimal_confidence_threshold" fastworkflow/
 # Matching-ladder thresholds
 grep -n "threshold=0.3" fastworkflow/_workflows/command_metadata_extraction/intent_detection.py
 # Model defaults
-grep -n "INTENT_DETECTION" fastworkflow/model_pipeline_training.py
+grep -n "INTENT_DETECTION" fastworkflow/train/model_pipeline_training.py
 # DSPy example-gen numbers and the non-filtering return
 grep -n "num_examples=15\|validation_threshold=0.3" fastworkflow/train/__main__.py
 sed -n '604,613p' fastworkflow/train/generate_param_examples.py

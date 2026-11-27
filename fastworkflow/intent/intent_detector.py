@@ -144,7 +144,7 @@ def reachable_labels(workflow_folderpath: str, scope_path: Sequence[str]) -> fro
     """The qualified commands a request asked in the walk *scope_path* can be run as: the commands of every
     scope on the path (execution and planning, never the framework's core commands). A scope the workflow
     does not have contributes nothing."""
-    from fastworkflow import workflow_agent
+    from fastworkflow.agent import workflow_agent
 
     crd = fastworkflow.RoutingRegistry.get_definition(workflow_folderpath)
     core = workflow_agent.core_command_names()
@@ -264,7 +264,7 @@ def candidates(workflow_folderpath: str, context_name: str) -> list[Candidate]:
     be read is left empty: the name alone is still a candidate. Raises ``ValueError`` for a context the
     workflow does not have, as the routing definition does.
     """
-    from fastworkflow import workflow_agent
+    from fastworkflow.agent import workflow_agent
 
     crd = fastworkflow.RoutingRegistry.get_definition(workflow_folderpath)
     core = workflow_agent.core_command_names()
@@ -284,7 +284,7 @@ def candidates(workflow_folderpath: str, context_name: str) -> list[Candidate]:
 
 def _planning_candidates(workflow_folderpath: str, context_name: str) -> list[Candidate]:
     """The planning commands runnable in *context_name* (its own, then the inherited ones), as candidates."""
-    from fastworkflow import workflow_agent
+    from fastworkflow.agent import workflow_agent
 
     crd = fastworkflow.RoutingRegistry.get_definition(workflow_folderpath)
     planning_names = crd.get_planning_command_names(context_name)
@@ -353,7 +353,7 @@ def refresh_stale_head(folder: str) -> None:
     (a retrain of them still needs a restart). A turn already running keeps the router it started with. Never raises."""
     import time
 
-    from fastworkflow import model_pipeline_training
+    from fastworkflow.train import model_pipeline_training
     from fastworkflow.train import artifact_versioning
     from fastworkflow.utils.logging import logger
 
@@ -383,7 +383,7 @@ def refresh_stale_head(folder: str) -> None:
 def _command_router(folder: str):
     # Looked up on the module at call time, so a caller that replaces the trainer's CommandRouter
     # (or places an instance in its cache) is honoured here as it is everywhere else.
-    from fastworkflow import model_pipeline_training
+    from fastworkflow.train import model_pipeline_training
 
     refresh_stale_head(folder)
     return model_pipeline_training.CommandRouter(folder)
@@ -430,7 +430,7 @@ def head_is_confident(answer: "ScopeAnswer") -> bool:
 def matcher_available() -> bool:
     """Whether the model matcher can be asked: the planner key (``JEV_API_KEY``) is set. Never raises."""
     try:
-        from fastworkflow import workflow_agent
+        from fastworkflow.agent import workflow_agent
 
         return workflow_agent._jev_lm() is not None
     except Exception:  # noqa: BLE001 - a matcher that cannot be built is a matcher that is not there
@@ -588,7 +588,7 @@ def planning_candidates(workflow_folderpath: str) -> list[Candidate]:
     the planning match offers. Read from the planning command map alone (the scope that owns a planning
     command is in its name), so the match needs no routing definition, as it never did. A planning command
     whose file did not load is not offered, as the planning match has always had it."""
-    from fastworkflow import workflow_agent
+    from fastworkflow.agent import workflow_agent
 
     utterances = workflow_agent.planning_command_utterances(workflow_folderpath)
     return [Candidate(name=name, kind="planning", description=description,
@@ -646,7 +646,7 @@ def _ask_matcher(utterance: str, groups: Sequence[tuple[str, Sequence[Candidate]
     ``{"scores": {option: probability}, "model", "latency_ms", "calls"}``, plus ``"error"`` when the call
     failed (the scores are then empty). Never raises."""
     from fastworkflow.intent import remote_outage
-    from fastworkflow import workflow_agent
+    from fastworkflow.agent import workflow_agent
     from fastworkflow.utils.logging import logger
 
     result: dict = {"scores": {}, "model": None, "latency_ms": 0.0, "calls": 0}
@@ -957,7 +957,7 @@ def _untrained_report(
         from fastworkflow.train.artifact_versioning import context_folder_name
 
         if missing_contexts is None:
-            from fastworkflow.model_pipeline_training import is_workflow_trained
+            from fastworkflow.train.model_pipeline_training import is_workflow_trained
 
             missing_contexts = is_workflow_trained(workflow_folderpath)[1]
         missing = sorted(str(context) for context in missing_contexts)
@@ -1027,7 +1027,7 @@ def global_head_trained(workflow) -> bool:
     The model matcher does not change this: a workflow with no global head has no global-first step, and no
     extra matcher call is made for one. Where the step does run and the global head is not confident, '*' is
     on the matcher's scope path (``walk_path``), so its answer comes from the walk's one grouped call."""
-    from fastworkflow.model_pipeline_training import GLOBAL_CONTEXT_FOLDER
+    from fastworkflow.train.model_pipeline_training import GLOBAL_CONTEXT_FOLDER
 
     try:
         commands = fastworkflow.RoutingRegistry.get_definition(workflow.folderpath).get_command_names(GLOBAL_CONTEXT)
@@ -1203,7 +1203,7 @@ def detect(
     is read, never changed. *engine_of* gives the engine of a context name (default: ``engine_for``);
     a scope with no engine declines.
     """
-    from fastworkflow import workflow_agent
+    from fastworkflow.agent import workflow_agent
 
     if engine_of is None:
         scope_path = walk_path(workflow)

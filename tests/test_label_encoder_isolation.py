@@ -12,7 +12,7 @@ import time
 
 from sklearn.preprocessing import LabelEncoder
 
-from fastworkflow.model_pipeline_training import (
+from fastworkflow.train.model_pipeline_training import (
     get_label_encoder,
     predict_single_sentence,
 )
@@ -143,7 +143,7 @@ def test_encoder_is_unpickled_once_per_artefact_version(tmp_path):
 
 def test_prediction_does_not_disturb_the_trainer_global(tmp_path):
     """The trainer fits and pickles the module global; inference must leave it alone."""
-    import fastworkflow.model_pipeline_training as mpt
+    import fastworkflow.train.model_pipeline_training as mpt
 
     trainer_encoder = mpt.label_encoder
     path = _write_encoder(tmp_path / "ctx.pkl", ["c_add", "c_drop", "c_show"])

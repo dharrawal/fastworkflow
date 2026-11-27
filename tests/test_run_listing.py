@@ -20,9 +20,9 @@ import pytest
 
 import fastworkflow
 from fastworkflow.planning import planning_commands
-from fastworkflow import run_listing, workflow_agent
+from fastworkflow.agent import run_listing, workflow_agent
 from fastworkflow.planning.planning_commands import PlanningCommandInputError
-from fastworkflow.run_listing import (
+from fastworkflow.agent.run_listing import (
     COMMAND_SHORTLIST, FULL, FULL_LISTING_MAX_CHARS, ARMS, THRESHOLD, check_planned_arguments,
     listing_arm, planning_candidates, run_listing_text, shortlist_for)
 from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
@@ -134,7 +134,7 @@ def test_selector_defaults_to_none_restores_the_previous_arm_and_rejects_unknown
 def test_the_production_call_sites_are_byte_identical_with_the_selector_unset(copy_of):
     """With no experiment arm (or FULL), the run's listing is ``_what_can_i_do`` and the planner's is
     ``planner_commands_text``, byte for byte, on all three workflows."""
-    from fastworkflow.workflow_agent import _what_can_i_do, planner_listing_text, sub_task_commands_text
+    from fastworkflow.agent.workflow_agent import _what_can_i_do, planner_listing_text, sub_task_commands_text
 
     assert run_listing.selected_listing_arm() is None
     for app in (_library_in(copy_of, name="identity_library"), copy_of(TODO, "identity_todo"),
@@ -152,7 +152,7 @@ def test_the_production_call_sites_are_byte_identical_with_the_selector_unset(co
 
 
 def test_the_selected_shortlist_arm_routes_both_production_call_sites(copy_of):
-    from fastworkflow.workflow_agent import _what_can_i_do, planner_listing_text, sub_task_commands_text
+    from fastworkflow.agent.workflow_agent import _what_can_i_do, planner_listing_text, sub_task_commands_text
 
     library = _library_in(copy_of, name="routed_library")
     ctx = _ctx_for(library)
@@ -171,7 +171,7 @@ def test_the_selected_shortlist_arm_routes_both_production_call_sites(copy_of):
 def test_the_production_default_is_threshold_and_an_untrained_app_gets_full_above_the_threshold(copy_of, monkeypatch):
     """The production arm is THRESHOLD (fix-3rsq.plan-review.2.10), guarded: a listing above the threshold is still the
     full listing when the workflow has no trained heads (the shortlist would have no trained recall)."""
-    from fastworkflow.workflow_agent import _what_can_i_do, planner_listing_text, sub_task_commands_text
+    from fastworkflow.agent.workflow_agent import _what_can_i_do, planner_listing_text, sub_task_commands_text
 
     library = _library_in(copy_of, name="production_default")
     ctx = _ctx_for(library)
@@ -190,7 +190,7 @@ def test_the_production_default_is_threshold_and_an_untrained_app_gets_full_abov
 
 def test_the_production_threshold_shortlists_a_workflow_with_trained_heads(copy_of, monkeypatch):
     """With the trained heads and no experiment arm, production shortlists above the threshold at both call sites."""
-    from fastworkflow.workflow_agent import _what_can_i_do, planner_listing_text, sub_task_commands_text
+    from fastworkflow.agent.workflow_agent import _what_can_i_do, planner_listing_text, sub_task_commands_text
 
     library = _library_in(copy_of, name="production_threshold_heads")
     ctx = _ctx_for(library)
@@ -239,7 +239,7 @@ def test_has_trained_heads_needs_a_complete_head_folder(copy_of):
 def test_the_threshold_arm_shortlists_above_the_threshold_at_both_call_sites(copy_of, monkeypatch):
     """The THRESHOLD arm (the rule the 10.7 gate may adopt): above FULL_LISTING_MAX_CHARS the command shortlist at both
     call sites. The library's listings are under the real threshold, so it is lowered here."""
-    from fastworkflow.workflow_agent import _what_can_i_do, planner_listing_text, sub_task_commands_text
+    from fastworkflow.agent.workflow_agent import _what_can_i_do, planner_listing_text, sub_task_commands_text
 
     library = _library_in(copy_of, name="threshold_cut")
     ctx = _ctx_for(library)
@@ -295,7 +295,7 @@ def test_a_natural_sub_task_gets_its_command_from_the_trained_heads_alone(copy_o
 def test_head_candidates_keep_the_execution_top_k_as_well_as_the_planning_top_k(copy_of):
     """Round 1's candidates (fix-3rsq.plan-review.2.1): the heads' top-k execution commands are kept, not only the
     planning ones. Real trained heads (the library's, linked in); the split is by kind and never holds a non-command."""
-    from fastworkflow.run_listing import NON_COMMAND_LABELS, head_candidates
+    from fastworkflow.agent.run_listing import NON_COMMAND_LABELS, head_candidates
 
     library = _library_in(copy_of, name="head_candidates_execution")
     _with_trained_heads(library)
@@ -621,7 +621,7 @@ def test_without_a_jev_key_the_match_leaves_the_distribution_empty_and_the_listi
 def test_the_planning_distribution_gathers_the_planning_command_into_the_threshold_listing(copy_of, monkeypatch):
     """The turn's distribution (unsure candidates included) reaches the listing: book_loans, named by no word of the
     sub-task, is on the threshold arm's shortlist with the distribution and not without it."""
-    from fastworkflow.workflow_agent import _what_can_i_do, sub_task_commands_text
+    from fastworkflow.agent.workflow_agent import _what_can_i_do, sub_task_commands_text
 
     library = _library_in(copy_of, name="distribution_gather")
     ctx = _ctx_for(library)

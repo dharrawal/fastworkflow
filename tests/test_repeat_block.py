@@ -10,8 +10,8 @@ import pytest
 
 import fastworkflow
 from fastworkflow.engine.command_executor import CommandExecutor
-from fastworkflow import workflow_agent
-from fastworkflow.workflow_agent import initialize_workflow_tool_agent
+from fastworkflow.agent import workflow_agent
+from fastworkflow.agent.workflow_agent import initialize_workflow_tool_agent
 from tests.test_multi_command_refusal import initialized_fastworkflow, session  # noqa: F401
 
 COMMAND = "get_all_children"

@@ -34,8 +34,8 @@ from fastworkflow.observation_offloading.state import (
     reset_observation_state,
 )
 from fastworkflow.planning.typed_phase_facts import check_typed_facts_model, fill_typed_phase_output
-from fastworkflow.utils.react import fastWorkflowReAct
-from fastworkflow.workflow_agent import _hold_command_run
+from fastworkflow.agent.react import fastWorkflowReAct
+from fastworkflow.agent.workflow_agent import _hold_command_run
 
 pytestmark = pytest.mark.usefixtures("reference_agent_window")
 

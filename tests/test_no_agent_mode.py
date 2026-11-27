@@ -94,7 +94,7 @@ def _plan(monkeypatch, env, matches: dict | None = None, ad_hoc_plan: str = ""):
         session._phased_planning_command_call = (planning_command, call)
         return user_query
 
-    import fastworkflow.workflow_agent as workflow_agent
+    import fastworkflow.agent.workflow_agent as workflow_agent
     from tests.conftest import script_plan
 
     script_plan(monkeypatch, lambda text: command_for(text, None)[1], decided_by="matcher")
@@ -256,7 +256,7 @@ def test_a_stop_on_a_real_last_output_leaves_that_output_unmarked(library_env, m
 def test_a_multi_part_turn_runs_the_runnable_part_and_marks_the_ad_hoc_part(library_env, monkeypatch):
     library_env.planning_command = _build_planning_command(CodeOnly)
     _plan(monkeypatch, library_env, matches={"book": library_env.planning_command}, ad_hoc_plan=PLAN_TEXT)
-    monkeypatch.setattr("fastworkflow.workflow_agent.split_into_subtasks",
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.split_into_subtasks",
                         lambda *args, **kwargs: ["look up the book Dune", "plan a trip to Mars"])
     result = library_env.ctx.process_turn("look up the book Dune and plan a trip to Mars")
 
@@ -329,7 +329,7 @@ def test_a_plain_command_in_an_agent_turn_answers_from_its_own_response(library_
                    inputs=[SubTaskInput(name="query", value="Dune")])
     monkeypatch.setattr(WorkflowExecutionContext, "_subtask_gate",
                         lambda self, subtasks: setattr(self, "_turn_subtask_plan", SubTaskProposal(items=[item])))
-    monkeypatch.setattr("fastworkflow.workflow_agent.split_into_subtasks", lambda *a, **k: ["find the book Dune"])
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.split_into_subtasks", lambda *a, **k: ["find the book Dune"])
     library_env.planning_command = None
     result = library_env.ctx.process_turn("find the book Dune")
 

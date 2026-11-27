@@ -1,6 +1,6 @@
 # Context budgets: one input, every byte budget derived from it
 
-`fastworkflow/context_budget.py`.
+`fastworkflow/observation_offloading/context_budget.py`.
 
 fastWorkflow bounds several things by UTF-8 bytes: how much trajectory the ReAct
 loop carries into the next step, how much evidence the answer-time extract call

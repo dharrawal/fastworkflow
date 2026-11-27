@@ -74,7 +74,7 @@ Two places destroy the payload:
 ### 1.1 The ReAct tool boundary is text-only
 
 The agent invokes commands as a DSPy ReAct tool, `execute_workflow_query`, implemented by
-`_execute_workflow_query` in `fastworkflow/workflow_agent.py`. It calls
+`_execute_workflow_query` in `fastworkflow/agent/workflow_agent.py`. It calls
 `CommandExecutor.invoke_command(...)`, which returns the full `CommandOutput` (artifacts intact),
 but then extracts **only the text**:
 

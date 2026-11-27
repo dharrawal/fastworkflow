@@ -577,7 +577,7 @@ and `command_routing.py` — which carry AR2 and AR5 — were still unmodified a
 
 ```bash
 # F1 - split over the same synthetic set
-grep -n "train_test_split" fastworkflow/model_pipeline_training.py
+grep -n "train_test_split" fastworkflow/train/model_pipeline_training.py
 
 # F2 - no seeding anywhere; persona sample is free-running
 grep -rn "manual_seed\|random.seed\|set_seed\|np.random.seed" --include=*.py fastworkflow/
@@ -589,8 +589,8 @@ grep -n "return \[command_name\]" fastworkflow/train/generate_synthetic.py
 
 # F6/F8 - wildcard label assembly from ancestor contexts
 # (range corrected from 769,801 to 768,801 by AR7 - the def line is 768)
-grep -n "net_ancestor_plus_wildcard_utterances" -B 4 fastworkflow/model_pipeline_training.py
-sed -n '768,801p' fastworkflow/model_pipeline_training.py
+grep -n "net_ancestor_plus_wildcard_utterances" -B 4 fastworkflow/train/model_pipeline_training.py
+sed -n '768,801p' fastworkflow/train/model_pipeline_training.py
 
 # F7 - top-k wildcard takes the ambiguity branch; wildcard filtered from the message
 grep -n "len(predictions)==1\|command_name == \"wildcard\"" fastworkflow/_workflows/command_metadata_extraction/intent_detection.py
@@ -608,15 +608,15 @@ du -sh <workflow>/___command_info/*/ | sort -h | tail -5
 cat tests/todo_list_workflow/_commands/context_inheritance_model.json   # removed spelling: now inherits on class Context
 cat tests/todo_list_workflow/context_hierarchy_model.json
 grep -n "context_model.commands(ancestor_ctx)\|get_ancestor_contexts" \
-     fastworkflow/model_pipeline_training.py fastworkflow/core/command_context_model.py
+     fastworkflow/train/model_pipeline_training.py fastworkflow/core/command_context_model.py
 
 # AR2 - simple-name shadowing in the resolved command list
 sed -n '252,266p' fastworkflow/core/command_context_model.py
 
 # AR5 - training order is set-iteration order; the in-run cache is order-dependent, and
 # core commands are absent from commands() but present in crd.contexts
-sed -n '820,829p' fastworkflow/model_pipeline_training.py
-sed -n '839,863p' fastworkflow/model_pipeline_training.py
+sed -n '820,829p' fastworkflow/train/model_pipeline_training.py
+sed -n '839,863p' fastworkflow/train/model_pipeline_training.py
 grep -n "core_commands" fastworkflow/core/command_routing.py
 grep -n "pop('Core'" fastworkflow/core/command_context_model.py
 ```

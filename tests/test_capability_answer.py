@@ -13,7 +13,7 @@ import fastworkflow
 from tests.test_turn_result_capture import no_review_gate  # noqa: F401 - the review gate is off for these turns
 from fastworkflow._workflows.command_metadata_extraction._commands.IntentDetection.what_can_i_do import (
     Signature as WhatCanIDo)
-from fastworkflow.capability_answer import is_capability_question, render_capability_answer
+from fastworkflow.agent.capability_answer import is_capability_question, render_capability_answer
 from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 UTTERANCES = WhatCanIDo.plain_utterances
@@ -114,7 +114,7 @@ def test_a_context_left_with_no_commands_of_its_own_gets_no_line():
 
 
 def test_a_context_line_names_commands_while_it_fits_the_line_width(monkeypatch):
-    monkeypatch.setattr("fastworkflow.capability_answer.LINE_WIDTH", 42)
+    monkeypatch.setattr("fastworkflow.agent.capability_answer.LINE_WIDTH", 42)
     answer = render_capability_answer(
         {}, [],
         {"Directory": ["find_a", "find_b", "find_c", "find_d", "find_e", "find_f"],
@@ -139,7 +139,7 @@ def test_of_equally_short_examples_the_first_is_shown():
 
 
 def test_a_line_never_leaves_out_just_one_command(monkeypatch):
-    monkeypatch.setattr("fastworkflow.capability_answer.LINE_WIDTH", 50)
+    monkeypatch.setattr("fastworkflow.agent.capability_answer.LINE_WIDTH", 50)
     answer = render_capability_answer(
         {}, [],
         {"Account": ["find_a", "find_b", "find_c", "show_account_manager"],
@@ -155,7 +155,7 @@ def test_a_line_never_leaves_out_just_one_command(monkeypatch):
 
 
 def test_the_shared_line_may_fill_two_line_widths(monkeypatch):
-    monkeypatch.setattr("fastworkflow.capability_answer.LINE_WIDTH", 30)
+    monkeypatch.setattr("fastworkflow.agent.capability_answer.LINE_WIDTH", 30)
     shared = ["cmd_a", "cmd_b", "cmd_c", "cmd_d", "cmd_e", "cmd_f", "cmd_g", "cmd_h"]
     answer = render_capability_answer({}, [], {"One": shared, "Two": shared, "Three": shared})
     line = answer.splitlines()[-1]
@@ -181,9 +181,9 @@ def agent_ctx(monkeypatch):
     monkeypatch.setattr(ctx, "_ensure_agent_initialized", lambda: None)
     monkeypatch.setattr(WorkflowExecutionContext, "_agent_dspy_context",
                         lambda self: (SimpleNamespace(model="test-model"), None))
-    monkeypatch.setattr("fastworkflow.workflow_agent.split_into_subtasks",
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.split_into_subtasks",
                         lambda query, **kwargs: planned.append(query) or [query])
-    monkeypatch.setattr("fastworkflow.workflow_agent.build_query_with_next_steps",
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.build_query_with_next_steps",
                         lambda user_query, session, **kwargs: user_query)
     yield ctx, agent, planned
     RoutingRegistry.clear_registry()
@@ -191,7 +191,7 @@ def agent_ctx(monkeypatch):
 
 def test_with_planning_commands_the_turn_is_answered_in_code_without_the_planner_or_agent(agent_ctx, monkeypatch):
     ctx, agent, planned = agent_ctx
-    monkeypatch.setattr("fastworkflow.workflow_agent.planning_command_utterances",
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.planning_command_utterances",
                         lambda folder: {"close_out": ("close this record",)})
 
     turn = ctx.process_turn("Hey, what else can you do?")
@@ -219,12 +219,12 @@ def test_without_planning_commands_the_turn_goes_the_normal_way(agent_ctx):
 # ----------------------------------------------------------------------
 
 def _text_and_data(planning, commands, others=None):
-    from fastworkflow.capability_answer import capability_data
+    from fastworkflow.agent.capability_answer import capability_data
     return render_capability_answer(planning, commands, others), capability_data(planning, commands, others)
 
 
 def test_the_capability_data_agrees_with_the_text_name_for_name(monkeypatch):
-    monkeypatch.setattr("fastworkflow.capability_answer.LINE_WIDTH", 60)
+    monkeypatch.setattr("fastworkflow.agent.capability_answer.LINE_WIDTH", 60)
     planning = {"close_out": ("close this record", "wrap up the record now"), "no_example": ("  ",)}
     commands = ["find_book", "list_loans"]
     others = {"Account": ["find_a", "find_b", "find_c", "show_account_manager", "shared_one"],
@@ -256,7 +256,7 @@ def test_the_capability_data_agrees_with_the_text_name_for_name(monkeypatch):
 
 @pytest.mark.parametrize("width", [20, 42, 90])
 def test_the_capability_data_counts_the_rest_as_the_text_does(monkeypatch, width):
-    monkeypatch.setattr("fastworkflow.capability_answer.LINE_WIDTH", width)
+    monkeypatch.setattr("fastworkflow.agent.capability_answer.LINE_WIDTH", width)
     others = {"Group": [f"find_thing_{n}" for n in range(9)], "Other": ["x_one", "x_two"]}
     text, data = _text_and_data({}, [], others)
     for line, group in zip([l for l in text.splitlines() if l.startswith("- In ")], data["other_contexts"]):
@@ -267,7 +267,7 @@ def test_the_capability_data_counts_the_rest_as_the_text_does(monkeypatch, width
 
 def test_a_capability_turn_carries_the_data_in_the_answers_artifacts_and_the_text_is_unchanged(agent_ctx, monkeypatch):
     ctx, agent, planned = agent_ctx
-    monkeypatch.setattr("fastworkflow.workflow_agent.planning_command_utterances",
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.planning_command_utterances",
                         lambda folder: {"close_out": ("close this record",)})
     finalized = []
     real = ctx._finalize_agent_output

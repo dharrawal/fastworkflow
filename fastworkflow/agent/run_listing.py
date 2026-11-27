@@ -127,7 +127,7 @@ def planning_candidates(probabilities: Mapping[str, float],
     most probable first, ``none`` left out. Both go on the shortlist (3.10).
     """
     if threshold is None:
-        from fastworkflow.workflow_agent import PLANNING_COMMAND_MATCH_THRESHOLD as threshold
+        from fastworkflow.agent.workflow_agent import PLANNING_COMMAND_MATCH_THRESHOLD as threshold
     options = sorted(((name, float(p)) for name, p in probabilities.items() if name != NONE_OPTION),
                      key=lambda item: (-item[1], item[0]))
     confident = next((name for name, p in options if p >= threshold), None)
@@ -240,7 +240,7 @@ def _navigating(workflow, qualified_owner: str, active: str, edges) -> set[str]:
 def expand(workflow, seeds: Iterable[str]) -> frozenset[str]:
     """The shortlist: *seeds*, each command's producers, the commands that navigate to its context, a planning
     command's callees and the active context's core commands; repeated until nothing new is added (3.10)."""
-    from fastworkflow.workflow_agent import core_command_names
+    from fastworkflow.agent.workflow_agent import core_command_names
 
     folder = workflow.folderpath
     active = workflow._current_command_context_name
@@ -608,7 +608,7 @@ def run_listing_text(workflow, sub_task: str, *, arm: str | None = None,
     With ``arm`` None the production guard applies (``effective_listing_arm(workflow)``: FULL for a workflow with no
     trained heads). An explicit ``arm`` is used as given.
     """
-    from fastworkflow.workflow_agent import planner_commands_text
+    from fastworkflow.agent.workflow_agent import planner_commands_text
 
     arm = arm if arm is not None else effective_listing_arm(workflow)
     if arm not in ARMS:

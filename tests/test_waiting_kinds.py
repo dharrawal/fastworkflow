@@ -27,14 +27,14 @@ import pytest
 from fastworkflow.review import approval_binding as ab
 from fastworkflow.intent import intent_loop
 from fastworkflow.core import no_agent_mode
-from fastworkflow import workflow_agent
+from fastworkflow.agent import workflow_agent
 from fastworkflow.parameters import parameter_clarification
 from fastworkflow.planning import planning_commands as pc
 from fastworkflow.core import waiting as waiting_module
 from fastworkflow.engine.chat_session import ChatSession
 from fastworkflow.core.turn import TurnStatus
-from fastworkflow.workflow_agent import build_query_with_next_steps as REAL_BUILD
-from fastworkflow.workflow_agent import load_planning_command_map
+from fastworkflow.agent.workflow_agent import build_query_with_next_steps as REAL_BUILD
+from fastworkflow.agent.workflow_agent import load_planning_command_map
 from fastworkflow.engine.workflow_execution_context import NOT_RUN_ARTIFACT, WorkflowExecutionContext
 from tests.conftest import script_matcher
 from tests.test_approval_binding import _ask, _finish, annotated_library, todo  # noqa: F401 - fixtures
@@ -179,7 +179,7 @@ def test_a_parts_value_question_asked_while_it_runs_is_the_parameters_kind(todo,
     monkeypatch.setattr(workflow_agent, "_jev_lm", lambda *args, **kwargs: None)
     script_matcher(monkeypatch, lambda text: {command.name: 0.9, "none": 0.0})
     monkeypatch.setattr(workflow_agent, "typed_planning_call", refuse)
-    monkeypatch.setattr("fastworkflow.workflow_agent.split_into_subtasks", lambda user_query, **kwargs: [user_query])
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.split_into_subtasks", lambda user_query, **kwargs: [user_query])
     planner = _TextPlanner([], adapter=dspy.JSONAdapter())
     monkeypatch.setattr(workflow_agent, "build_query_with_next_steps",
                         lambda *args, **kwargs: REAL_BUILD(*args, **{**kwargs, "planner_lm": planner}))

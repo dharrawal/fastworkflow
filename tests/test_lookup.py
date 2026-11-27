@@ -31,7 +31,7 @@ import fastworkflow
 from fastworkflow import ModuleType
 from fastworkflow.engine.command_executor import CommandExecutor
 from fastworkflow.parameters.signatures import InputForParamExtraction
-from fastworkflow.workflow_agent import _explicit_agent_command
+from fastworkflow.agent.workflow_agent import _explicit_agent_command
 from fastworkflow.core.workflow import running_command
 
 # Fixtures and helpers reused from the sibling test modules (not copied).

@@ -17,7 +17,7 @@ import pytest
 import fastworkflow
 from fastworkflow.planning import planning_commands as pc
 from fastworkflow.engine import prompt_payloads
-from fastworkflow import workflow_agent
+from fastworkflow.agent import workflow_agent
 from fastworkflow.review import review_engine, review_proposals
 from fastworkflow.core.turn import TurnStatus
 from tests.test_approval_binding import (  # noqa: F401 - the real agent on the annotated library copy, and the guards
@@ -215,7 +215,7 @@ def gated(todo):
 
 def test_a_subtask_review_is_tagged_review_and_an_edit_refreshes_it(gated, monkeypatch):
     script_matcher(monkeypatch, {EMMA: {"none": 0.9}, JOKE: {"none": 0.9}})
-    monkeypatch.setattr("fastworkflow.workflow_agent.split_into_subtasks",
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.split_into_subtasks",
                         lambda user_query, **kwargs: [EMMA, JOKE])
     out = gated.ctx.process_turn(f"{EMMA} and {JOKE}")
     assert out.status is TurnStatus.AWAITING_USER

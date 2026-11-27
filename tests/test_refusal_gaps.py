@@ -15,9 +15,9 @@ from fastworkflow.review import approval_binding
 from fastworkflow.core import no_agent_mode
 from fastworkflow.review.approval_binding import Surface
 from fastworkflow.core.turn import TurnStatus
-from fastworkflow.workflow_agent import load_planning_command_map
+from fastworkflow.agent.workflow_agent import load_planning_command_map
 from fastworkflow.engine.workflow_execution_context import NOT_RUN_ARTIFACT, WorkflowExecutionContext
-from fastworkflow.workflow_agent import build_query_with_next_steps as REAL_BUILD
+from fastworkflow.agent.workflow_agent import build_query_with_next_steps as REAL_BUILD
 from tests.scripted_extractor import ScriptedExtractor
 from tests.test_approval_binding import annotated_library, todo  # noqa: F401
 from tests.test_round1_gate import gated  # noqa: F401
@@ -68,13 +68,13 @@ def _setup(gated, no_agent_model, no_planner_key, monkeypatch):
     monkeypatch.setenv("FW_DRAFT_ARGUMENTS", "on")
     monkeypatch.setattr(WorkflowExecutionContext, "_agent_dspy_context",
                         lambda self: pytest.fail("the agent LM was built in no-agent mode"))
-    monkeypatch.setattr("fastworkflow.workflow_agent.build_query_with_next_steps",
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.build_query_with_next_steps",
                         lambda user_query, session, **kwargs: setattr(session, "_initial_plan_text", "") or user_query)
     lm = _FindsWhatTheTextWrites([])
     original = signatures.dspy_utils.get_lm
     monkeypatch.setattr(signatures.dspy_utils, "get_lm",
                         lambda name, *a, **k: lm if name == "LLM_PARAM_EXTRACTION" else original(name, *a, **k))
-    monkeypatch.setattr("fastworkflow.workflow_agent.split_into_subtasks", lambda user_query, **kwargs: [user_query])
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.split_into_subtasks", lambda user_query, **kwargs: [user_query])
 
 
 def _reply(gated, message, **kwargs):
@@ -249,7 +249,7 @@ def test_a_part_that_names_a_planning_command_is_asked_about_every_missing_argum
     import dspy
     from dspy.utils import DummyLM
 
-    monkeypatch.setattr("fastworkflow.workflow_agent.build_query_with_next_steps", REAL_BUILD)
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.build_query_with_next_steps", REAL_BUILD)
     script_matcher(monkeypatch, lambda text: {PLAN: 0.9, "none": 0.0})
 
     class Planner(DummyLM):

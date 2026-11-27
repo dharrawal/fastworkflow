@@ -24,7 +24,7 @@ from fastworkflow._workflows.command_metadata_extraction.parameter_extraction im
 from fastworkflow.planning import planning_commands as pc
 from fastworkflow.planning.planning_commands import PlanningCommandInputError
 from fastworkflow.parameters.signatures import InputForParamExtraction
-from fastworkflow import workflow_agent
+from fastworkflow.agent import workflow_agent
 
 from tests.test_global_first_lookup import messaging_on_a_user  # noqa: F401 - fixture (a copy of messaging_app_4)
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401 - shared fixture

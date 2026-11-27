@@ -184,7 +184,7 @@ class fastWorkflowReAct(Module):
         ]
         # Build the ReAct signature with trajectory input.
         # available_commands is injected into system message by CommandsSystemPreludeAdapter
-        # (see fastworkflow/utils/chat_adapter.py) and is NOT included in the trajectory
+        # (see fastworkflow/agent/chat_adapter.py) and is NOT included in the trajectory
         # formatting to avoid token bloat across iterations.
         return (
             dspy.Signature({**self.signature.input_fields}, "\n".join(instr))
@@ -740,13 +740,13 @@ class fastWorkflowReAct(Module):
         """``(trajectory_for_the_extractor, report, budget, scope)``.
 
         It returns a COPY in which offload labels carry the stored evidence
-        behind them (see ``fastworkflow.answer_rehydration``). The loop's own
+        behind them (see ``fastworkflow.observation_offloading.answer_rehydration``). The loop's own
         trajectory is then never the object passed on, so neither rehydration nor
         a truncation of the rehydrated copy can change what the turn recorded. A
         failure anywhere here falls back to the plain call: an answer over
         pointers is worse than one over evidence and far better than no answer.
         """
-        from fastworkflow import answer_rehydration
+        from fastworkflow.observation_offloading import answer_rehydration
         from fastworkflow.observation_offloading.state import (
             current_scope,
             durable_archive,

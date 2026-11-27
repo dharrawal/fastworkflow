@@ -996,7 +996,7 @@ def test_an_answer_only_phase_shows_its_answer_mode_and_a_command_phase_none(wor
 def test_without_command_names_no_answer_mode_is_shown(workflow):
     from pathlib import Path
 
-    from fastworkflow import workflow_agent
+    from fastworkflow.agent import workflow_agent
 
     _add_answer_mode(Path(workflow))
     commands = workflow_agent.load_planning_command_map(workflow)
@@ -1052,7 +1052,7 @@ def test_pages_line_is_empty_without_a_paged_step_or_parameters():
 
 
 def test_a_phase_on_a_paged_command_shows_its_pages_line(workflow):
-    from fastworkflow import workflow_agent
+    from fastworkflow.agent import workflow_agent
 
     commands = workflow_agent.load_planning_command_map(workflow)
     (name, description, steps), = [s for s in workflow_agent.load_planning_commands(workflow)
@@ -1071,7 +1071,7 @@ def test_a_phase_on_a_paged_command_shows_its_pages_line(workflow):
 
 
 def test_a_flat_planning_command_shows_its_pages_line(workflow):
-    from fastworkflow import workflow_agent
+    from fastworkflow.agent import workflow_agent
 
     commands = workflow_agent.load_planning_command_map(workflow)
     (name, description, steps), = [s for s in workflow_agent.load_planning_commands(workflow)
@@ -1132,7 +1132,7 @@ def test_a_phase_reading_a_skipped_phase_reads_as_if_it_ran_in_the_template(tmp_
     """The template is built with placeholder facts, never None (the former "template reads
     as not run" check, fix-ajir.13, is gone): a phase reading a phase the call has shows its
     wording for when that phase ran; for a call without that phase its default holds."""
-    from fastworkflow import workflow_agent
+    from fastworkflow.agent import workflow_agent
 
     folder = tmp_path / "shelf_wf"
     (folder / "_commands").mkdir(parents=True)

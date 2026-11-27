@@ -289,7 +289,7 @@ def _is_not_a_request(norm: str) -> bool:
     if norm in {normalise(each) for each in PARAMETER_VALUE_PLACEHOLDERS}:
         return True
     try:
-        from fastworkflow.model_pipeline_training import BUILT_IN_VAGUE_REPLIES
+        from fastworkflow.train.model_pipeline_training import BUILT_IN_VAGUE_REPLIES
     except Exception:  # noqa: BLE001 - without the trainer's list only the checks above apply
         return False
     return norm in {normalise(each) for each in BUILT_IN_VAGUE_REPLIES}

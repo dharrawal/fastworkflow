@@ -187,7 +187,7 @@ EXEC_MODELS = {"ExecStr": ExecStr, "ExecNum": ExecNum, "ExecOptions": ExecOption
 
 def build_commands(directory: Path) -> dict:
     """The tutorial's planning commands plus this table's, loaded from a copy under *directory*."""
-    from fastworkflow import workflow_agent
+    from fastworkflow.agent import workflow_agent
 
     copy = directory / "tutorial"
     shutil.copytree(TUTORIAL, copy, ignore=shutil.ignore_patterns("___command_info", "__pycache__", "versions"))

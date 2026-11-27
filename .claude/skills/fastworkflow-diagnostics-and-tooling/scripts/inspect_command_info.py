@@ -170,7 +170,7 @@ def inspect(workflow_dir: str, with_fingerprint: bool = True) -> dict:
     report["context_models"] = models
 
     # A context is "trained" when threshold.json exists (mirrors
-    # fastworkflow.model_pipeline_training.is_workflow_trained). Internal
+    # fastworkflow.train.model_pipeline_training.is_workflow_trained). Internal
     # command_metadata_extraction (CME) contexts are trained inside the CME
     # workflow, never per app workflow, so their absence here is BY DESIGN
     # (ErrorCorrection additionally has no model at all: its commands are

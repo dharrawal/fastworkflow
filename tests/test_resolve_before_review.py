@@ -324,7 +324,7 @@ def test_a_pinned_plans_parameter_question_is_the_review_of_that_turn(no_agent):
 # ======================================================================================================================
 
 def _split_into(monkeypatch, parts):
-    monkeypatch.setattr("fastworkflow.workflow_agent.split_into_subtasks", lambda user_query, **kwargs: list(parts))
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.split_into_subtasks", lambda user_query, **kwargs: list(parts))
 
 
 def test_with_an_agent_model_an_ambiguous_part_is_asked_before_the_review_and_may_be_a_plain_command(gated, monkeypatch):

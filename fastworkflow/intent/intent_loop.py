@@ -154,7 +154,7 @@ class Intent:
 def _kinds(workflow) -> tuple[set[str], set[str]]:
     """``(planning names, core names)`` of the workflow."""
     from fastworkflow.planning import planning_commands
-    from fastworkflow.workflow_agent import core_command_names
+    from fastworkflow.agent.workflow_agent import core_command_names
 
     return (set(planning_commands.resolve_field_sources(workflow.folderpath).planning_commands),
             set(core_command_names()))
@@ -380,7 +380,7 @@ def _core_fuzzy_keys() -> dict[str, str]:
     """``{key: qualified core name}`` the CME's fuzzy name layer also reads: the context-independent navigation commands
     by their names, and ``you_misunderstood`` by its plain utterances."""
     import fastworkflow
-    from fastworkflow.workflow_agent import core_command_names
+    from fastworkflow.agent.workflow_agent import core_command_names
 
     internal = fastworkflow.RoutingRegistry.get_definition(
         fastworkflow.get_internal_workflow_path("command_metadata_extraction"))

@@ -18,7 +18,7 @@ import pytest
 from pydantic import BaseModel, Field
 
 import fastworkflow
-import fastworkflow.workflow_agent as workflow_agent
+import fastworkflow.agent.workflow_agent as workflow_agent
 from fastworkflow.planning import planning_commands, planning_phases
 from fastworkflow.planning import plan_frame as plan_frame_module
 from fastworkflow.observability import tracing

@@ -25,7 +25,7 @@ from io import StringIO
 import pytest
 
 import fastworkflow
-from fastworkflow import model_pipeline_training
+from fastworkflow.train import model_pipeline_training
 from fastworkflow.core.command_directory import CommandDirectory
 from fastworkflow.intent.nlu_labels import (
     ESCALATION_LABELS,

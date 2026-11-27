@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 
 import fastworkflow
 from fastworkflow.planning import command_preview, planning_commands, planning_phases
-from fastworkflow import workflow_agent
+from fastworkflow.agent import workflow_agent
 from fastworkflow.observability import tracing
 from fastworkflow.planning import ANSWER_BY_MODEL, phase, run, when
 from fastworkflow.planning.planning_commands import PlanningCommandFormatError

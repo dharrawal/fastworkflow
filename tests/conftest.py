@@ -18,7 +18,7 @@ import litellm  # noqa: E402
 import pytest  # noqa: E402
 
 import fastworkflow
-from fastworkflow import context_budget
+from fastworkflow.observation_offloading import context_budget
 from fastworkflow.observability import store as observability_store
 from tests import plan_head, recorded_router
 from tests.recorded_router import recorded_review_router  # noqa: F401  (fixture, shared by the reader tests)
@@ -320,7 +320,7 @@ def split_gate_off():
     The patch has its own ``MonkeyPatch`` (not the test's): an autouse fixture that requests ``monkeypatch`` sets it up
     before every other fixture, so a test's own patches would then be undone only after those fixtures' teardowns ran
     (a fixture's teardown would call a function the test patched to raise)."""
-    from fastworkflow import workflow_agent
+    from fastworkflow.agent import workflow_agent
 
     guard = pytest.MonkeyPatch()
     guard.setenv(workflow_agent.SPLIT_GATE_THRESHOLD_SETTING, workflow_agent.SPLIT_GATE_OFF)
@@ -339,7 +339,7 @@ def no_planner_key(monkeypatch):
     before the test (an earlier test that had a key may have filled them) and after it (so this test leaks nothing).
     When the planner becomes mandatory, the tests that use this fixture are retired.
     """
-    from fastworkflow import workflow_agent
+    from fastworkflow.agent import workflow_agent
     monkeypatch.delenv("JEV_API_KEY", raising=False)
     monkeypatch.setattr(fastworkflow, "_env_vars",
                         {name: value for name, value in fastworkflow._env_vars.items() if name != "JEV_API_KEY"})
@@ -384,7 +384,7 @@ def no_local_model(monkeypatch) -> None:
     """No context has a trained local intent model (the state of a workflow that has not been trained): the detection
     chain is the remote decision model alone, so a test's scripted answer (``script_matcher``) is the whole decision."""
     from fastworkflow.intent import intent_detector
-    from fastworkflow import run_listing
+    from fastworkflow.agent import run_listing
 
     monkeypatch.delenv("FW_REQUIRE_HEADS", raising=False)
     monkeypatch.setattr(intent_detector, "has_head", lambda folder: False)
@@ -397,7 +397,7 @@ def script_plan(monkeypatch, pick, *, decided_by: str = "exact_name") -> None:
     The picked commands are added to ``workflow_agent.load_planning_command_map`` so the run finds them by name. A
     pinned plan (``use_plan``) is still decided by the product code. *decided_by* defaults to an exact command name, the
     one decider a single planning part takes the fast path on (a local model's planning pick is checked, fix-o1lg.2)."""
-    from fastworkflow import workflow_agent
+    from fastworkflow.agent import workflow_agent
     from fastworkflow._workflows.plan_metadata_extraction import resolution
 
     real_intent, real_map = resolution.part_intent, workflow_agent.load_planning_command_map

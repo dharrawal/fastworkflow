@@ -22,7 +22,7 @@ import pytest
 
 import fastworkflow
 from fastworkflow.intent import intent_clarification, intent_detector, intent_loop
-from fastworkflow import model_pipeline_training
+from fastworkflow.train import model_pipeline_training
 from fastworkflow._workflows.command_metadata_extraction._commands import wildcard
 from fastworkflow._workflows.command_metadata_extraction.intent_detection import CommandNamePrediction
 from fastworkflow._workflows.plan_metadata_extraction import resolution

@@ -210,7 +210,7 @@ def utterance_command_names(cmd_dir) -> list[str]:
     The trainer walks each context's label space, which holds these commands. Planning commands
     and the reserved wildcard are not labels, so they are excluded here as well.
     """
-    from fastworkflow.model_pipeline_training import _requires_utterances
+    from fastworkflow.train.model_pipeline_training import _requires_utterances
     from fastworkflow.intent.nlu_labels import WILDCARD_LABEL, label_of
 
     names = set(cmd_dir.get_execution_commands()) | set(cmd_dir.core_command_names)
@@ -239,7 +239,7 @@ def cache_report(folder: str) -> dict:
     """
     import math
 
-    from fastworkflow.model_pipeline_training import get_route_layer_filepath_model
+    from fastworkflow.train.model_pipeline_training import get_route_layer_filepath_model
     from fastworkflow.train import generate_synthetic as gs
     from fastworkflow.train import param_example_cache as pc
     from fastworkflow.train import utterance_cache as uc
@@ -344,7 +344,7 @@ def fill_cache(folder: str) -> str:
     unblocked env. Returns the cache counters as text.
     """
     import fastworkflow
-    from fastworkflow.model_pipeline_training import _get_utterances
+    from fastworkflow.train.model_pipeline_training import _get_utterances
     from fastworkflow.train import param_example_cache as pc
     from fastworkflow.train import utterance_cache as uc
     from fastworkflow.train.__main__ import _generate_dspy_examples_helper
@@ -585,7 +585,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     if not (args.cache_report or args.fill_cache_only) and not args.arm:
         parser.error("--arm is required to train")
     if args.arm is not None and args.arm not in ARM_CHOICES:
-        from fastworkflow.model_pipeline_training import RETIRED_ARMS
+        from fastworkflow.train.model_pipeline_training import RETIRED_ARMS
 
         if args.arm in RETIRED_ARMS:
             parser.error(f"--arm {args.arm!r} is retired: {RETIRED_ARMS[args.arm]}")
@@ -618,7 +618,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 def _run(args: argparse.Namespace, scratch: str, workflow_copy: str) -> int:
     # Imported here so --help and --dry-run stay cheap.
     import fastworkflow
-    from fastworkflow.model_pipeline_training import experiment_head_scope, experiment_reserved_class_arm
+    from fastworkflow.train.model_pipeline_training import experiment_head_scope, experiment_reserved_class_arm
     from fastworkflow.train import score_not_here as scorer
     from fastworkflow.train import determinism
     from fastworkflow.train.__main__ import train_workflow

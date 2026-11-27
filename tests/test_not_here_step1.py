@@ -14,7 +14,7 @@ import pytest
 
 import fastworkflow
 from fastworkflow.core.command_routing import RoutingRegistry
-from fastworkflow.model_pipeline_training import choose_not_here_sample, not_here_seed_rows, trained_command_labels
+from fastworkflow.train.model_pipeline_training import choose_not_here_sample, not_here_seed_rows, trained_command_labels
 from fastworkflow.train import determinism
 from fastworkflow.train import not_here_step1 as step1
 from fastworkflow.train import score_not_here as scorer
@@ -79,13 +79,13 @@ def test_the_chosen_reserved_rows_repeat_and_do_not_vary_with_the_train_seed():
 
 
 def planning_names_of(folder: str) -> set[str]:
-    from fastworkflow.workflow_agent import planning_command_utterances
+    from fastworkflow.agent.workflow_agent import planning_command_utterances
 
     return set(planning_command_utterances(folder))
 
 
 def planning_utterances_of(folder: str) -> dict:
-    from fastworkflow.workflow_agent import planning_command_utterances
+    from fastworkflow.agent.workflow_agent import planning_command_utterances
 
     return planning_command_utterances(folder)
 

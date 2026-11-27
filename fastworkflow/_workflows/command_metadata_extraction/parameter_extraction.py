@@ -857,7 +857,7 @@ def classify_missing_value_reply(question: str, reply: str) -> str:
         return "answer"
     try:
         from dspy.experimental import Choice
-        from fastworkflow.workflow_agent import _jev_lm
+        from fastworkflow.agent.workflow_agent import _jev_lm
 
         jev_lm = _jev_lm()
         if jev_lm is None:
@@ -923,7 +923,7 @@ def _start_argument_checks(app_workflow, extractor, command_name: str, params_cl
     ``(None, None)`` when there is no Jev LM or the command has no ``verify`` parameter (nothing to start)."""
     import concurrent.futures
     from fastworkflow.planning import planning_commands
-    from fastworkflow.workflow_agent import _jev_lm
+    from fastworkflow.agent.workflow_agent import _jev_lm
 
     lm = _jev_lm()
     if lm is None:

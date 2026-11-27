@@ -36,7 +36,7 @@ from fastworkflow.core.command_context_model import CommandContextModel
 from fastworkflow.core.command_directory import CommandDirectory
 from fastworkflow.core.command_routing import RoutingDefinition, RoutingRegistry
 from tests.context_declarations import declare_inherits
-from fastworkflow.model_pipeline_training import (
+from fastworkflow.train.model_pipeline_training import (
     CommandRouter,
     TrainingDataError,
     get_artifact_path,

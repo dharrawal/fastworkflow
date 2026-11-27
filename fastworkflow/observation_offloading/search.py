@@ -9,7 +9,7 @@ import time
 import litellm  # noqa: F401  (must precede dspy; see fastworkflow/utils/dspy_utils.py)
 import dspy
 
-from fastworkflow import context_budget
+from fastworkflow.observation_offloading import context_budget
 from fastworkflow.utils.dspy_utils import call_dropping_rejected_params, get_lm
 from fastworkflow.observation_offloading.archive import (
     RuntimeHandleArchive,

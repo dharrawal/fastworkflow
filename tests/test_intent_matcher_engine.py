@@ -24,9 +24,9 @@ import pytest
 from dspy.utils import DummyLM
 
 import fastworkflow
-from fastworkflow import model_pipeline_training
+from fastworkflow.train import model_pipeline_training
 from fastworkflow.intent import intent_detector
-from fastworkflow import run_listing, workflow_agent
+from fastworkflow.agent import run_listing, workflow_agent
 from fastworkflow.core import turn_cache
 from fastworkflow.observability import tracing
 from fastworkflow._workflows.command_metadata_extraction import intent_detection
@@ -780,7 +780,7 @@ def test_the_chat_page_lists_an_untrained_workflow_as_runnable_only_when_the_mat
 
 def test_the_mcp_server_still_refuses_an_untrained_workflow_when_heads_are_required(
         on_a_book, matcher_model, monkeypatch):
-    from fastworkflow import mcp_server
+    from fastworkflow.run_fastapi_mcp import mcp_server
 
     app, _, _, _ = on_a_book
     matcher_model({"none": 1.0})

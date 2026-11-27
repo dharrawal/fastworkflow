@@ -83,7 +83,7 @@ def _mark_trained(wf: Path) -> None:
     )
     # Phase 9 step 4: a trained workflow has a current version whose manifest carries the
     # not-here construction record. Flat artifacts alone are refused (see the test below).
-    from fastworkflow.model_pipeline_training import construction_records
+    from fastworkflow.train.model_pipeline_training import construction_records
     from fastworkflow.train import artifact_versioning as av
 
     version_id = av.new_version_id()

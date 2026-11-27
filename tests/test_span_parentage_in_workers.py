@@ -225,7 +225,7 @@ class _Statement(BaseModel):
 
 
 def test_the_field_given_check_pool_files_each_model_call_under_the_span_open_at_submission(host, monkeypatch):
-    import fastworkflow.workflow_agent as workflow_agent
+    import fastworkflow.agent.workflow_agent as workflow_agent
 
     barrier = threading.Barrier(2)
 

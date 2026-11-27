@@ -6,7 +6,7 @@ import json
 import pytest
 import fastworkflow
 from fastworkflow.engine.chat_session import ChatSession
-from fastworkflow.workflow_agent import (
+from fastworkflow.agent.workflow_agent import (
     initialize_workflow_tool_agent,
 )
 
@@ -35,7 +35,7 @@ def initialized_fastworkflow(mock_env_vars):
 
 def test_initialize_tool_agent(initialized_fastworkflow):
     chat_session = ChatSession(run_as_agent=True)
-    from fastworkflow.mcp_server import FastWorkflowMCPServer
+    from fastworkflow.run_fastapi_mcp.mcp_server import FastWorkflowMCPServer
     mcp_server = FastWorkflowMCPServer(chat_session)
     agent = initialize_workflow_tool_agent(mcp_server)
     assert agent is not None
@@ -49,12 +49,12 @@ def test_what_can_i_do_tool_executes(initialized_fastworkflow):
     workflow = fastworkflow.Workflow.create(retail_path, workflow_id_str="agent-test")
     chat_session.push_active_workflow(workflow)
 
-    from fastworkflow.mcp_server import FastWorkflowMCPServer
+    from fastworkflow.run_fastapi_mcp.mcp_server import FastWorkflowMCPServer
     mcp_server = FastWorkflowMCPServer(chat_session)
     agent = initialize_workflow_tool_agent(mcp_server)
 
     # Call the underlying helper to validate behavior without relying on agent internals
-    from fastworkflow.workflow_agent import _what_can_i_do
+    from fastworkflow.agent.workflow_agent import _what_can_i_do
     result = _what_can_i_do(chat_session)
     assert isinstance(result, str)
     # Should include header or JSON depending on mode detection; accept either

@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from fastworkflow.planning import planning_commands as sc
-from fastworkflow import workflow_agent
+from fastworkflow.agent import workflow_agent
 from tests.test_check_roles_one_step import workflow  # noqa: F401  (workflow is a fixture)
 
 #: ``quietly`` is switched off when the command text says "loudly"; ``member`` is a marked value.

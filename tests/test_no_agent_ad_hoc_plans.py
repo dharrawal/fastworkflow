@@ -12,7 +12,7 @@ from __future__ import annotations
 import pytest
 
 from fastworkflow.core import no_agent_mode
-from fastworkflow import run_listing
+from fastworkflow.agent import run_listing
 from fastworkflow.review import review_proposals
 from fastworkflow.review.approval_binding import Surface
 from fastworkflow.core.turn import TurnStatus
@@ -48,7 +48,7 @@ def _no_agent(initialized_fastworkflow, no_agent_model, no_planner_key, gated, m
         session._phased_planning_command_call = None
         return user_query
 
-    monkeypatch.setattr("fastworkflow.workflow_agent.build_query_with_next_steps", plan)
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.build_query_with_next_steps", plan)
 
 
 def _jev(monkeypatch, distributions: dict[str, dict[str, float]] | None = None):
@@ -62,7 +62,7 @@ def _stops(out):
 
 
 def _context_plans(gated) -> list[str]:
-    from fastworkflow import workflow_agent
+    from fastworkflow.agent import workflow_agent
 
     return sorted(workflow_agent.planning_names_on_path(gated.wf))
 

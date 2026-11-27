@@ -25,7 +25,7 @@ from dspy.utils import DummyLM
 
 import fastworkflow
 from fastworkflow.planning import planning_commands as pc
-from fastworkflow import workflow_agent
+from fastworkflow.agent import workflow_agent
 from fastworkflow._workflows.command_metadata_extraction import parameter_extraction
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import extract_arguments
 from fastworkflow.parameters import signatures

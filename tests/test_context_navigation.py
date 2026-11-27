@@ -20,7 +20,7 @@ from fastworkflow.core.context_navigation import (
     plan_navigation,
     render_unavailable_command,
 )
-from fastworkflow.workflow_agent import _explicit_agent_command
+from fastworkflow.agent.workflow_agent import _explicit_agent_command
 
 @pytest.fixture(autouse=True)
 def _restore_sys_path(monkeypatch):

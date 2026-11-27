@@ -149,8 +149,8 @@ def known_plan_names(workflow) -> dict[str, str]:
         return {}
     try:
         from fastworkflow.planning import planning_commands
-        from fastworkflow import run_listing
-        from fastworkflow.workflow_agent import core_command_names
+        from fastworkflow.agent import run_listing
+        from fastworkflow.agent.workflow_agent import core_command_names
 
         folder = workflow.folderpath
         every = planning_commands.resolve_field_sources(folder).planning_commands

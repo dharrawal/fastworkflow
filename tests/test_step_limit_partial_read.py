@@ -22,7 +22,7 @@ def paged(todo, monkeypatch):
     # The commands of the annotated copy import their own copy of the library module: shrink the pages there.
     for module in [m for name, m in list(sys.modules.items()) if name.endswith("application.library")]:
         monkeypatch.setattr(module, "PAGE_SIZE", 1)
-    monkeypatch.setattr("fastworkflow.workflow_agent.run_progress_check", lambda *a, **k: "DONE SUMMARY")
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.run_progress_check", lambda *a, **k: "DONE SUMMARY")
     return todo
 
 
@@ -95,7 +95,7 @@ def test_a_planning_command_phase_out_of_steps_states_the_rows_read_of_the_total
     model.run("find_book query=a start=1")
     model.run("find_book query=a start=2")
     # Two parts, so the turn runs through its sub-task loop; the second part is a different command-free request.
-    monkeypatch.setattr("fastworkflow.workflow_agent.split_into_subtasks",
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.split_into_subtasks",
                         lambda *args, **kwargs: ["look up the book Dune", "look up the book Emma"])
     for _ in range(2):
         model.run("find_book query=a start=1")

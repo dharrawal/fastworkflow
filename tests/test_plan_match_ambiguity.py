@@ -25,7 +25,7 @@ import pytest
 import fastworkflow
 from fastworkflow.review import review_engine as re_
 from fastworkflow.intent import intent_detector
-from fastworkflow import run_listing
+from fastworkflow.agent import run_listing
 from fastworkflow.review import review_proposals
 from fastworkflow.observability import tracing
 from fastworkflow._workflows.plan_metadata_extraction import resolution

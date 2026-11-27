@@ -16,11 +16,11 @@ import pytest
 
 from fastworkflow.parameters import parameter_clarification as loops
 from fastworkflow.planning import planning_commands as pc
-from fastworkflow import workflow_agent
+from fastworkflow.agent import workflow_agent
 from fastworkflow._workflows.plan_metadata_extraction.resolution import PlanResolution
 from fastworkflow.core.turn import TurnStatus
-from fastworkflow.workflow_agent import build_query_with_next_steps as REAL_BUILD
-from fastworkflow.workflow_agent import load_planning_command_map
+from fastworkflow.agent.workflow_agent import build_query_with_next_steps as REAL_BUILD
+from fastworkflow.agent.workflow_agent import load_planning_command_map
 from fastworkflow.engine.workflow_execution_context import NOT_RUN_ARTIFACT
 from tests.conftest import script_matcher
 from tests.test_approval_binding import _finish, annotated_library, todo  # noqa: F401 - fixtures
@@ -151,7 +151,7 @@ def _refused_book_part(todo, monkeypatch):
     monkeypatch.setattr(workflow_agent, "_jev_lm", lambda *args, **kwargs: None)
     script_matcher(monkeypatch, lambda text: {command.name: 0.9, "none": 0.0})
     monkeypatch.setattr(workflow_agent, "typed_planning_call", refuse)
-    monkeypatch.setattr("fastworkflow.workflow_agent.split_into_subtasks", lambda user_query, **kwargs: [user_query])
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.split_into_subtasks", lambda user_query, **kwargs: [user_query])
     planner = _TextPlanner([], adapter=dspy.JSONAdapter())
     monkeypatch.setattr(workflow_agent, "build_query_with_next_steps",
                         lambda *args, **kwargs: REAL_BUILD(*args, **{**kwargs, "planner_lm": planner}))

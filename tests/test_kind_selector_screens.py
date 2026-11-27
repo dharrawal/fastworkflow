@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field
 
 import fastworkflow
 from fastworkflow.planning import planning_commands as sc
-from fastworkflow import workflow_agent
+from fastworkflow.agent import workflow_agent
 from fastworkflow.parameters import signatures
 from fastworkflow.parameters import workflow_vocabulary as wv
 from fastworkflow.parameters.signatures import InputForParamExtraction

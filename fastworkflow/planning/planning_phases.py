@@ -2684,7 +2684,7 @@ class CodeSteps:
         """The no-value moves to a context where *command* runs; [] when it runs here."""
         from fastworkflow.engine.command_executor import AlreadyInContextError, CommandNotFoundError
         from fastworkflow.core.context_navigation import code_path
-        from fastworkflow.workflow_agent import _explicit_agent_command
+        from fastworkflow.agent.workflow_agent import _explicit_agent_command
 
         workflow = self.workflow()
         try:

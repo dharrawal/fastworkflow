@@ -474,7 +474,7 @@ def gate(chat_session: Any, workflow: Any, command_name: str, input_obj: Any, ra
     if (put := getattr(review_engine.question_owner(store, chat_session), "_put_approval_record", None)) is not None:
         put(record)      # the question is the turn's waiting record, pointing at this one (``waiting``)
     if suspendable:
-        from fastworkflow.utils.react import AskUserSuspend
+        from fastworkflow.agent.react import AskUserSuspend
 
         raise AskUserSuspend(text)
     return awaiting_output(workflow, text)

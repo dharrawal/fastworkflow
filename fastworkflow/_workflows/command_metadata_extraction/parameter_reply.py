@@ -97,7 +97,7 @@ def _missing_value_reply_intent(workflow, app_workflow, command_name: str,
     if loop is None:
         return "answer", []
     try:
-        from fastworkflow.workflow_agent import _jev_lm
+        from fastworkflow.agent.workflow_agent import _jev_lm
 
         if _jev_lm() is None:
             return "answer", []

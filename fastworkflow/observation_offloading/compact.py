@@ -6,7 +6,7 @@ import json
 import re
 from typing import Any, Callable, Mapping, Optional
 
-from fastworkflow import context_budget
+from fastworkflow.observation_offloading import context_budget
 from fastworkflow.observation_offloading.archive import RuntimeHandleArchive, RuntimeHandleScope
 from fastworkflow.observation_offloading.labels import (
     command_response,
@@ -53,7 +53,7 @@ _STEP_KEY = re.compile(r"^(?:tool_name|observation)_(\d+)$")
 
 
 def packed_target_bytes_from_env() -> int:
-    """The packed-trajectory target for this run. See ``fastworkflow.context_budget``."""
+    """The packed-trajectory target for this run. See ``fastworkflow.observation_offloading.context_budget``."""
     return context_budget.trajectory_max_bytes()
 
 

@@ -183,7 +183,7 @@ def test_a_refused_preset_falls_back_to_the_agent_and_is_recorded_as_a_deviation
         queries.append(user_query)
         return user_query
 
-    monkeypatch.setattr("fastworkflow.workflow_agent.build_query_with_next_steps", planner)
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.build_query_with_next_steps", planner)
     _review(gated, monkeypatch, [EMMA, JOKE])
     gated.ctx.process_turn("change 2: inputs=member=everyone")
     drafted = len(lm.prompts)
@@ -575,7 +575,7 @@ def test_with_drafting_off_the_run_is_unchanged(gated, monkeypatch, scripted):
         queries.append(user_query)
         return user_query
 
-    monkeypatch.setattr("fastworkflow.workflow_agent.build_query_with_next_steps", planner)
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.build_query_with_next_steps", planner)
     record = _review(gated, monkeypatch, [EMMA, JOKE])
     assert _subtask(record, 1).inputs == [] and "missing required argument title" in _subtask(record, 1).check
 

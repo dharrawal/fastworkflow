@@ -118,7 +118,7 @@ def with_workflow_identifiers(
     if facts.id_patterns or not workflow_folderpath:
         return facts
     try:
-        from fastworkflow.workflow_agent import identifier_patterns
+        from fastworkflow.agent.workflow_agent import identifier_patterns
 
         patterns = tuple(identifier_patterns(workflow_folderpath))   # compiled: their flags are kept
     except Exception as exc:  # noqa: BLE001 - the workflow settings file reports its own errors

@@ -20,7 +20,7 @@ import pytest
 
 import fastworkflow
 from fastworkflow.core.command_routing import RoutingRegistry
-from fastworkflow.model_pipeline_training import (
+from fastworkflow.train.model_pipeline_training import (
     INTERNAL_CME_ARM,
     NOT_HERE_SEEDS,
     PLANNING_HEADS_NOT_HERE,
@@ -38,7 +38,7 @@ from fastworkflow.model_pipeline_training import (
     select_escalation_rows,
     trained_command_labels,
 )
-from fastworkflow.workflow_agent import planning_command_utterances
+from fastworkflow.agent.workflow_agent import planning_command_utterances
 from fastworkflow.train import artifact_versioning as av
 from fastworkflow.train import selective_training
 from tests.test_not_here_class import (
@@ -312,7 +312,7 @@ def test_the_internal_cme_keeps_today_s_construction_with_no_wildcard_class(tmp_
     The real CME folder is never opened: the internal-CME path is pointed at a private copy, which
     is what the detection compares against.
     """
-    from fastworkflow.model_pipeline_training import (
+    from fastworkflow.train.model_pipeline_training import (
         arm_for_workflow,
         construction_records,
         is_internal_cme_folder,

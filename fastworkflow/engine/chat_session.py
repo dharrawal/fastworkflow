@@ -230,7 +230,7 @@ class ChatSession:
         # Import is deferred so `import fastworkflow` / ChatSession does not
         # pull transformers/torch/sklearn at package import time.
         try:
-            from fastworkflow.model_pipeline_training import CommandRouter
+            from fastworkflow.train.model_pipeline_training import CommandRouter
 
             command_info_root = Path(workflow.folderpath) / "___command_info"
             if command_info_root.is_dir():
@@ -258,7 +258,7 @@ class ChatSession:
         # Planning commands and command utterances: read on the first request otherwise (~2 s).
         # Keyed by the folder path string, so the same one the turn path passes.
         try:
-            from fastworkflow.workflow_agent import warm_planning_commands
+            from fastworkflow.agent.workflow_agent import warm_planning_commands
             warm_planning_commands(workflow.folderpath)
         except Exception as warm_err:  # pragma: no cover – warm-up must never fail
             logger.debug(f"Planning command warm-up skipped due to error: {warm_err}")

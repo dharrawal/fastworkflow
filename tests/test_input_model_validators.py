@@ -15,7 +15,7 @@ def _extraction(command="show Ann"):
 
 def _command(tmp_path, name, text):
     folder = write_files(tmp_path, {name: text})
-    from fastworkflow import workflow_agent
+    from fastworkflow.agent import workflow_agent
     return workflow_agent.load_planning_command_map(folder)[name]
 
 

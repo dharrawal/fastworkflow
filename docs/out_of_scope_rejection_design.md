@@ -719,7 +719,7 @@ loop. Behaviour change must be flag-guarded.
 
 | File | Change | Risk |
 |---|---|---|
-| `fastworkflow/model_pipeline_training.py` | Write `seed_embeddings.npz` (+ a manifest of source utterances and command names) per context at train time, next to `label_encoder.pkl` | Low. Additive; `get_artifact_path` already handles placement |
+| `fastworkflow/train/model_pipeline_training.py` | Write `seed_embeddings.npz` (+ a manifest of source utterances and command names) per context at train time, next to `label_encoder.pkl` | Low. Additive; `get_artifact_path` already handles placement |
 | `fastworkflow/train/artifact_versioning.py` | Include the new artifact in versioned assembly | Low |
 | `fastworkflow/train/selective_training.py` | Bank invalidation on seed-table change, via the corrected upward-closure rule (`close_dirty_contexts`, AR2) | **Medium.** A stale bank degrades the gate silently — the failure mode is invisible |
 | `fastworkflow/cache_matching.py` | Extract/expose a `max_similarity_to_bank` helper; reuse `get_embedding`'s LRU | Low |
@@ -805,11 +805,11 @@ Re-verification one-liners:
 
 ```bash
 # Thresholds are the mean confidence of misclassified test rows, not an operating point
-git show 23dbe35:fastworkflow/model_pipeline_training.py | sed -n '1174,1190p'
+git show 23dbe35:fastworkflow/train/model_pipeline_training.py | sed -n '1174,1190p'
 cat fastworkflow/examples/retail_workflow/___command_info/global/*threshold*.json
 
 # The only rejection mechanism today
-git show 23dbe35:fastworkflow/model_pipeline_training.py | sed -n '321,334p'
+git show 23dbe35:fastworkflow/train/model_pipeline_training.py | sed -n '321,334p'
 
 # CME commands execute with no parameter stage; app commands do not
 sed -n '65,90p'  fastworkflow/_workflows/command_metadata_extraction/_commands/wildcard.py

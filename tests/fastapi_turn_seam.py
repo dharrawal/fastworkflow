@@ -12,8 +12,8 @@ from __future__ import annotations
 
 import dspy
 
-from fastworkflow import workflow_agent
-from fastworkflow.utils import react as react_module
+from fastworkflow.agent import workflow_agent
+from fastworkflow.agent import react as react_module
 from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 

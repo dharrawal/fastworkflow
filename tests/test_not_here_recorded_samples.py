@@ -34,7 +34,7 @@ import pytest
 
 import fastworkflow
 from fastworkflow.core.command_routing import RoutingRegistry
-from fastworkflow.model_pipeline_training import (
+from fastworkflow.train.model_pipeline_training import (
     _stable_rank,
     choose_not_here_sample,
     experiment_reserved_class_arm,
@@ -167,7 +167,7 @@ def test_the_stable_rank_is_sha256_over_head_command_and_seed():
 def test_the_choice_is_the_same_under_another_python_hash_seed(tmp_path):
     """Never Python's salted hash: two interpreters with different PYTHONHASHSEED agree."""
     code = (
-        "from fastworkflow.model_pipeline_training import choose_not_here_sample as c;"
+        "from fastworkflow.train.model_pipeline_training import choose_not_here_sample as c;"
         "print(c('Workspace', 'Workspace/bulk_decide', [f'utterance number {i}' for i in range(20)], 3))"
     )
     outputs = set()
@@ -534,9 +534,9 @@ def test_the_publish_check_verifies_the_recorded_samples(tmp_path):
 
 def _glue_train(tmp_path, monkeypatch, name: str, reuse=None) -> dict:
     """The real train(), stopped before any fit, with only the generation LLM boundary replaced."""
-    from fastworkflow.model_pipeline_training import train
+    from fastworkflow.train.model_pipeline_training import train
     from fastworkflow.train import generate_synthetic
-    import fastworkflow.model_pipeline_training as mpt
+    import fastworkflow.train.model_pipeline_training as mpt
 
     workflow_path = _copy(tmp_path, name)
 

@@ -35,7 +35,7 @@ from fastworkflow.train.__main__ import (
     _save_run_provenance,
 )
 from fastworkflow.train.selective_training import TrainingPlan
-from fastworkflow.model_pipeline_training import (
+from fastworkflow.train.model_pipeline_training import (
     TrainingDataError,
     _write_heldout_report,
 )

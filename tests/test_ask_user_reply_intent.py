@@ -9,9 +9,9 @@ import dspy
 import pytest
 from dspy.utils import DummyLM
 
-from fastworkflow import workflow_agent
-from fastworkflow.utils.react import fastWorkflowReAct
-from fastworkflow.workflow_agent import (
+from fastworkflow.agent import workflow_agent
+from fastworkflow.agent.react import fastWorkflowReAct
+from fastworkflow.agent.workflow_agent import (
     REPLY_INTENTS,
     ClassifyReply,
     _apply_reply_intent,

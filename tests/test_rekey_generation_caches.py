@@ -64,7 +64,7 @@ def _old_caches(folder: str) -> dict[str, int]:
     except for the model. Returns how many files of each cache were written."""
     from fastworkflow.train.__main__ import (
         PARAM_EXAMPLE_COUNT, PARAM_VALIDATION_THRESHOLD, _get_commands_with_parameters, parameter_model_of)
-    from fastworkflow.model_pipeline_training import get_route_layer_filepath_model
+    from fastworkflow.train.model_pipeline_training import get_route_layer_filepath_model
     from fastworkflow.train.generate_param_examples import extract_field_details, param_example_fingerprint
 
     cmd_dir = pilot.prepare_registry(folder)

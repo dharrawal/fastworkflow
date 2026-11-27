@@ -92,7 +92,7 @@ below, the code wins. Do not "fix" tracked docs without going through
 
 | Location | What is wrong | Evidence |
 |---|---|---|
-| `CLAUDE.md:7,30` | Says intent models are trained "via scikit-learn" / pipeline built on "DSPy, scikit-learn, and Pydantic" | Training is torch/transformers: `fastworkflow/model_pipeline_training.py:3-17` imports `AutoModelForSequenceClassification`, `torch`, `AdamW`; sklearn supplies only PCA, metrics, split, LabelEncoder |
+| `CLAUDE.md:7,30` | Says intent models are trained "via scikit-learn" / pipeline built on "DSPy, scikit-learn, and Pydantic" | Training is torch/transformers: `fastworkflow/train/model_pipeline_training.py:3-17` imports `AutoModelForSequenceClassification`, `torch`, `AdamW`; sklearn supplies only PCA, metrics, split, LabelEncoder |
 | `CLAUDE.md:33` | "sklearn classifier identifies the target command" | Same — it is a fine-tuned BERT-family classifier (see `fastworkflow-nlu-pipeline-reference`) |
 | `CLAUDE.md:13` | Names only `tests/example_workflow/` and `tests/hello_world_workflow/` | Third real test workflow `tests/todo_list_workflow/` is used by 10+ test files (`grep -rl todo_list_workflow tests/`) |
 | `fastworkflow/run_fastapi_mcp/README.md` | Launch command `uvicorn services.run_fastapi.main:app` (lines 31, 63, 75) — that package was deleted; request examples use `channel_query` (lines 314, 337, 344) but the model field is `user_query`; documents 504-on-timeout (line 360) but v2.22.0 switched to 202-deferral | File itself + `git log --oneline -- services/` + `fastworkflow/run_fastapi_mcp/turns.py` |
@@ -263,7 +263,7 @@ Facts verified 2026-07-09 against v2.22.2 (commit c33b9a5). Re-verify volatile f
 
 | Fact | Re-verification command |
 |---|---|
-| CLAUDE.md scikit-learn rot (lines 7, 30, 33) | `grep -n -e sklearn -e scikit CLAUDE.md; sed -n 3,7p fastworkflow/model_pipeline_training.py` |
+| CLAUDE.md scikit-learn rot (lines 7, 30, 33) | `grep -n -e sklearn -e scikit CLAUDE.md; sed -n 3,7p fastworkflow/train/model_pipeline_training.py` |
 | CLAUDE.md test-workflow omission (line 13) | `grep -n workflow CLAUDE.md; ls -d tests/*workflow*` |
 | Which docs/ files are team-private (untracked) | `git status --porcelain docs/` |
 | Team-private markers still present | `grep -n -i "team-private" docs/rsi_harness_agent_report.md docs/forge_meta_workflow_spec.md` |

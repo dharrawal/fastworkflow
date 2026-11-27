@@ -143,7 +143,7 @@ def _library_with_utterance_counts(tmp_path, counts):
 
 
 def test_a_command_with_more_utterances_than_the_matcher_shows_is_noticed(tmp_path, monkeypatch, capsys):
-    from fastworkflow.workflow_agent import MATCHER_EXAMPLES
+    from fastworkflow.agent.workflow_agent import MATCHER_EXAMPLES
 
     folder = _library_with_utterance_counts(
         tmp_path, {"many_phrases": MATCHER_EXAMPLES + 1, "few_phrases": MATCHER_EXAMPLES})

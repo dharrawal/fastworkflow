@@ -2,7 +2,7 @@
 import os
 
 import fastworkflow
-from fastworkflow import workflow_agent
+from fastworkflow.agent import workflow_agent
 
 
 def test_the_key_and_the_cache_are_gone_inside_the_fixture(monkeypatch, request):

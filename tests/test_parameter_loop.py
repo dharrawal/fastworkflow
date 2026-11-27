@@ -24,12 +24,12 @@ from fastworkflow.review import approval_binding
 from fastworkflow.core import no_agent_mode
 from fastworkflow.parameters import parameter_clarification as loops
 from fastworkflow.planning import planning_commands as pc
-from fastworkflow import workflow_agent
+from fastworkflow.agent import workflow_agent
 from fastworkflow.review.approval_binding import Surface
 from fastworkflow.parameters.parameter_clarification import ParameterLoop
 from fastworkflow.core.turn import TurnStatus
-from fastworkflow.workflow_agent import build_query_with_next_steps as REAL_BUILD
-from fastworkflow.workflow_agent import load_planning_command_map
+from fastworkflow.agent.workflow_agent import build_query_with_next_steps as REAL_BUILD
+from fastworkflow.agent.workflow_agent import load_planning_command_map
 from fastworkflow.engine.workflow_execution_context import NOT_RUN_ARTIFACT, WorkflowExecutionContext
 from tests.scripted_extractor import ScriptedExtractor
 from tests.test_approval_binding import _finish, annotated_library, todo  # noqa: F401
@@ -373,7 +373,7 @@ def no_agent(gated, no_agent_model, no_planner_key, monkeypatch):  # noqa: F811
     monkeypatch.setenv("FW_DRAFT_ARGUMENTS", "on")
     monkeypatch.setattr(WorkflowExecutionContext, "_agent_dspy_context",
                         lambda self: pytest.fail("the agent LM was built in no-agent mode"))
-    monkeypatch.setattr("fastworkflow.workflow_agent.build_query_with_next_steps",
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.build_query_with_next_steps",
                         lambda user_query, session, **kwargs: setattr(session, "_initial_plan_text", "") or user_query)
     lm = _ReadsTheText([])
     original = signatures.dspy_utils.get_lm
@@ -385,7 +385,7 @@ def no_agent(gated, no_agent_model, no_planner_key, monkeypatch):  # noqa: F811
         gated.splits.append(user_query)
         return list(gated.parts)
 
-    monkeypatch.setattr("fastworkflow.workflow_agent.split_into_subtasks", split)
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.split_into_subtasks", split)
     def match(text):
         name = NOTE_PLAN if text == A_NOTE else (BOOK_PLAN if text in (ABOUT_EMMA, ABOUT_DUNE) else None)
         return {name: 0.9, "none": 0.0} if name else None
@@ -645,7 +645,7 @@ def test_with_an_agent_model_the_question_is_asked_again_while_replies_make_prog
     monkeypatch.setattr(workflow_agent, "_jev_lm", lambda *args, **kwargs: None)
     matched = script_matcher(monkeypatch, lambda text: {command.name: 0.9, "none": 0.0})
     monkeypatch.setattr(workflow_agent, "typed_planning_call", refuse)
-    monkeypatch.setattr("fastworkflow.workflow_agent.split_into_subtasks", split)
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.split_into_subtasks", split)
     planner = _TextPlanner([], adapter=dspy.JSONAdapter())
     monkeypatch.setattr(workflow_agent, "build_query_with_next_steps",
                         lambda *args, **kwargs: REAL_BUILD(*args, **{**kwargs, "planner_lm": planner}))

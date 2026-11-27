@@ -20,7 +20,7 @@ from unittest import mock
 import litellm
 import pytest
 
-from fastworkflow import context_budget as cb
+from fastworkflow.observation_offloading import context_budget as cb
 
 #: A model registered with litellm, whose window does not depend on which
 #: litellm table (bundled or downloaded) the process loaded.
@@ -265,7 +265,7 @@ class ModulesReadTheSameBudgets(unittest.TestCase):
     """The named defaults each module exports are the derived values."""
 
     def test_every_module_default_is_its_budget(self) -> None:
-        from fastworkflow import answer_rehydration
+        from fastworkflow.observation_offloading import answer_rehydration
         from fastworkflow.observation_offloading import compact
 
         self.assertEqual(compact.PACKED_TARGET_BYTES, 28_000)
@@ -273,7 +273,7 @@ class ModulesReadTheSameBudgets(unittest.TestCase):
         self.assertEqual(answer_rehydration.DEFAULT_MAX_BYTES, 250_000)
 
     def test_every_module_reader_is_the_budget_function(self) -> None:
-        from fastworkflow import answer_rehydration
+        from fastworkflow.observation_offloading import answer_rehydration
         from fastworkflow.observation_offloading import compact
 
         self.assertEqual(compact.packed_target_bytes_from_env(), 28_000)

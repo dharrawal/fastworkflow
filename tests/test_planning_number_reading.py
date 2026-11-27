@@ -35,7 +35,7 @@ class PlanGenerator:
 @pytest.fixture
 def copies_command(tmp_path):
     folder = _write(tmp_path, {"add_copies": COPIES})
-    from fastworkflow import workflow_agent
+    from fastworkflow.agent import workflow_agent
     return workflow_agent.load_planning_command_map(folder)["add_copies"]
 
 

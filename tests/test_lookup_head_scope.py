@@ -20,7 +20,7 @@ import pytest
 
 import fastworkflow
 from fastworkflow.core.command_routing import RoutingRegistry
-from fastworkflow.model_pipeline_training import (
+from fastworkflow.train.model_pipeline_training import (
     FLATTENED,
     HEAD_SCOPES,
     RESERVED_CLASS_ARMS,
@@ -473,14 +473,14 @@ def _glue_run(tmp_path, monkeypatch, scope: str, name: str):
     the held-out removal and the export are the shipped code. ``stop_before_fit`` stops
     before any model is fitted.
     """
-    from fastworkflow.model_pipeline_training import LOOKUP_HOLDOUT_FILENAME, train
+    from fastworkflow.train.model_pipeline_training import LOOKUP_HOLDOUT_FILENAME, train
     from fastworkflow.train import generate_synthetic
     from fastworkflow.train.determinism import (
         ProvenanceRecorder,
         UtteranceProvenance,
         set_provenance_recorder,
     )
-    import fastworkflow.model_pipeline_training as mpt
+    import fastworkflow.train.model_pipeline_training as mpt
 
     workflow_path = str(tmp_path / name)
     shutil.copytree(REPO / "fastworkflow" / "examples" / "messaging_app_4", workflow_path,

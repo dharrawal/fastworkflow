@@ -18,7 +18,7 @@ from unittest.mock import patch
 import pytest
 
 import fastworkflow
-from fastworkflow import model_pipeline_training
+from fastworkflow.train import model_pipeline_training
 from fastworkflow import CommandOutput
 from fastworkflow.intent import intent_loop
 from fastworkflow._workflows.command_metadata_extraction import intent_detection

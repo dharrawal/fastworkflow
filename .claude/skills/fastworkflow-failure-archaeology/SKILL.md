@@ -78,7 +78,7 @@ benchmark; pass^k = task passes k independent runs in a row.
   (`docs/turn_result_design.md` §0–§1.3).
 - **Root cause:** NOT the mapping layer. Two framework drop points:
   1. **The DSPy ReAct tool boundary is text-only.** `_execute_workflow_query`
-     (`fastworkflow/workflow_agent.py`) gets the full `CommandOutput` back from
+     (`fastworkflow/agent/workflow_agent.py`) gets the full `CommandOutput` back from
      `CommandExecutor.invoke_command` but joins only the `.response` strings and discards
      `artifacts` — by design, because ReAct tools return string observations.
   2. **`_finalize_agent_output` synthesized a fresh answer-only `CommandOutput`** from the
@@ -349,7 +349,7 @@ without change control):
 
 - **CLAUDE.md** says intent models are trained "via scikit-learn". Actually torch/transformers
   fine-tuning of a two-tier TinyBERT/DistilBERT pipeline; sklearn supplies only
-  LabelEncoder/split/metrics (see `fastworkflow/model_pipeline_training.py` imports). CLAUDE.md
+  LabelEncoder/split/metrics (see `fastworkflow/train/model_pipeline_training.py` imports). CLAUDE.md
   also omits `tests/todo_list_workflow` from the test-workflow list.
 - **README/Article DOI disagreement** — see entry 10.
 - **A spec doc in `docs/` is not proof of implementation** — `probabilistic_response_generation.md`

@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from fastworkflow import run_listing
+from fastworkflow.agent import run_listing
 from fastworkflow.train import score_listing as sl
 from tests.context_declarations import declare_inherits
 

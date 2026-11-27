@@ -176,6 +176,6 @@ complete worked example: corpus, provenance, taxonomy, table and tests.
 | `fastworkflow/policy/policy_intent.py` | intent/consent reader and question judge (model readings, fail-open) |
 | `fastworkflow/policy/policy_loader.py` | settings → decision point and facts; `attach_policy` |
 | `fastworkflow/evaluation/policy_replay.py` | offline replay of recorded runs |
-| `fastworkflow/utils/react.py` | loop hooks: `policy`, `policy_final_run`, `_policy_finish`, `_final_extract` |
+| `fastworkflow/agent/react.py` | loop hooks: `policy`, `policy_final_run`, `_policy_finish`, `_final_extract` |
 | `fastworkflow/engine/command_executor.py` | `_policy_rewrite` at the canonical seam |
 | `fastworkflow/evaluation/distillation_compare.py` | `compare_self`, `compare_pool`, `pool_pairs`, `provenance_records` |

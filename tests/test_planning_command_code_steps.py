@@ -185,8 +185,8 @@ from fastworkflow.planning.planning_commands import PlanningCommandCallPlan, cal
 
 from fastworkflow.planning.planning_phases import Phase  # noqa: E402
 from fastworkflow.core.turn import TurnStatus  # noqa: E402
-from fastworkflow.utils.react import _step_indexes  # noqa: E402
-from fastworkflow.workflow_agent import initialize_workflow_tool_agent  # noqa: E402
+from fastworkflow.agent.react import _step_indexes  # noqa: E402
+from fastworkflow.agent.workflow_agent import initialize_workflow_tool_agent  # noqa: E402
 from tests.test_turn_result_capture import no_review_gate  # noqa: F401 - the review gate is off for these turns
 from tests.test_planning_command_phases import RecordingSink  # noqa: E402
 from tests.test_turn_result_capture import (  # noqa: E402,F401 - shared fixtures
@@ -453,11 +453,11 @@ def todo(initialized_fastworkflow, todo_workflow_path, monkeypatch):
         session._initial_plan_text = ""
         return user_query
 
-    monkeypatch.setattr("fastworkflow.workflow_agent.build_query_with_next_steps", fake_plan)
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.build_query_with_next_steps", fake_plan)
     from tests.conftest import script_plan
 
     script_plan(monkeypatch, lambda text: state.planning_command or _planning_command(state.plan))
-    monkeypatch.setattr("fastworkflow.workflow_agent.split_into_subtasks",
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.split_into_subtasks",
                         lambda *args, **kwargs: ["show the list groceries"])
     monkeypatch.setattr("fastworkflow.planning.planning_phases.write_answer",
                         lambda query: state.answered.append(query) or "written")
@@ -1446,7 +1446,7 @@ def test_a_flat_call_suspended_and_restored_resumes_without_running_code_again(t
     assert todo.workflow.sent == ["list_todo_lists"]
 
     # As after a restore: the one phase is rebuilt from the skill and the saved state.
-    monkeypatch.setattr("fastworkflow.workflow_agent.load_planning_command_map",
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.load_planning_command_map",
                         lambda folder: {"show_list": planning_command})
     todo.ctx._phase_live = None
     second = todo.ctx.process_turn("the errands list")

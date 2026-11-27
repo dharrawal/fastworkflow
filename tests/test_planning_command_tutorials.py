@@ -33,7 +33,8 @@ import sys
 
 import pytest
 
-from fastworkflow import ModuleType, workflow_agent
+from fastworkflow import ModuleType
+from fastworkflow.agent import workflow_agent
 from fastworkflow.planning import planning_commands, command_preview
 from fastworkflow.planning import planning_phases as sp
 from fastworkflow.observation_offloading.finish_check import plain_command_name

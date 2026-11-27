@@ -27,7 +27,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import fastworkflow
-from fastworkflow.mcp_server import FastWorkflowMCPServer, command_schema_listing
+from fastworkflow.run_fastapi_mcp.mcp_server import FastWorkflowMCPServer, command_schema_listing
 
 HELLO = Path(__file__).resolve().parent / "hello_world_workflow"
 _COPY_IGNORE = shutil.ignore_patterns("___workflow_contexts", "___convo_info", "__pycache__")

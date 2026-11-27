@@ -18,11 +18,11 @@ from dotenv import dotenv_values
 
 import fastworkflow
 from fastworkflow.planning import command_preview
-from fastworkflow import workflow_agent
+from fastworkflow.agent import workflow_agent
 from fastworkflow.planning import planning_commands as pc
 from fastworkflow.core.command_context_model import CommandContextModel, CommandContextModelValidationError
 from fastworkflow.core.command_routing import RoutingRegistry
-from fastworkflow.migrate_context_declarations import migrate
+from fastworkflow.build.migrate_context_declarations import migrate
 from fastworkflow.core.workflow import MissingGetParentError
 from tests.test_one_rule_for_author_mistakes import _exec
 

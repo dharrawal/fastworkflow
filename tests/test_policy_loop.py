@@ -24,7 +24,7 @@ from fastworkflow.policy.policy_decision import (
     PolicyRow,
 )
 from fastworkflow.policy.policy_runtime import AgentPolicy, policy_of
-from fastworkflow.utils.react import fastWorkflowReAct
+from fastworkflow.agent.react import fastWorkflowReAct
 
 SIDE = frozenset({DecisionPhase.BEFORE_SIDE_EFFECT})
 ASK = frozenset({DecisionPhase.AFTER_OBSERVATION})

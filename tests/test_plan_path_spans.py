@@ -21,7 +21,7 @@ from tests.test_parameter_loop import _reply, HOST, no_agent, _offline, BOOK_PLA
 from tests.test_round1_gate import JOKE, gated  # noqa: F401
 from tests.test_approval_binding import annotated_library, grant_root, todo, no_live_model, no_model_call_for_parameters  # noqa: F401
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401
-from fastworkflow.workflow_agent import build_query_with_next_steps as _REAL_PLANNER   # the fixtures stub it
+from fastworkflow.agent.workflow_agent import build_query_with_next_steps as _REAL_PLANNER   # the fixtures stub it
 
 pytestmark = pytest.mark.usefixtures("initialized_fastworkflow")
 
@@ -233,7 +233,7 @@ def test_an_ad_hoc_part_not_run_without_an_agent_model_says_why_and_keeps_its_pl
     reason, and the planner's suggested plan is its ``fw.plan`` child."""
     from dspy.utils import DummyLM
 
-    monkeypatch.setattr("fastworkflow.workflow_agent.build_query_with_next_steps", _REAL_PLANNER)
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.build_query_with_next_steps", _REAL_PLANNER)
     no_agent.ctx._current_planner_lm = DummyLM([{"reasoning": "", "next_steps": "1. find a joke\n2. tell it"}] * 4)
     script_matcher(monkeypatch, lambda t: {"none": 0.99})
     no_agent.parts = [JOKE]

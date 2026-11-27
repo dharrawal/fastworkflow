@@ -22,7 +22,7 @@ import pytest
 
 import fastworkflow
 from fastworkflow.planning import planning_commands as sc
-from fastworkflow import workflow_agent
+from fastworkflow.agent import workflow_agent
 from fastworkflow.parameters import ask
 from fastworkflow.parameters import check as one_guard
 from fastworkflow.parameters.signatures import InputForParamExtraction

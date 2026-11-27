@@ -34,7 +34,7 @@ from fastworkflow.planning import planning_commands
 from fastworkflow.planning.planning_commands import (
     PlanningCommandCommand, PlanningCommandFormatError, PlanningCommandInputError, typed_planning_call, refusal_question,
     refusal_names_an_input)
-from fastworkflow.split_merge import (
+from fastworkflow.agent.split_merge import (
     JoinedSubtask, Reduction, definite_descriptions, merge_subtasks, reduce_to_cap, request_subjects, subjects_in,
     unnamed_subjects, with_referent, without_repeated_clauses)
 from fastworkflow.utils.logging import logger
@@ -51,8 +51,8 @@ from fastworkflow.core.context_navigation import (
     command_on_path, enters_current_context, lookup_scopes, render_already_in_context,
     scope_command_names, unavailable_command_message)
 from fastworkflow.core.context_navigation import home_contexts as context_homes
-from fastworkflow.utils.react import AskUserSuspend
-from fastworkflow.utils.chat_adapter import CommandsSystemPreludeAdapter
+from fastworkflow.agent.react import AskUserSuspend
+from fastworkflow.agent.chat_adapter import CommandsSystemPreludeAdapter
 from fastworkflow.utils.dspy_logger import watch_cut_off_replies
 from fastworkflow.observation_offloading.agent import build_tool_agent
 from fastworkflow.observation_offloading.search import search_memory as search_observation
@@ -2080,7 +2080,7 @@ def planner_listing_text(current_workflow, sub_task: str,
     FULL): ``planner_commands_text``, byte for byte. The experiment selector ``THRESHOLD`` gives it while it is at most
     ``run_listing.FULL_LISTING_MAX_CHARS``, else the trained-head shortlist; ``COMMAND_SHORTLIST`` gives the shortlist.
     *planning_probabilities*: the turn's planning-command match distribution (None without JEV_API_KEY)."""
-    from fastworkflow import run_listing
+    from fastworkflow.agent import run_listing
 
     arm = run_listing.effective_listing_arm(current_workflow)
     if arm == run_listing.FULL:
@@ -2095,7 +2095,7 @@ def sub_task_commands_text(chat_session_obj, sub_task: str,
     the default FULL): ``_what_can_i_do``, byte for byte. The experiment selector ``THRESHOLD`` gives it while it is at
     most ``run_listing.FULL_LISTING_MAX_CHARS``, else the trained-head shortlist; ``COMMAND_SHORTLIST`` gives the
     shortlist. *planning_probabilities*: the turn's planning-command match distribution (None without JEV_API_KEY)."""
-    from fastworkflow import run_listing
+    from fastworkflow.agent import run_listing
 
     arm = run_listing.effective_listing_arm(chat_session_obj.get_active_workflow())
     full = _what_can_i_do(chat_session_obj)

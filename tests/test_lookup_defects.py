@@ -21,7 +21,7 @@ import shutil
 import pytest
 
 import fastworkflow
-from fastworkflow import model_pipeline_training
+from fastworkflow.train import model_pipeline_training
 from fastworkflow._workflows.command_metadata_extraction import intent_detection
 from fastworkflow._workflows.command_metadata_extraction._commands import wildcard
 from fastworkflow.engine.command_executor import CommandExecutor
@@ -230,7 +230,7 @@ def test_a_run_on_an_enclosing_record_is_filed_under_that_record(
     assert output.ran_in_context_name == "TodoList"
     assert output.ran_in_context_clause == "TodoList"
     # The turn's held run for this step names the same record.
-    from fastworkflow.workflow_agent import _held_context
+    from fastworkflow.agent.workflow_agent import _held_context
     assert _held_context(ctx, output, "TodoItem", "TodoItem") == ("TodoList", "TodoList")
 
 
@@ -257,7 +257,7 @@ def test_the_step_that_ran_on_an_enclosing_record_holds_that_record(
     """The agent step's held run and its run state both name the enclosing record."""
     from types import SimpleNamespace
 
-    from fastworkflow.workflow_agent import _execute_workflow_query
+    from fastworkflow.agent.workflow_agent import _execute_workflow_query
 
     app, *_ = todo_chain
     _fake_heads(app, "TodoItem", "TodoList", "TodoListManager")

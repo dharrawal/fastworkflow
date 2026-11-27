@@ -60,7 +60,7 @@ import pytest
 
 import fastworkflow
 from fastworkflow.core.command_routing import RoutingRegistry
-from fastworkflow.model_pipeline_training import (
+from fastworkflow.train.model_pipeline_training import (
     cache_context_command_utterances,
     select_escalation_rows,
     train,

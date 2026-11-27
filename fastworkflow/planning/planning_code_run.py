@@ -80,7 +80,7 @@ class _Walk:
 
     def __init__(self, folder: str, workflow):
         from fastworkflow.planning import planning_commands
-        from fastworkflow import workflow_agent
+        from fastworkflow.agent import workflow_agent
         from fastworkflow.planning import planning_phases as sp
         from fastworkflow.core.command_routing import RoutingRegistry
 
@@ -417,7 +417,7 @@ def run_code(workflow_folder: str, command: str, input: Optional[dict] = None,
 def _planning_run(walk: _Walk, key: str, given: dict) -> CodeRun:
     command = walk.planning_map[key]
     if "/" in key:
-        from fastworkflow.workflow_agent import planning_scopes
+        from fastworkflow.agent.workflow_agent import planning_scopes
 
         context = key.split("/")[0]
         if context not in planning_scopes(walk.wf):    # the lookup path: the record, its bases, the records above it

@@ -165,7 +165,7 @@ def test_a_declined_proposal_is_terminal_and_says_so():
 
 
 def test_a_proposal_suspends_the_agent_call_on_its_prompt_when_asked_to():
-    from fastworkflow.utils.react import AskUserSuspend
+    from fastworkflow.agent.react import AskUserSuspend
 
     store = _store()
     with pytest.raises(AskUserSuspend) as caught:

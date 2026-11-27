@@ -22,7 +22,7 @@ import fastworkflow
 from fastworkflow.planning import command_preview
 from fastworkflow.core import context_navigation
 from fastworkflow.intent import intent_detector
-from fastworkflow import workflow_agent
+from fastworkflow.agent import workflow_agent
 from fastworkflow.planning import planning_commands as pc
 from fastworkflow.core.command_routing import RoutingRegistry
 from tests.test_field_sources import ROOT, _build_workflow
@@ -92,7 +92,7 @@ def test_training_takes_a_context_with_no_execution_command(tmp_path, no_planner
     every "is it trained" gate says yes. No model is called (the copy's own caches, ``no_model_calls``)."""
     import importlib.util
 
-    from fastworkflow.model_pipeline_training import is_workflow_trained
+    from fastworkflow.train.model_pipeline_training import is_workflow_trained
     from fastworkflow.train import artifact_versioning, embedding_head, utterance_cache
     from fastworkflow.train import intent_model_layout as layout
     from tests.test_intent_model_layout_training import (
@@ -267,7 +267,7 @@ def _on_the_root(folder: str, name: str):
 @pytest.mark.usefixtures("no_planner_key")
 def test_a_command_with_no_signature_is_reached_by_no_name_and_no_words(tmp_path):
     from fastworkflow.intent import intent_loop
-    from fastworkflow import run_listing
+    from fastworkflow.agent import run_listing
     from fastworkflow.review import review_plan_switch
 
     folder = _build_workflow(tmp_path, "wf_startup_name")

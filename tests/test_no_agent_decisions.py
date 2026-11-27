@@ -507,7 +507,7 @@ def test_cancel_pending_clears_the_paused_command_as_it_clears_any_suspension(li
 def test_a_decision_inside_part_one_resumes_into_the_remaining_parts(library_env, monkeypatch):
     library_env.planning_command = _build_planning_command(Conditional)
     _plan(monkeypatch, library_env, matches={"book": library_env.planning_command}, ad_hoc_plan=PLAN_TEXT)
-    monkeypatch.setattr("fastworkflow.workflow_agent.split_into_subtasks",
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.split_into_subtasks",
                         lambda *args, **kwargs: ["look up the book Dune", "plan a trip to Mars"])
     first = library_env.ctx.process_turn("look up the book Dune and plan a trip to Mars")
     assert first.status == TurnStatus.AWAITING_USER

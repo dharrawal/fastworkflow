@@ -49,13 +49,13 @@ NOT_CHECKED = ("examples", "_workflows", "skills_for_coding_fastworkflows")
 
 # (importer, imported) as old dotted paths; each is removed by the extraction named beside it.
 KNOWN_EXCEPTIONS = {
-    ("fastworkflow.engine.workflow_execution_context", "fastworkflow.utils.react"):
+    ("fastworkflow.engine.workflow_execution_context", "fastworkflow.agent.react"):
         "AskUserSuspend and NoSuspendedAgentStateError move out of the ReAct module (step 7)",
-    ("fastworkflow.parameters.signatures", "fastworkflow.model_pipeline_training"):
+    ("fastworkflow.parameters.signatures", "fastworkflow.train.model_pipeline_training"):
         "CommandRouter and its path helpers move to intent/ (step 7)",
     ("fastworkflow.parameters.signatures", "fastworkflow.planning.planning_commands"):
         "the planning-argument gap code moves into parameters/ (later)",
-    ("fastworkflow.observation_offloading.agent", "fastworkflow.utils.react"):
+    ("fastworkflow.observation_offloading.agent", "fastworkflow.agent.react"):
         "the offloading wiring of the ReAct loop moves to agent/ (later)",
     ("fastworkflow.utils.dspy_utils", "fastworkflow.parameters.rules"):
         "is_union, a typing helper, moves to utils (step 7)",

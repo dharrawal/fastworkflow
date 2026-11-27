@@ -61,7 +61,6 @@ PUBLIC = (
     ("Workflow", "type", "fastworkflow.core.workflow"),
     ("WorkflowExecutionContext", "type", "fastworkflow.engine.workflow_execution_context"),
     ("clear_workflow_stack", "function", "fastworkflow.engine.active_workflow"),
-    ("context_budget", "module", "fastworkflow.context_budget"),
     ("contextlib", "module", "contextlib"),
     ("dataclass", "function", "dataclasses"),
     ("datetime", "type", "datetime"),
@@ -104,7 +103,7 @@ INIT_ASSIGNED = {
     "CommandContextModel": "fastworkflow.core.command_context_model",
     "RoutingDefinition": "fastworkflow.core.command_routing",
     "RoutingRegistry": "fastworkflow.core.command_routing",
-    "ModelPipelineRegistry": "fastworkflow.model_pipeline_training",
+    "ModelPipelineRegistry": "fastworkflow.train.model_pipeline_training",
 }
 
 

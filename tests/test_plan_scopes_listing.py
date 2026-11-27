@@ -12,7 +12,7 @@ import pytest
 
 from fastworkflow.review import approval_binding
 from fastworkflow.core import no_agent_mode
-from fastworkflow import workflow_agent
+from fastworkflow.agent import workflow_agent
 from fastworkflow.review.approval_binding import Surface
 from fastworkflow.core.turn import TurnStatus
 from fastworkflow.engine.workflow_execution_context import NOT_RUN_ARTIFACT, UsePlanError, WorkflowExecutionContext
@@ -67,7 +67,7 @@ def _root_plan_added(annotated_library):  # noqa: F811
 def _no_agent(_root_plan_added, gated, no_agent_model, no_planner_key, monkeypatch):
     monkeypatch.setattr(WorkflowExecutionContext, "_agent_dspy_context",
                         lambda self: pytest.fail("the agent LM was built in no-agent mode"))
-    monkeypatch.setattr("fastworkflow.workflow_agent.build_query_with_next_steps",
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.build_query_with_next_steps",
                         lambda user_query, session, **kwargs: setattr(session, "_initial_plan_text", "") or user_query)
     monkeypatch.setenv("FW_DRAFT_ARGUMENTS", "off")
 

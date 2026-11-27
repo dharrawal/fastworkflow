@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 
 import fastworkflow
 from fastworkflow.planning import planning_commands, planning_phases, command_preview
-from fastworkflow import workflow_agent
+from fastworkflow.agent import workflow_agent
 from fastworkflow.observability import tracing
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import (
     ParameterExtraction,
@@ -51,8 +51,8 @@ from fastworkflow.planning.planning_commands import PlanningCommandCallPlan, Pla
 from fastworkflow.planning.planning_phases import Placeholder, step_paging
 from fastworkflow.core.turn import TurnStatus
 from fastworkflow.utils import python_utils
-from fastworkflow.utils.react import fastWorkflowReAct
-from fastworkflow.workflow_agent import core_command_names, initialize_workflow_tool_agent
+from fastworkflow.agent.react import fastWorkflowReAct
+from fastworkflow.agent.workflow_agent import core_command_names, initialize_workflow_tool_agent
 from tests.test_turn_result_capture import no_review_gate  # noqa: F401 - the review gate is off for these turns
 from tests.test_planning_command_code_steps import Model
 from tests.test_planning_command_phases import RecordingSink
@@ -845,12 +845,12 @@ def library_env(tmp_path, initialized_fastworkflow, monkeypatch):
         session._initial_plan_text = ""
         return user_query
 
-    monkeypatch.setattr("fastworkflow.workflow_agent.build_query_with_next_steps", fake_plan)
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.build_query_with_next_steps", fake_plan)
     from tests.conftest import script_plan
 
     script_plan(monkeypatch, lambda text: state.planning_command)
     monkeypatch.setattr(
-        "fastworkflow.workflow_agent.split_into_subtasks",
+        "fastworkflow.agent.workflow_agent.split_into_subtasks",
         lambda *args, **kwargs: ["look up the book"],
     )
     monkeypatch.setattr("fastworkflow.planning.planning_phases.write_answer", lambda query: "written")
@@ -950,12 +950,12 @@ def _make_library_runner_env(
         session._initial_plan_text = ""
         return user_query
 
-    monkeypatch.setattr("fastworkflow.workflow_agent.build_query_with_next_steps", fake_plan)
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.build_query_with_next_steps", fake_plan)
     from tests.conftest import script_plan
 
     script_plan(monkeypatch, lambda text: state.planning_command)
     monkeypatch.setattr(
-        "fastworkflow.workflow_agent.split_into_subtasks",
+        "fastworkflow.agent.workflow_agent.split_into_subtasks",
         lambda *args, **kwargs: ["look up the book"],
     )
     monkeypatch.setattr("fastworkflow.planning.planning_phases.write_answer", lambda query: "written")

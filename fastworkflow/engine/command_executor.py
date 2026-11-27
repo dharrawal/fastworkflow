@@ -185,7 +185,7 @@ def _cme_reply_artifacts(output, pending: dict | None) -> dict:
     """Artifacts of the CME replies that were text only: ``aborted`` (what ``abort`` ended, from *pending*, taken before
     it ran) and ``command_choices`` (the command names ``you_misunderstood`` offers, in the order it lists them);
     ``capabilities`` for ``what_can_i_do``. Read from the nested command's typed Output."""
-    from fastworkflow.capability_answer import CapabilityListing
+    from fastworkflow.agent.capability_answer import CapabilityListing
 
     if isinstance(output, CapabilityListing):
         return {"capabilities": output.model_dump(mode="json")}
@@ -309,7 +309,7 @@ def _attach_capability_listing(framed: CommandOutput, workflow) -> None:
     """Give a ``what_can_i_do`` answer its listing as data: ``CommandResponse.output`` (a ``CapabilityListing``) and the
     artifact ``capabilities``. The response text is untouched. Best effort: a listing that cannot be built is absent."""
     try:
-        from fastworkflow.capability_answer import what_can_i_do_data
+        from fastworkflow.agent.capability_answer import what_can_i_do_data
 
         agent_mode = False
         with contextlib.suppress(Exception):
@@ -418,7 +418,7 @@ def _file_under(command_output: CommandOutput, ran_on: Optional[tuple[str, str]]
 
 def _core_command_names() -> frozenset[str]:
     # Lazy: workflow_agent imports this module.
-    from fastworkflow.workflow_agent import core_command_names
+    from fastworkflow.agent.workflow_agent import core_command_names
 
     return core_command_names()
 

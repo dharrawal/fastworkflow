@@ -16,13 +16,13 @@ from pydantic import Field
 import fastworkflow
 from fastworkflow.planning import command_preview
 from fastworkflow.core import command_writes
-from fastworkflow import workflow_agent
+from fastworkflow.agent import workflow_agent
 from fastworkflow.observability import tracing
 from fastworkflow.core.command_directory import CommandLoadError
 from fastworkflow.core.command_routing import RoutingRegistry
 from fastworkflow.planning import phase, run, when
 from fastworkflow.core.turn import TurnStatus
-from fastworkflow.workflow_agent import _what_can_i_do
+from fastworkflow.agent.workflow_agent import _what_can_i_do
 from tests.test_turn_result_capture import no_review_gate  # noqa: F401 - the review gate is off for these turns
 from tests.test_step_helpers import (
     LIBRARY,

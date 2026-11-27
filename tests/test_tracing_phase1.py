@@ -18,11 +18,12 @@ from unittest.mock import MagicMock
 import pytest
 
 import fastworkflow
-from fastworkflow import TurnStatus, workflow_agent
+from fastworkflow import TurnStatus
+from fastworkflow.agent import workflow_agent
 from fastworkflow.observability import metrics, tracing
 from fastworkflow.engine.command_executor import CommandExecutor
 from fastworkflow.observability import store as obs
-from fastworkflow.utils.react import AskUserSuspend, fastWorkflowReAct
+from fastworkflow.agent.react import AskUserSuspend, fastWorkflowReAct
 from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 from tests.test_turn_result_capture import no_review_gate  # noqa: F401 - the review gate is off for these turns
 from tests import span_tree
@@ -133,16 +134,16 @@ def _make_agent_ctx(todo_workflow_path, monkeypatch, sink=None):
     ctx.bind_app_workflow(wf)
 
     monkeypatch.setattr(
-        "fastworkflow.workflow_agent.build_query_with_next_steps",
+        "fastworkflow.agent.workflow_agent.build_query_with_next_steps",
         lambda user_query, session, **kwargs: user_query,
     )
     monkeypatch.setattr(
-        "fastworkflow.workflow_agent._what_can_i_do", lambda session: "commands"
+        "fastworkflow.agent.workflow_agent._what_can_i_do", lambda session: "commands"
     )
     # The planner's split, the model-backed seam before the parts are resolved: these requests are one part. (With
     # no planner model here, the splitter would raise; before, the repo-root .env that litellm loaded supplied one.)
     monkeypatch.setattr(
-        "fastworkflow.workflow_agent.split_into_subtasks", lambda user_query, **kwargs: [user_query]
+        "fastworkflow.agent.workflow_agent.split_into_subtasks", lambda user_query, **kwargs: [user_query]
     )
     monkeypatch.setattr(ctx, "_ensure_agent_initialized", lambda: None)
     monkeypatch.setattr(
@@ -519,7 +520,7 @@ class TestPlannerSpans:
     def _plan(self, ctx, wf, monkeypatch, trace_trigger=None, prediction=None):
         import dspy
 
-        from fastworkflow import workflow_agent
+        from fastworkflow.agent import workflow_agent
         from fastworkflow.core.command_metadata_api import CommandMetadataAPI
 
         monkeypatch.setattr(

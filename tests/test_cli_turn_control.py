@@ -49,7 +49,7 @@ def _ctrl_c_raises_keyboard_interrupt():
 
 _ASK_HOOK = '''
     if os.environ.get("FW_TEST_ADD_ASK"):
-        from fastworkflow.workflow_agent import _ask_user_tool
+        from fastworkflow.agent.workflow_agent import _ask_user_tool
         import fastworkflow as _fw
         _ask_user_tool("Which one?", _fw.chat_session)
 '''

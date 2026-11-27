@@ -426,7 +426,7 @@ def test_the_scan_found_the_emitters_that_obviously_exist():
     found = {(site["file"], site["function"]) for site in SITES}
     for expected in (
         ("engine/command_executor.py", "invoke_command"),
-        ("workflow_agent.py", "build_query_with_next_steps"),
+        ("agent/workflow_agent.py", "build_query_with_next_steps"),
         ("utils/dspy_logger.py", "on_lm_end"),
         ("engine/workflow_execution_context.py", "_close_ask_user_span"),
     ):
@@ -577,7 +577,7 @@ def test_the_rule_has_real_multi_producer_names_to_hold():
         ("engine/workflow_execution_context.py", "_process_action"),
     ])
     assert openers(tracing.SPAN_STEP) == sorted([
-        ("utils/react.py", "_run_loop"),
+        ("agent/react.py", "_run_loop"),
         ("engine/workflow_execution_context.py", "_record_result_failure"),
         ("engine/workflow_execution_context.py", "_settled_phase_answer"),
     ])

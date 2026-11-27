@@ -23,7 +23,7 @@ from io import StringIO
 import pytest
 
 import fastworkflow
-from fastworkflow import model_pipeline_training
+from fastworkflow.train import model_pipeline_training
 from fastworkflow.core.command_routing import RoutingDefinition
 from fastworkflow.intent import intent_loop
 from fastworkflow._workflows.command_metadata_extraction import intent_detection

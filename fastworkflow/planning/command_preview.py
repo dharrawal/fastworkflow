@@ -1797,7 +1797,7 @@ def render_previews(workflow_folder: str) -> dict[str, str]:
     not be loaded (the loader logs and skips one that does not import or is malformed),
     giving each such file's error.
     """
-    from fastworkflow import workflow_agent
+    from fastworkflow.agent import workflow_agent
     from fastworkflow.core.command_directory import check_no_planning_commands_folder
 
     folder = os.path.abspath(workflow_folder)
@@ -1832,7 +1832,7 @@ def render_previews(workflow_folder: str) -> dict[str, str]:
 def _load_error(name: str, path: str, folder: str) -> str:
     """Why the planning command file at *path* does not load: ``<name>: <error>``."""
     from fastworkflow.planning import planning_commands
-    from fastworkflow import workflow_agent
+    from fastworkflow.agent import workflow_agent
 
     try:
         loaded = workflow_agent._read_planning_command_file(name, path, folder)
@@ -1894,7 +1894,7 @@ def load_problems(workflow_folder: str, *, runtime: bool = False) -> list[LoadPr
         from fastworkflow.core import no_agent_mode
 
         return load_problems(workflow_folder) + _workflow_wide(no_agent_mode.runtime_problems())
-    from fastworkflow import workflow_agent
+    from fastworkflow.agent import workflow_agent
     from fastworkflow.core.command_directory import check_no_planning_commands_folder, helper_file_problems
 
     folder = os.path.abspath(workflow_folder)
@@ -2091,7 +2091,7 @@ def check_previews(workflow_folder: str, out_dir: Optional[str] = None) -> list[
     to another workflow that shares *out_dir* and are ignored.
     """
     from fastworkflow.planning import planning_commands
-    from fastworkflow import workflow_agent
+    from fastworkflow.agent import workflow_agent
 
     out_dir = out_dir or default_out_dir(workflow_folder)
     fresh = render_previews(workflow_folder)
@@ -2174,7 +2174,7 @@ def write_previews(workflow_folder: str, out_dir: Optional[str] = None) -> dict[
 def check_hand_typed_warnings(workflow_folder: str) -> list[str]:
     """The hand-typed step warnings (3.13) across the loaded planning commands of *workflow_folder*."""
     from fastworkflow.planning import planning_commands
-    from fastworkflow import workflow_agent
+    from fastworkflow.agent import workflow_agent
     from fastworkflow.observation_offloading.facts import workflow_signatures
 
     folder = os.path.abspath(workflow_folder)
@@ -2200,7 +2200,7 @@ def check_hand_typed_warnings(workflow_folder: str) -> list[str]:
 def check_note_condition_warnings(workflow_folder: str) -> list[str]:
     """The note-condition step warnings (3.13) across loaded planning commands of *workflow_folder*."""
     from fastworkflow.planning import planning_commands
-    from fastworkflow import workflow_agent
+    from fastworkflow.agent import workflow_agent
     from fastworkflow.observation_offloading.facts import workflow_signatures
 
     folder = os.path.abspath(workflow_folder)
@@ -2283,7 +2283,7 @@ def check_matcher_example_notices(workflow_folder: str) -> list[str]:
     The remote matcher lists the first ``workflow_agent.MATCHER_EXAMPLES`` of each candidate's utterances;
     the rest still train the local model. Printed by ``command preview --check`` only."""
     from fastworkflow.observation_offloading.facts import workflow_signatures
-    from fastworkflow.workflow_agent import MATCHER_EXAMPLES
+    from fastworkflow.agent.workflow_agent import MATCHER_EXAMPLES
 
     try:
         signatures = workflow_signatures(os.path.abspath(workflow_folder))

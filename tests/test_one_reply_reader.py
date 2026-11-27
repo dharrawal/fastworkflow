@@ -23,7 +23,7 @@ from types import SimpleNamespace
 
 from fastworkflow.intent import intent_loop
 from fastworkflow.core import no_agent_mode, waiting
-from fastworkflow import workflow_agent
+from fastworkflow.agent import workflow_agent
 from fastworkflow.parameters import parameter_clarification
 from fastworkflow._workflows.command_metadata_extraction import parameter_reply
 from fastworkflow.parameters import read, reply as replies

@@ -11,7 +11,7 @@ from dspy.utils import DummyLM
 import fastworkflow
 from fastworkflow.observability import tracing
 from fastworkflow.core.command_routing import RoutingRegistry
-from fastworkflow.workflow_agent import (
+from fastworkflow.agent.workflow_agent import (
     build_query_with_next_steps, initialize_workflow_tool_agent, run_progress_check)
 from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 from tests.test_approval_binding import annotated_library, todo  # noqa: F401 - fixtures of ``gated``
@@ -158,7 +158,7 @@ def test_a_progress_check_with_nothing_remaining_says_to_finish(workflow_env):
 
 
 def test_a_zero_argument_tool_ignores_a_stray_argument(workflow_env, monkeypatch):
-    import fastworkflow.workflow_agent as workflow_agent
+    import fastworkflow.agent.workflow_agent as workflow_agent
 
     workflow_env()
     ctx, wf = _session(RecordingTraceSink())
@@ -170,7 +170,7 @@ def test_a_zero_argument_tool_ignores_a_stray_argument(workflow_env, monkeypatch
 
 
 def _reentry_session(monkeypatch, workflow_env):
-    import fastworkflow.workflow_agent as workflow_agent
+    import fastworkflow.agent.workflow_agent as workflow_agent
     from fastworkflow.engine.command_executor import AlreadyInContextError
 
     workflow_env()
@@ -213,7 +213,7 @@ def test_reopening_the_same_instance_is_refused_without_moving(workflow_env, mon
 
 
 def _split(answer):
-    from fastworkflow.workflow_agent import split_into_subtasks
+    from fastworkflow.agent.workflow_agent import split_into_subtasks
     return split_into_subtasks("the request", planner_lm=DummyLM([answer]))
 
 
@@ -223,7 +223,7 @@ def test_a_numbered_answer_becomes_the_subtasks():
 
 
 def test_an_unusable_split_leaves_the_request_whole():
-    from fastworkflow.workflow_agent import MAX_SUBTASKS
+    from fastworkflow.agent.workflow_agent import MAX_SUBTASKS
 
     assert _split({"reasoning": "r", "subtasks": "no numbered lines here"}) == ["the request"]
     many = "\n".join(f"{n}. part {n}" for n in range(1, MAX_SUBTASKS + 2))
@@ -234,7 +234,7 @@ def test_an_unusable_split_leaves_the_request_whole():
 
 def test_a_failing_split_leaves_the_request_whole(monkeypatch):
     import dspy
-    from fastworkflow.workflow_agent import split_into_subtasks
+    from fastworkflow.agent.workflow_agent import split_into_subtasks
 
     def broken(*args, **kwargs):
         raise RuntimeError("provider down")
@@ -244,7 +244,7 @@ def test_a_failing_split_leaves_the_request_whole(monkeypatch):
 
 
 def test_a_visibly_broken_split_is_retried_once_then_left_whole():
-    from fastworkflow.workflow_agent import split_into_subtasks
+    from fastworkflow.agent.workflow_agent import split_into_subtasks
 
     duplicated = {"reasoning": "r", "subtasks": "1. Same thing.\n2. Same thing."}
     fixed = {"reasoning": "r", "subtasks": "1. Part A.\n2. Part B."}
@@ -255,7 +255,7 @@ def test_a_visibly_broken_split_is_retried_once_then_left_whole():
 
 
 def test_a_split_that_refers_back_to_the_request_is_retried_once():
-    from fastworkflow.workflow_agent import split_into_subtasks
+    from fastworkflow.agent.workflow_agent import split_into_subtasks
 
     referring = {"reasoning": "r", "subtasks": "1. Audit each of them in Finance.\n2. Sweep Hubbard."}
     named = {"reasoning": "r", "subtasks": "1. Audit Alice and Bob.\n2. Sweep Hubbard."}
@@ -267,7 +267,7 @@ def test_a_split_that_refers_back_to_the_request_is_retried_once():
 
 
 def test_a_brace_placeholder_not_in_the_request_is_visibly_broken():
-    from fastworkflow.workflow_agent import _visibly_broken
+    from fastworkflow.agent.workflow_agent import _visibly_broken
 
     subtasks = ["{SOME_NAME} carries more risk; list the findings.", "Sweep Hubbard."]
     assert _visibly_broken(subtasks, "compare Ada and Ben")
@@ -294,7 +294,7 @@ def test_a_placeholder_that_survives_the_retry_leaves_the_request_whole():
 
 
 def test_square_bracket_placeholders_and_numbered_openers_not_in_the_request_are_visibly_broken():
-    from fastworkflow.workflow_agent import _visibly_broken
+    from fastworkflow.agent.workflow_agent import _visibly_broken
 
     query = "Who is on the roster of each unit? Also sweep Hubbard."
     assert _visibly_broken(["[Person 1 name] starts on the roster.", "Sweep Hubbard."], query)
@@ -315,7 +315,7 @@ def test_a_square_bracket_placeholder_that_survives_the_retry_leaves_the_request
 
 
 def test_the_same_phrases_of_a_request_are_not_leftover_references():
-    from fastworkflow.workflow_agent import _visibly_broken
+    from fastworkflow.agent.workflow_agent import _visibly_broken
 
     assert not _visibly_broken(["Give Ann Lee the same treatment as Bo Chan.", "Sweep Hubbard."], "the request")
     assert not _visibly_broken(["Give Cy Dale the same look as Bo Chan.", "Sweep Hubbard."], "the request")
@@ -323,7 +323,7 @@ def test_the_same_phrases_of_a_request_are_not_leftover_references():
 
 
 def test_the_recorded_real_split_comes_through_the_placeholder_check():
-    from fastworkflow.workflow_agent import _invented_placeholders
+    from fastworkflow.agent.workflow_agent import _invented_placeholders
 
     assert not any(_invented_placeholders(line.split(". ", 1)[1], RECORDED_QUERY_5_10)
                    for line in RECORDED_REPLY_5_10.splitlines())
@@ -361,13 +361,13 @@ def test_a_clause_the_model_wrote_twice_in_one_sub_task_is_written_once(monkeypa
 
 
 def _split_with_query(query, *answers):
-    from fastworkflow.workflow_agent import split_into_subtasks
+    from fastworkflow.agent.workflow_agent import split_into_subtasks
 
     return split_into_subtasks(query, planner_lm=DummyLM(list(answers)))
 
 
 def test_the_split_goes_through_the_merge():
-    from fastworkflow.workflow_agent import split_into_subtasks
+    from fastworkflow.agent.workflow_agent import split_into_subtasks
 
     query = "How risky is Zoe Hale, and which findings are driving that?"
     follow_up = {"reasoning": "r", "subtasks": "1. How risky is Zoe Hale?\n2. Which findings are driving that?"}
@@ -382,7 +382,7 @@ def _split_file(folder, text):
 
 
 def test_identifier_patterns_come_from_the_workflows_split_file(tmp_path):
-    from fastworkflow.workflow_agent import SplitSettings, identifier_patterns, split_settings
+    from fastworkflow.agent.workflow_agent import SplitSettings, identifier_patterns, split_settings
 
     assert identifier_patterns(str(tmp_path / "no_file")) == ()
     assert split_settings(str(tmp_path / "no_file")) == SplitSettings()
@@ -400,7 +400,7 @@ def test_identifier_patterns_come_from_the_workflows_split_file(tmp_path):
 ])
 def test_a_malformed_split_file_fails_the_load(tmp_path, text, match):
     from fastworkflow.planning.planning_commands import PlanningCommandFormatError
-    from fastworkflow.workflow_agent import load_planning_commands
+    from fastworkflow.agent.workflow_agent import load_planning_commands
 
     folder = _split_file(tmp_path, text)
     with pytest.raises(PlanningCommandFormatError, match=match):
@@ -408,7 +408,7 @@ def test_a_malformed_split_file_fails_the_load(tmp_path, text, match):
 
 
 def test_the_merge_gets_the_workflows_identifier_patterns(tmp_path, monkeypatch):
-    import fastworkflow.workflow_agent as agent
+    import fastworkflow.agent.workflow_agent as agent
 
     _split_file(tmp_path, "import re\nidentifier_patterns = [re.compile(r'\\bcase_[A-Za-z0-9]+')]\n")
     seen = {}
@@ -425,7 +425,7 @@ def test_the_merge_gets_the_workflows_identifier_patterns(tmp_path, monkeypatch)
 
 
 def test_a_split_sub_task_gets_the_referent_jev_chooses_written_in(tmp_path, monkeypatch):
-    import fastworkflow.workflow_agent as agent
+    import fastworkflow.agent.workflow_agent as agent
 
     _split_file(tmp_path, 'subject_hints = """Tag names are not records."""\n')
     asked = []
@@ -447,8 +447,8 @@ def test_a_split_sub_task_gets_the_referent_jev_chooses_written_in(tmp_path, mon
 
 
 def test_a_merged_sub_task_is_never_given_the_record_listed_beside_its_own(monkeypatch):
-    import fastworkflow.workflow_agent as agent
-    from fastworkflow.split_merge import merge_subtasks
+    import fastworkflow.agent.workflow_agent as agent
+    from fastworkflow.agent.split_merge import merge_subtasks
 
     # a chooser that takes a listed sibling whenever it is offered one (the mistake seen live)
     monkeypatch.setattr(agent, "_jev_lm", lambda: object())
@@ -469,7 +469,7 @@ def test_a_merged_sub_task_is_never_given_the_record_listed_beside_its_own(monke
 
 
 def test_the_record_is_written_after_the_definite_description_jev_chooses(tmp_path, monkeypatch):
-    import fastworkflow.workflow_agent as agent
+    import fastworkflow.agent.workflow_agent as agent
 
     asked = []
 
@@ -490,7 +490,7 @@ def test_the_record_is_written_after_the_definite_description_jev_chooses(tmp_pa
 
 
 def test_without_jev_the_sub_tasks_are_left_as_they_are(monkeypatch):
-    import fastworkflow.workflow_agent as agent
+    import fastworkflow.agent.workflow_agent as agent
 
     monkeypatch.setattr(agent, "_jev_lm", lambda: None)
     assert agent.resolve_referents("Ann Lee leaves. Tag the customer `x`.", ["Ann Lee leaves.", "Tag the customer `x`."],
@@ -498,7 +498,7 @@ def test_without_jev_the_sub_tasks_are_left_as_they_are(monkeypatch):
 
 
 def test_a_failing_merge_keeps_the_models_split(monkeypatch):
-    import fastworkflow.workflow_agent as agent
+    import fastworkflow.agent.workflow_agent as agent
 
     def broken(*args, **kwargs):
         raise RuntimeError("merge bug")
@@ -509,7 +509,7 @@ def test_a_failing_merge_keeps_the_models_split(monkeypatch):
 
 
 def test_a_clean_split_is_not_retried():
-    from fastworkflow.workflow_agent import split_into_subtasks
+    from fastworkflow.agent.workflow_agent import split_into_subtasks
 
     clean = {"reasoning": "r", "subtasks": "1. Audit as well as sweep Alice.\n2. Sweep Hubbard."}
     retry_would_differ = {"reasoning": "r", "subtasks": "1. Other part.\n2. Another part."}
@@ -518,7 +518,7 @@ def test_a_clean_split_is_not_retried():
 
 
 def test_the_splitter_call_is_capped_at_split_max_tokens(monkeypatch):
-    from fastworkflow import workflow_agent as agent
+    from fastworkflow.agent import workflow_agent as agent
 
     lm = DummyLM([{"reasoning": "r", "subtasks": "1. Part A.\n2. Part B."}])
     copies = []
@@ -578,7 +578,7 @@ _JSON_SPLIT = ('{"reasoning": "Two jobs.", "subtasks": "1. Audit right A.\\n2. S
 
 
 def test_a_normal_split_reply_is_one_call():
-    from fastworkflow.workflow_agent import split_into_subtasks
+    from fastworkflow.agent.workflow_agent import split_into_subtasks
 
     lm = _ScriptedReplies([_GOOD, _GOOD])
     assert split_into_subtasks("the request", planner_lm=lm) == ["Audit right A.", "Sweep Hubbard."]
@@ -586,7 +586,7 @@ def test_a_normal_split_reply_is_one_call():
 
 
 def test_a_cut_off_reply_that_parses_is_not_the_split_and_is_retried():
-    from fastworkflow.workflow_agent import split_into_subtasks
+    from fastworkflow.agent.workflow_agent import split_into_subtasks
 
     lm = _ScriptedReplies([_ECHOED_THEN_CUT, _GOOD])
     assert split_into_subtasks("the request", planner_lm=lm) == ["Audit right A.", "Sweep Hubbard."]
@@ -594,7 +594,7 @@ def test_a_cut_off_reply_that_parses_is_not_the_split_and_is_retried():
 
 
 def test_a_cut_off_reply_that_does_not_parse_uses_dspys_json_retry():
-    from fastworkflow.workflow_agent import split_into_subtasks
+    from fastworkflow.agent.workflow_agent import split_into_subtasks
 
     lm = _ScriptedReplies([_CUT, _JSON_SPLIT, _GOOD])
     assert split_into_subtasks("the request", planner_lm=lm) == ["Audit right A.", "Sweep Hubbard."]
@@ -604,7 +604,7 @@ def test_a_cut_off_reply_that_does_not_parse_uses_dspys_json_retry():
 def test_a_complete_json_retry_reply_of_a_cut_off_reply_is_the_split_and_no_retry_is_made():
     """DSPy's own JSON retry of a cut-off first reply answers inside the same call; a complete reply is the answer
     whichever adapter wrote it, so its split is used and the retry without the reasoning field is not made."""
-    from fastworkflow.workflow_agent import recording_split, split_into_subtasks
+    from fastworkflow.agent.workflow_agent import recording_split, split_into_subtasks
 
     lm = _ScriptedReplies([_CUT, _JSON_SPLIT, _SUBTASKS_ONLY])
     with recording_split() as record:
@@ -614,7 +614,7 @@ def test_a_complete_json_retry_reply_of_a_cut_off_reply_is_the_split_and_no_retr
 
 
 def test_a_cut_off_json_retry_still_gets_the_split_retry():
-    from fastworkflow.workflow_agent import split_into_subtasks
+    from fastworkflow.agent.workflow_agent import split_into_subtasks
 
     lm = _ScriptedReplies([_CUT, ('{"reasoning": "Rule 7 says', "length", 4700), _GOOD])
     assert split_into_subtasks("the request", planner_lm=lm) == ["Audit right A.", "Sweep Hubbard."]
@@ -628,7 +628,7 @@ _SUBTASKS_ONLY = ("[[ ## subtasks ## ]]\n1. Audit right A.\n2. Sweep Hubbard.\n\
 def test_the_retry_after_a_cut_off_reply_asks_without_the_reasoning_field():
     """The splitter loops in its reasoning until the cap; the one retry asks for the sub-tasks alone (``dspy.Predict``
     of the same signature) and its answer is the split."""
-    from fastworkflow.workflow_agent import split_into_subtasks
+    from fastworkflow.agent.workflow_agent import split_into_subtasks
 
     lm = _ScriptedReplies([_CUT, ('{"reasoning": "Rule 7 says', "length", 4700), _SUBTASKS_ONLY])
     assert split_into_subtasks("the request", planner_lm=lm) == ["Audit right A.", "Sweep Hubbard."]
@@ -637,7 +637,7 @@ def test_the_retry_after_a_cut_off_reply_asks_without_the_reasoning_field():
 
 
 def test_a_split_cut_off_twice_leaves_the_request_whole():
-    from fastworkflow.workflow_agent import split_into_subtasks
+    from fastworkflow.agent.workflow_agent import split_into_subtasks
 
     lm = _ScriptedReplies([_ECHOED_THEN_CUT, _ECHOED_THEN_CUT, _GOOD])
     assert split_into_subtasks("the request", planner_lm=lm) == ["the request"]
@@ -653,7 +653,7 @@ _THREE_ITEMS = ("[[ ## reasoning ## ]]\nThree jobs.\n\n[[ ## subtasks ## ]]\n"
 
 @pytest.mark.skip(reason="fix-kdag disabled after benchmark pass 4")
 def test_a_split_with_no_numbered_item_is_retried_and_the_retry_is_used():
-    from fastworkflow.workflow_agent import split_into_subtasks
+    from fastworkflow.agent.workflow_agent import split_into_subtasks
 
     query = "Ada Ng renews a loan, Ben Ito lists holds and Cy Ro checks fines."
     lm = _ScriptedReplies([(_NO_NUMBERED_ITEM, "stop", 10), (_THREE_ITEMS, "stop", 60)])
@@ -664,7 +664,7 @@ def test_a_split_with_no_numbered_item_is_retried_and_the_retry_is_used():
 
 @pytest.mark.skip(reason="fix-kdag disabled after benchmark pass 4")
 def test_a_split_with_no_numbered_item_twice_leaves_the_request_whole():
-    from fastworkflow.workflow_agent import split_into_subtasks
+    from fastworkflow.agent.workflow_agent import split_into_subtasks
 
     query = "Ada Ng renews a loan, Ben Ito lists holds and Cy Ro checks fines."
     lm = _ScriptedReplies([(_NO_NUMBERED_ITEM, "stop", 10), (_NO_NUMBERED_ITEM, "stop", 10)])
@@ -673,7 +673,7 @@ def test_a_split_with_no_numbered_item_twice_leaves_the_request_whole():
 
 
 def test_a_genuine_one_item_split_still_returns_the_request_verbatim():
-    from fastworkflow.workflow_agent import split_into_subtasks
+    from fastworkflow.agent.workflow_agent import split_into_subtasks
 
     query = "Renew the loan of Ada Ng, please."
     one_item = {"reasoning": "r", "subtasks": "1. Renew the loan of Ada Ng."}
@@ -737,7 +737,7 @@ class _ProviderLM(DummyLM):
 @pytest.fixture
 def fresh_process(monkeypatch):
     """No model refused a parameter yet and no split failure logged yet, as in a new process."""
-    from fastworkflow import workflow_agent as agent
+    from fastworkflow.agent import workflow_agent as agent
     from fastworkflow.utils import dspy_utils
 
     monkeypatch.setattr(dspy_utils, "_PARAMS_REJECTED", set())
@@ -766,7 +766,7 @@ _FIXED = {"reasoning": "r", "subtasks": "1. Part A.\n2. Part B."}
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")
 def test_a_planner_that_takes_only_temperature_1_still_splits(fresh_process, warnings_log):
     """fix-z62t: temperature 0.0 is refused, so the call goes again without it, and the split is used."""
-    from fastworkflow.workflow_agent import split_into_subtasks
+    from fastworkflow.agent.workflow_agent import split_into_subtasks
 
     lm = _ProviderLM([_CLEAN], only_temperature_1=True)
     assert split_into_subtasks("the request", planner_lm=lm) == ["Audit right A.", "Sweep Hubbard."]
@@ -787,7 +787,7 @@ def test_a_planner_that_takes_only_temperature_1_still_splits(fresh_process, war
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")
 def test_the_retry_on_a_planner_without_its_temperature_skips_the_cache(fresh_process):
     """The retry's 0.7 cannot change that model's answer, so the retry is sent past the response cache."""
-    from fastworkflow.workflow_agent import split_into_subtasks
+    from fastworkflow.agent.workflow_agent import split_into_subtasks
 
     lm = _ProviderLM([_DUPLICATED, _FIXED], only_temperature_1=True)
     assert split_into_subtasks("the request", planner_lm=lm) == ["Part A.", "Part B."]
@@ -797,7 +797,7 @@ def test_the_retry_on_a_planner_without_its_temperature_skips_the_cache(fresh_pr
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")
 def test_a_planner_that_takes_any_temperature_is_called_as_before(fresh_process, warnings_log):
     """No behaviour change for a model that takes the temperatures: 0.0 then 0.7, no drop_params, cached."""
-    from fastworkflow.workflow_agent import split_into_subtasks
+    from fastworkflow.agent.workflow_agent import split_into_subtasks
 
     lm = _ProviderLM([_DUPLICATED, _FIXED])
     assert split_into_subtasks("the request", planner_lm=lm) == ["Part A.", "Part B."]
@@ -809,7 +809,7 @@ def test_a_planner_that_takes_any_temperature_is_called_as_before(fresh_process,
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")
 def test_a_split_that_always_fails_is_logged_once_with_its_cause(fresh_process, warnings_log):
     """A misconfigured planner fails every turn the same way: one WARNING naming the cause, not one per turn."""
-    from fastworkflow.workflow_agent import split_into_subtasks
+    from fastworkflow.agent.workflow_agent import split_into_subtasks
 
     lm = _ProviderLM([], fail=RuntimeError("provider down"))
     for _ in range(3):
@@ -867,8 +867,8 @@ _ONE_PER_JOB = _reply(
 
 
 def test_of_two_broken_splits_the_one_naming_no_record_twice_is_used(monkeypatch):
-    import fastworkflow.workflow_agent as agent
-    from fastworkflow.split_merge import merge_subtasks
+    import fastworkflow.agent.workflow_agent as agent
+    from fastworkflow.agent.split_merge import merge_subtasks
 
     monkeypatch.setattr(agent, "_jev_lm", lambda: None)
     lm = _ScriptedReplies([_SUMMARY_AND_INVENTED, _ONE_PER_JOB])
@@ -881,8 +881,8 @@ def test_of_two_broken_splits_the_one_naming_no_record_twice_is_used(monkeypatch
 
 
 def test_two_equally_broken_splits_keep_the_first(monkeypatch):
-    import fastworkflow.workflow_agent as agent
-    from fastworkflow.split_merge import merge_subtasks
+    import fastworkflow.agent.workflow_agent as agent
+    from fastworkflow.agent.split_merge import merge_subtasks
 
     monkeypatch.setattr(agent, "_jev_lm", lambda: None)
     first = [line.split(". ", 1)[1] for line in _ONE_PER_JOB[0].splitlines() if line[:1].isdigit()]
@@ -892,7 +892,7 @@ def test_two_equally_broken_splits_keep_the_first(monkeypatch):
 
 
 def test_breakage_counts_records_named_twice_then_leftover_references():
-    from fastworkflow.workflow_agent import _breakage
+    from fastworkflow.agent.workflow_agent import _breakage
 
     summary = [line.split(". ", 1)[1] for line in _SUMMARY_AND_INVENTED[0].splitlines() if line[:1].isdigit()]
     per_job = [line.split(". ", 1)[1] for line in _ONE_PER_JOB[0].splitlines() if line[:1].isdigit()]
@@ -926,7 +926,7 @@ def planning_command_file(text: str) -> str:
 
 
 def test_planning_commands_without_params_give_their_steps_and_all_are_shown(tmp_path):
-    from fastworkflow.workflow_agent import _job_types_for, load_planning_commands
+    from fastworkflow.agent.workflow_agent import _job_types_for, load_planning_commands
 
     (tmp_path / "_commands").mkdir()
     for name, text in {"leaver_sweep": "One person is leaving: their reach. One job per person.\nfind them\nopen them",
@@ -950,7 +950,7 @@ def _write_planning_commands(tmp_path, planning_commands):
 
 
 def test_the_planner_template_gets_the_planning_commands_steps(tmp_path):
-    from fastworkflow import workflow_agent
+    from fastworkflow.agent import workflow_agent
 
     # (was: match_planning_command picks the command; the pick is now the intent loop's, see
     # tests/test_split_and_planner_use_intent_loop.py. What stays here: the command's steps are the template.)
@@ -964,7 +964,7 @@ def test_the_split_files_examples_change_the_splitter_prompt(tmp_path):
     """A workflow changes its splitter's prompt with ``split_examples`` (bd fix-qjne.26; a ``Signature`` replacing the
     instructions is retired): the instructions become the built-in rules alone, the field descriptions stay the
     splitter's, another workflow keeps the default, and ``_workflow.py`` is not a planning command."""
-    from fastworkflow.workflow_agent import SPLIT_RULES, SplitIntoSubtasks, _split_signature, load_planning_commands
+    from fastworkflow.agent.workflow_agent import SPLIT_RULES, SplitIntoSubtasks, _split_signature, load_planning_commands
 
     folder = _split_file(tmp_path, "split_examples = [('Find Dune and Emma.', ['Find Dune.', 'Find Emma.'])]\n")
     other = tmp_path / "other"
@@ -991,7 +991,7 @@ def test_a_split_file_signature_no_longer_replaces_the_prompt_it_fails_the_load(
     """The replace path is removed: neither the docstring (instructions) nor ``Input``/``Output`` (field descriptions)
     is read; the file fails the load naming ``split_examples``."""
     from fastworkflow.planning.planning_commands import PlanningCommandFormatError
-    from fastworkflow.workflow_agent import _split_signature
+    from fastworkflow.agent.workflow_agent import _split_signature
 
     folder = _split_file(tmp_path, text)
     with pytest.raises(PlanningCommandFormatError, match=r"_workflow\.py: a Signature .*write split_examples"):
@@ -1015,7 +1015,7 @@ def _fake_matcher(value, probability):
 
 
 def test_a_plan_template_is_the_matched_planning_command_steps_in_a_fixed_format():
-    from fastworkflow import workflow_agent
+    from fastworkflow.agent import workflow_agent
 
     assert workflow_agent._template_text(("find them", "open them")) == (
         "A job like this is usually done as:\n- find them\n- open them\n"
@@ -1026,7 +1026,7 @@ def test_match_planning_command_only_returns_a_confident_planning_command_pick(g
     """(was ``match_planning_command``; the pick is the intent loop's: the remote model's answer decides at its accept
     bar, "none" and a doubtful score are no plan, and a failed call leaves the local model's answer.)"""
     from fastworkflow.core import turn_cache
-    from fastworkflow import workflow_agent
+    from fastworkflow.agent import workflow_agent
     from tests.conftest import no_local_model, script_matcher
 
     no_local_model(monkeypatch)
@@ -1044,7 +1044,7 @@ def test_match_planning_command_only_returns_a_confident_planning_command_pick(g
 @pytest.mark.usefixtures("no_planner_key")
 def test_no_jev_key_means_no_matcher_and_no_template(gated, monkeypatch):
     from fastworkflow.core import turn_cache
-    from fastworkflow import workflow_agent
+    from fastworkflow.agent import workflow_agent
     from tests.conftest import no_local_model
 
     no_local_model(monkeypatch)
@@ -1073,7 +1073,7 @@ DUNE_SPLIT = {"reasoning": "r", "subtasks": "1. Who wrote Dune?\n2. Who has Dune
 def _scripted_jev(monkeypatch, verdict):
     """Jev's SameRequest answer scripted (``verdict``: (value, probability), or an exception to raise); other Jev
     questions (the referent) answer nothing. Returns the inputs each SameRequest call got."""
-    import fastworkflow.workflow_agent as agent
+    import fastworkflow.agent.workflow_agent as agent
     from types import SimpleNamespace
 
     calls: list[dict] = []
@@ -1100,7 +1100,7 @@ def _scripted_jev(monkeypatch, verdict):
 
 
 def _split_dune():
-    from fastworkflow.workflow_agent import split_into_subtasks
+    from fastworkflow.agent.workflow_agent import split_into_subtasks
     return split_into_subtasks(DUNE, planner_lm=DummyLM([DUNE_SPLIT]), workflow_folderpath=TUTORIAL)
 
 
@@ -1111,7 +1111,7 @@ def test_two_questions_jev_calls_separate_stay_two_sub_tasks(monkeypatch):
 
 
 def test_steps_jev_calls_one_request_are_joined_into_the_request(monkeypatch):
-    from fastworkflow.workflow_agent import SAME_REQUEST_THRESHOLD, split_into_subtasks
+    from fastworkflow.agent.workflow_agent import SAME_REQUEST_THRESHOLD, split_into_subtasks
 
     _scripted_jev(monkeypatch, ("one", SAME_REQUEST_THRESHOLD))
     assert _split_dune() == [DUNE]
@@ -1122,7 +1122,7 @@ def test_steps_jev_calls_one_request_are_joined_into_the_request(monkeypatch):
 
 
 def test_one_request_below_the_threshold_is_not_joined(monkeypatch):
-    from fastworkflow.workflow_agent import SAME_REQUEST_THRESHOLD
+    from fastworkflow.agent.workflow_agent import SAME_REQUEST_THRESHOLD
 
     _scripted_jev(monkeypatch, ("one", SAME_REQUEST_THRESHOLD - 0.05))
     assert _split_dune() == ["Who wrote Dune?", "Who has Dune out?"]
@@ -1130,7 +1130,7 @@ def test_one_request_below_the_threshold_is_not_joined(monkeypatch):
 
 def test_without_a_jev_key_the_lexical_rule_joins_as_before(monkeypatch):
     calls = _scripted_jev(monkeypatch, ("separate", 0.99))
-    import fastworkflow.workflow_agent as agent
+    import fastworkflow.agent.workflow_agent as agent
 
     monkeypatch.setattr(agent, "_jev_lm", lambda: None)
     assert _split_dune() == [DUNE]
@@ -1144,7 +1144,7 @@ def test_a_failing_jev_call_leaves_the_lexical_rule(monkeypatch):
 
 
 def test_the_conversation_is_a_separate_splitter_input_only_when_there_is_one(monkeypatch):
-    import fastworkflow.workflow_agent as agent
+    import fastworkflow.agent.workflow_agent as agent
 
     _scripted_jev(monkeypatch, ("separate", 0.99))
     query = "Who has it out, and how many loans are overdue?"
@@ -1187,17 +1187,17 @@ def _leaves(name):
 
 @pytest.fixture
 def no_jev(no_planner_key):
-    from fastworkflow import workflow_agent
+    from fastworkflow.agent import workflow_agent
     assert workflow_agent._jev_lm() is None, "this test needs a process without a Jev key"
 
 
 def _split_with(query, reply):
-    from fastworkflow.workflow_agent import split_into_subtasks
+    from fastworkflow.agent.workflow_agent import split_into_subtasks
     return split_into_subtasks(query, planner_lm=DummyLM([{"reasoning": "r", "subtasks": reply}]))
 
 
 def test_a_split_over_the_cap_only_because_it_repeats_jobs_is_still_split(no_jev):
-    from fastworkflow.workflow_agent import MAX_SUBTASKS, _split_items
+    from fastworkflow.agent.workflow_agent import MAX_SUBTASKS, _split_items
 
     assert len(_split_items(RECORDED_REPLY_5_10)) > MAX_SUBTASKS
     parts = _split_with(RECORDED_QUERY_5_10, RECORDED_REPLY_5_10)
@@ -1207,7 +1207,7 @@ def test_a_split_over_the_cap_only_because_it_repeats_jobs_is_still_split(no_jev
 
 
 def test_a_split_over_the_cap_is_reduced_never_run_whole(no_jev):
-    from fastworkflow.workflow_agent import MAX_SUBTASKS
+    from fastworkflow.agent.workflow_agent import MAX_SUBTASKS
 
     query = "Offboard " + ", ".join(_LEAVERS) + ". Also audit the right Jira_IT Support Specialist."
     items = [_leaves(name) for name in _LEAVERS] + ["Audit the right Jira_IT Support Specialist."]
@@ -1218,7 +1218,7 @@ def test_a_split_over_the_cap_is_reduced_never_run_whole(no_jev):
 
 
 def test_a_long_split_of_copies_paraphrases_and_jobs_keeps_every_subject(no_jev):
-    from fastworkflow.workflow_agent import MAX_SUBTASKS
+    from fastworkflow.agent.workflow_agent import MAX_SUBTASKS
 
     names = _LEAVERS[:8]
     rights = ["Jira_IT Support Specialist", "GitLab_Technical Leads", "Active Directory_Cloud Administrator"]
@@ -1237,7 +1237,7 @@ def test_a_long_split_of_copies_paraphrases_and_jobs_keeps_every_subject(no_jev)
 
 
 def test_the_reduction_asks_jev_no_more_than_its_budget_and_decides_without_it():
-    from fastworkflow.split_merge import reduce_to_cap
+    from fastworkflow.agent.split_merge import reduce_to_cap
 
     asked = []
 
@@ -1265,7 +1265,7 @@ def test_the_reduction_asks_jev_no_more_than_its_budget_and_decides_without_it()
 def test_a_dspy_field_marker_in_the_split_reply_is_not_part_of_a_sub_task():
     """A splitter reply once carried "[[ ## completed ## ]]" into the last sub-task's text, which
     the plan review then showed the user. The marker is cut; the item's own words are kept."""
-    from fastworkflow.workflow_agent import _split_items
+    from fastworkflow.agent.workflow_agent import _split_items
 
     reply = ("1. Audit the right Library_Archivist across the systems it appears in.\n"
              "2. Dana Reyes has asked for the right Library_Curator 1: what it exposes, who holds it, "

@@ -5,7 +5,7 @@ import logging
 from typing import Any, Callable, Optional
 
 import fastworkflow
-from fastworkflow import context_budget
+from fastworkflow.observation_offloading import context_budget
 from fastworkflow.core.command_metadata_api import CommandMetadataAPI
 from fastworkflow.observation_offloading.archive import (
     RuntimeHandleArchive,
@@ -21,7 +21,7 @@ from fastworkflow.observation_offloading.state import (
     record_event,
     scope_for_host,
 )
-from fastworkflow.utils.react import fastWorkflowReAct
+from fastworkflow.agent.react import fastWorkflowReAct
 
 logger = logging.getLogger(__name__)
 

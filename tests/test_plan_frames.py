@@ -350,14 +350,14 @@ def library_sessions(monkeypatch, initialized_fastworkflow):
             runner(ctx, "startup")
             runner.sent.clear()
         monkeypatch.setattr(
-            "fastworkflow.workflow_agent.build_query_with_next_steps",
+            "fastworkflow.agent.workflow_agent.build_query_with_next_steps",
             lambda user_query, session, **kwargs: user_query,
         )
         from tests.conftest import script_plan
 
         script_plan(monkeypatch, lambda text: None)
         monkeypatch.setattr(
-            "fastworkflow.workflow_agent.split_into_subtasks",
+            "fastworkflow.agent.workflow_agent.split_into_subtasks",
             lambda query, **_: list(subtasks or [query]),
         )
         monkeypatch.setattr(

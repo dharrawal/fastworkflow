@@ -19,7 +19,7 @@ executing path today; "dead" = present but unreached.
 
 | Value | Meaning | file:line | Status |
 |---|---|---|---|
-| 0.65 | `ModelPipeline` default confidence threshold (used during training eval before tuning; runtime loads the trained value) | `fastworkflow/model_pipeline_training.py:346,360,1059` | live (transitional) |
+| 0.65 | `ModelPipeline` default confidence threshold (used during training eval before tuning; runtime loads the trained value) | `fastworkflow/train/model_pipeline_training.py:346,360,1059` | live (transitional) |
 | 12 | TinyBERT fine-tuning epochs | `model_pipeline_training.py:957` | live |
 | 5 | DistilBERT fine-tuning epochs | `model_pipeline_training.py:1020` (re-set :1026) | live |
 | 1e-4 | TinyBERT AdamW learning rate ("slightly higher" per comment) | `model_pipeline_training.py:956` | live |
@@ -68,15 +68,15 @@ executing path today; "dead" = present but unreached.
 
 | Value | Meaning | file:line | Owner skill |
 |---|---|---|---|
-| 25 | agent max_iters | `fastworkflow/workflow_agent.py:387` | architecture-contract |
+| 25 | agent max_iters | `fastworkflow/agent/workflow_agent.py:387` | architecture-contract |
 | 5 | conversation-history entries used for query refinement | `workflow_execution_context.py:981-991` | architecture-contract |
-| 3 | invalid-tool-selection coaching bail-out | `fastworkflow/utils/react.py:219-236` | architecture-contract |
+| 3 | invalid-tool-selection coaching bail-out | `fastworkflow/agent/react.py:219-236` | architecture-contract |
 
 ## Re-verification one-liner
 
 ```bash
 grep -n "0.5129\|alpha = 0.15\|linspace\|threshold=0.3\|0.85\|threshold=0.90\|N=3\|max_retries = 2" \
-  fastworkflow/model_pipeline_training.py \
+  fastworkflow/train/model_pipeline_training.py \
   fastworkflow/_workflows/command_metadata_extraction/intent_detection.py \
   fastworkflow/parameters/signatures.py \
   fastworkflow/engine/workflow_execution_context.py

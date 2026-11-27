@@ -29,7 +29,7 @@ import fastworkflow
 from fastworkflow.review import review_proposals
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import extract_arguments
 from fastworkflow.review.review_proposals import Means, SubTask, SubTaskInput, draft_inputs, resolve_inputs, run_text
-from fastworkflow.run_listing import has_trained_heads
+from fastworkflow.agent.run_listing import has_trained_heads
 from fastworkflow.parameters import signatures
 from tests.test_approval_binding import annotated_library  # noqa: F401 - the library copy with its trained heads
 

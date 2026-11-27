@@ -54,7 +54,7 @@ We will introduce a lightweight event stream for trace messages, emitted synchro
   - Add a new `Queue` attribute (e.g., `_command_trace_queue`) and an accessor property `command_trace_queue`.
   - The queue is created per `ChatSession` and cleared when the session stops.
 
-- `fastworkflow/workflow_agent.py` ([workflow_agent.py](mdc:fastworkflow/workflow_agent.py))
+- `fastworkflow/agent/workflow_agent.py` ([workflow_agent.py](mdc:fastworkflow/agent/workflow_agent.py))
   - In `_execute_workflow_query(...)`:
     - Emit an “Agent -> Workflow” event before calling `CommandExecutor.invoke_command(...)` containing the raw `command` string.
     - After receiving `command_output`, emit a “Workflow -> Agent” event with `command_name`, `parameters` (best-effort serialized), `response text`, and `success`.
@@ -100,7 +100,7 @@ Success semantics:
 
 ### 7. Emission Details (Agent Path)
 
-Target hook: `_execute_workflow_query(command: str, chat_session_obj: ChatSession) -> str` in [workflow_agent.py](mdc:fastworkflow/workflow_agent.py).
+Target hook: `_execute_workflow_query(command: str, chat_session_obj: ChatSession) -> str` in [workflow_agent.py](mdc:fastworkflow/agent/workflow_agent.py).
 
 1) Before invoking the command:
 ```python
@@ -212,7 +212,7 @@ CLI wiring suggestion in [__main__.py](mdc:fastworkflow/run_cli/__main__.py):
          return self._command_trace_queue
      ```
 
-2) `fastworkflow/workflow_agent.py`
+2) `fastworkflow/agent/workflow_agent.py`
    - In `_execute_workflow_query(...)`, emit two events:
      - Before execution: AGENT_TO_WORKFLOW (raw command).
      - After execution: WORKFLOW_TO_AGENT (name, parameters, response, success).

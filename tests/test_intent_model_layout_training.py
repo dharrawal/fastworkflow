@@ -172,7 +172,7 @@ def _forget_loaded_routers(workflow_path: str) -> None:
     """A process keeps the router of a context folder once loaded. After a retrain in the same
     process the folder name is the same and its content is not, so the test drops them, as a
     server restart would."""
-    from fastworkflow.model_pipeline_training import CommandRouter
+    from fastworkflow.train.model_pipeline_training import CommandRouter
 
     for key in [key for key in CommandRouter._instances_cache if key.startswith(workflow_path)]:
         CommandRouter._instances_cache.pop(key, None)
@@ -245,7 +245,7 @@ def _route(cme, text: str):
 
 def test_train_and_run_in_the_workflow_layout_then_back(
         tmp_path, initialized_fastworkflow, monkeypatch, no_planner_key):
-    from fastworkflow.model_pipeline_training import (
+    from fastworkflow.train.model_pipeline_training import (
         CommandRouter,
         is_workflow_trained,
         warm_intent_heads,
@@ -390,7 +390,7 @@ OTHER_ENCODER = "sentence-transformers/all-MiniLM-L6-v2"
 
 def test_train_and_run_in_the_default_embedding_layout(
         tmp_path, initialized_fastworkflow, monkeypatch, no_planner_key, capsys):
-    from fastworkflow.model_pipeline_training import (
+    from fastworkflow.train.model_pipeline_training import (
         CommandRouter,
         is_workflow_trained,
         warm_intent_heads,

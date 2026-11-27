@@ -14,7 +14,7 @@ runs it retrieved nothing useful.
 
 - Code: `fastworkflow/observation_offloading/search.py` (kept as is). The tool
   wrapper is `search_memory` inside `initialize_workflow_tool_agent` in
-  `fastworkflow/workflow_agent.py`.
+  `fastworkflow/agent/workflow_agent.py`.
 - The agent's tools are `what_can_i_do`, `execute_workflow_query` and `ask_user`.
 - To re-enable it, uncomment `search_memory,` in the `tools` list of
   `initialize_workflow_tool_agent`. The search model is then read from
@@ -192,7 +192,7 @@ not counted against it.
 ## Configuration
 
 Budgets are derived from the model's context window in
-`fastworkflow/context_budget.py`; see
+`fastworkflow/observation_offloading/context_budget.py`; see
 [`docs/context_budget.md`](context_budget.md). The values below are what a
 131,072-token window (`cerebras/gpt-oss-120b`, the reference main agent model)
 produces. Each name remains an optional tuning override.

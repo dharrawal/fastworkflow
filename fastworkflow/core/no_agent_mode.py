@@ -199,7 +199,7 @@ def available_plans(workflow: Any, distribution: Optional[dict[str, float]] = No
     (``review_proposals.planning_descriptions``). Empty when none is available here.
     """
     from fastworkflow.review import review_proposals
-    from fastworkflow import run_listing, workflow_agent
+    from fastworkflow.agent import run_listing, workflow_agent
 
     if workflow is None:
         return []

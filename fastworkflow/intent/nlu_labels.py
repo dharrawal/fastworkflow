@@ -11,7 +11,7 @@ This module exists so the two jobs have two names.
 It is deliberately dependency-light (standard library only, no
 ``import fastworkflow``) so that both sides can import it:
 
-- the trainer, ``fastworkflow.model_pipeline_training``, which assigns the labels
+- the trainer, ``fastworkflow.train.model_pipeline_training``, which assigns the labels
 - the runtime, ``fastworkflow._workflows.command_metadata_extraction`` —
   ``intent_detection`` (which consumes predictions) and the ``wildcard`` command
   (which supplies the placeholder utterances)

@@ -3774,7 +3774,7 @@ def _whole_identifier(request: str, text: str, identifiers: tuple) -> tuple[str 
 
 def _name_like_word(word: str) -> bool:
     """A capitalised word that is not a common one ("I", "Before"), or one holding a digit or ``_``."""
-    from fastworkflow.split_merge import _COMMON
+    from fastworkflow.agent.split_merge import _COMMON
     w = word.strip(".,;:!?()'\"`")
     return bool(w) and (any(c.isdigit() for c in w) or "_" in w
                         or (w[:1].isupper() and w != "I" and w.lower() not in _COMMON))
@@ -3792,7 +3792,7 @@ def _plain_name(request: str, a: int, b: int, kinds: frozenset[str] = frozenset(
     ``split_merge._PLACING`` ("does barbara sanchez hold ...", "is alan cooper among ..."), is no
     part of the name; nor is one of the command's ``kinds`` (its enum values, or their plural)
     right before it when a clause word follows it ("every right brent randolph holds")."""
-    from fastworkflow.split_merge import _COMPANY_SUFFIX, _FINITE, _NOT_NAMES, _PLACING, _STOP
+    from fastworkflow.agent.split_merge import _COMPANY_SUFFIX, _FINITE, _NOT_NAMES, _PLACING, _STOP
 
     def bare(word: str) -> str:
         return word.strip(".,;:!?()'\"`").lower()
@@ -3919,7 +3919,7 @@ def _as_subject(request: str, text: str, subjects: list[str],
 
 
 def _request_subjects(command: PlanningCommandCommand, request: str) -> list[str]:
-    from fastworkflow.split_merge import request_subjects
+    from fastworkflow.agent.split_merge import request_subjects
     return request_subjects(request, command.identifiers)
 
 

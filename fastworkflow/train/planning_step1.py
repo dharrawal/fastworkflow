@@ -387,7 +387,7 @@ def format_markdown(report: dict) -> str:
 def worker(args: argparse.Namespace) -> int:
     """Copy, block, train, check for fallbacks, score on the test set, record, optionally prune."""
     import fastworkflow
-    from fastworkflow.model_pipeline_training import (
+    from fastworkflow.train.model_pipeline_training import (
         experiment_head_scope,
         experiment_planning_heads,
         experiment_reserved_class_arm,

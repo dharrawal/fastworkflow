@@ -15,7 +15,7 @@ import pytest
 import fastworkflow
 from fastworkflow.review import review_engine
 from fastworkflow.core.command_routing import RoutingRegistry
-from fastworkflow.model_pipeline_training import (
+from fastworkflow.train.model_pipeline_training import (
     BUILT_IN_VAGUE_REPLIES,
     BUILT_IN_VAGUE_SOURCE,
     not_here_samples_for_context,
@@ -169,7 +169,7 @@ from tests.test_plan_reply_policy import (  # noqa: E402,F401  (fixtures the rea
 def _head_has_wildcard_class() -> bool:
     if not head_trained():
         return False
-    from fastworkflow.model_pipeline_training import CommandRouter
+    from fastworkflow.train.model_pipeline_training import CommandRouter
 
     router = CommandRouter(_HEAD_DIR)
     return any(

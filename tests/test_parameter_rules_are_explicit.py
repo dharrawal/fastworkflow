@@ -104,7 +104,7 @@ def test_the_remote_given_check_is_not_asked_about_a_marked_field(monkeypatch):
     from dspy.utils import DummyLM
 
     import fastworkflow
-    from fastworkflow import workflow_agent
+    from fastworkflow.agent import workflow_agent
     from fastworkflow.parameters.signatures import fields_not_given
     from tests.test_jev_field_given import _Recorder
 

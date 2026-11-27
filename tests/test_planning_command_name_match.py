@@ -25,7 +25,7 @@ from types import SimpleNamespace
 import pytest
 
 import fastworkflow
-from fastworkflow import model_pipeline_training
+from fastworkflow.train import model_pipeline_training
 from fastworkflow._workflows.command_metadata_extraction import intent_detection
 from fastworkflow._workflows.command_metadata_extraction.intent_detection import (
     MATCHER_LAYER_KNOWN_NAME_FOREIGN_CONTEXT,
@@ -33,8 +33,8 @@ from fastworkflow._workflows.command_metadata_extraction.intent_detection import
 )
 from fastworkflow.engine.command_executor import CommandExecutor, _resolve_planning_command_name
 from fastworkflow.core.command_routing import RoutingRegistry
-from fastworkflow.model_pipeline_training import trained_command_labels
-from fastworkflow.workflow_agent import planner_commands_text
+from fastworkflow.train.model_pipeline_training import trained_command_labels
+from fastworkflow.agent.workflow_agent import planner_commands_text
 from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 from tests.test_intent_detection_foreign_context import (
     _refusing_router as refusing_router,
@@ -220,7 +220,7 @@ def test_the_inventory_lists_planning_commands_with_their_owners(planning_name_e
 def test_planning_commands_are_classifier_labels_of_their_heads(planning_name_env):
     """Phase 10 step 1 (production): a root planning command labels the global head, and a scoped one
     labels the heads on its lookup path. The baseline arm keeps the pre-step-1 rule (no labels)."""
-    from fastworkflow.model_pipeline_training import (
+    from fastworkflow.train.model_pipeline_training import (
         PLANNING_HEADS_NOT_HERE,
         experiment_planning_heads,
         experiment_reserved_class_arm,

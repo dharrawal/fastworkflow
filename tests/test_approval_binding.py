@@ -29,7 +29,7 @@ from fastworkflow.engine.command_executor import CommandExecutor
 from fastworkflow.examples.library.application.library import Library  # noqa: F401
 from fastworkflow.core.command_routing import RoutingRegistry
 from fastworkflow.core.turn import TurnStatus
-from fastworkflow.workflow_agent import initialize_workflow_tool_agent
+from fastworkflow.agent.workflow_agent import initialize_workflow_tool_agent
 from tests.test_planning_command_phases import RecordingSink
 from tests.test_turn_result_capture import (  # noqa: F401 - shared fixtures and helpers
     _make_agent_ctx,
@@ -165,7 +165,7 @@ def todo(annotated_library, monkeypatch, tmp_path):
 
     monkeypatch.setattr(ctx, "_build_react_agent", scripted_build)
     # The two seams that call the model before the agent loop: accepted (the LLM boundary).
-    monkeypatch.setattr("fastworkflow.workflow_agent.split_into_subtasks",
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.split_into_subtasks",
                         lambda user_query, **kwargs: [user_query])
     monkeypatch.setattr(ctx, "_refine_user_query", lambda message, history: message)
     # The sub-task review gate (fix-3rsq.plan-review.2.6) is not the subject of these approval tests: their turns run

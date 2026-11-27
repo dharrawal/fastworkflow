@@ -24,7 +24,7 @@ from fastworkflow.core.command_directory import CommandLoadError
 from fastworkflow.core.command_metadata_api import CommandMetadataAPI
 from fastworkflow.core.command_routing import RoutingRegistry
 from fastworkflow.examples.library.application.library import Library
-from fastworkflow.run_listing import command_shortlist_text
+from fastworkflow.agent.run_listing import command_shortlist_text
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401 - shared fixture
 
 pytestmark = pytest.mark.usefixtures("initialized_fastworkflow")

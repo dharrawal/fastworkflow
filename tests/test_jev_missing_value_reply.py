@@ -22,7 +22,7 @@ import fastworkflow
 from fastworkflow.intent import intent_loop
 from fastworkflow.core import waiting
 from fastworkflow.parameters import parameter_clarification
-from fastworkflow import workflow_agent
+from fastworkflow.agent import workflow_agent
 from fastworkflow._workflows.command_metadata_extraction import parameter_reply
 from fastworkflow._workflows.command_metadata_extraction._commands import wildcard
 from fastworkflow._workflows.command_metadata_extraction.parameter_extraction import (

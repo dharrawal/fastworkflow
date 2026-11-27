@@ -21,9 +21,9 @@ import dspy
 import fastworkflow
 from fastworkflow.core.command_metadata_api import CommandMetadataAPI
 from fastworkflow.core.command_routing import RoutingRegistry
-from fastworkflow.utils.chat_adapter import CommandsSystemPreludeAdapter
-from fastworkflow.utils.react import fastWorkflowReAct
-from fastworkflow.workflow_agent import _refresh_agent_available_commands
+from fastworkflow.agent.chat_adapter import CommandsSystemPreludeAdapter
+from fastworkflow.agent.react import fastWorkflowReAct
+from fastworkflow.agent.workflow_agent import _refresh_agent_available_commands
 
 
 def _todo_list_path() -> str:

@@ -21,13 +21,13 @@ import pytest
 from dspy.utils import DummyLM
 
 from fastworkflow.review import review_engine, review_proposals
-from fastworkflow import run_listing, workflow_agent
+from fastworkflow.agent import run_listing, workflow_agent
 from fastworkflow.observability import tracing
 from fastworkflow.review import approval_binding as ab
 from fastworkflow.review.review_engine import AWAITING, EXPIRED, REVISED
 from fastworkflow.review.review_proposals import SubTaskProposal
 from fastworkflow.core.turn import TurnStatus
-from fastworkflow.workflow_agent import initialize_workflow_tool_agent
+from fastworkflow.agent.workflow_agent import initialize_workflow_tool_agent
 from tests.test_approval_binding import (  # noqa: F401 - the fixtures and the scripted agent
     Script, annotated_library, no_live_model, no_model_call_for_parameters, todo)
 from tests.test_planning_command_phases import RecordingSink
@@ -79,7 +79,7 @@ def _planner_stub(monkeypatch, queries: list):
         session._initial_plan_text = "1. find_member" if "Ann Lee" in user_query else ""
         return user_query
 
-    monkeypatch.setattr("fastworkflow.workflow_agent.build_query_with_next_steps", fake)
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.build_query_with_next_steps", fake)
 
 
 # ----------------------------------------------------------------------
@@ -223,7 +223,7 @@ def test_a_from_sub_task_input_takes_the_typed_output_of_a_run_that_produced_one
         session._initial_plan_text = "1. find_member" if "query=Ann Lee" in user_query else ""
         return user_query
 
-    monkeypatch.setattr("fastworkflow.workflow_agent.build_query_with_next_steps", fake)
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.build_query_with_next_steps", fake)
     _split_into(monkeypatch, [FIND, JOKE])
     gated.ctx.process_turn(f"{FIND} and {JOKE}")
     _open_review(gated)

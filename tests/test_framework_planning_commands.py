@@ -67,7 +67,7 @@ def test_c_the_agent_cannot_name_a_framework_command_as_a_tool():
 
 
 def test_c_a_framework_command_is_not_a_label_of_the_intent_model():
-    from fastworkflow.model_pipeline_training import _is_planning_name
+    from fastworkflow.train.model_pipeline_training import _is_planning_name
 
     directory = CommandDirectory.load(LIBRARY)
     assert _is_planning_name(directory, "review_subtasks") is False

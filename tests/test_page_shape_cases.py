@@ -49,7 +49,7 @@ def test_the_pages_legacy_fallback_names_exactly_the_frameworks_own_review_comma
 
 def test_the_schema_listing_the_page_receives_omits_the_frameworks_own_commands():
     """What the page relies on: ``command_schema_listing`` has no framework command, for any workflow."""
-    from fastworkflow.mcp_server import command_schema_listing
+    from fastworkflow.run_fastapi_mcp.mcp_server import command_schema_listing
 
     root = Path(__file__).resolve().parents[1]
     framework = {p.stem for p in (root / "fastworkflow" / "review" / "commands").glob("*.py")

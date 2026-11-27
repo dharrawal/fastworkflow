@@ -54,7 +54,7 @@ from fastworkflow.observation_offloading.manifest import (
     observation_row,
     uninstall_span_policy,
 )
-from fastworkflow.utils.react import fastWorkflowReAct
+from fastworkflow.agent.react import fastWorkflowReAct
 from fastworkflow.observation_offloading.search import search_memory
 
 from fastworkflow.observation_offloading.state import (
@@ -62,9 +62,9 @@ from fastworkflow.observation_offloading.state import (
     reset_observation_state,
     snapshot_events,
 )
-from fastworkflow.answer_rehydration import rehydrated_label
+from fastworkflow.observation_offloading.answer_rehydration import rehydrated_label
 from fastworkflow.observation_offloading.compact import RECENT_OBSERVATIONS_PROTECTED
-from fastworkflow.workflow_agent import WorkflowAgentSignature, initialize_workflow_tool_agent
+from fastworkflow.agent.workflow_agent import WorkflowAgentSignature, initialize_workflow_tool_agent
 
 # The budgets derive from the agent model's window; pin it to the reference.
 pytestmark = pytest.mark.usefixtures("reference_agent_window")
@@ -781,7 +781,7 @@ class HookIsolation(unittest.TestCase):
             view = dict(trajectory)
             with patch("fastworkflow.observation_offloading.agent.scope_for_host",
                        return_value=self.scope), \
-                 patch("fastworkflow.context_budget.trajectory_max_bytes", return_value=40_000):
+                 patch("fastworkflow.observation_offloading.context_budget.trajectory_max_bytes", return_value=40_000):
                 step(5, view)
             return view["observation_0"] != large
 

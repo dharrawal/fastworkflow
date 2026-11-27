@@ -264,7 +264,7 @@ class ArmMismatchError(ValueError):
 
 def refuse_retired(arm: str) -> None:
     """Raise ValueError when *arm* is a retired arm (Phase 9 step 5): it no longer exists to score."""
-    from fastworkflow.model_pipeline_training import RETIRED_ARMS
+    from fastworkflow.train.model_pipeline_training import RETIRED_ARMS
 
     if arm in RETIRED_ARMS:
         raise ValueError(f"arm {arm!r} is retired: {RETIRED_ARMS[arm]}")
@@ -367,7 +367,7 @@ def predict_cases(workflow_folderpath: str, cases: Sequence[dict], arm: Optional
     the artifacts were trained with.
     """
     from fastworkflow.train import artifact_versioning
-    from fastworkflow.model_pipeline_training import CommandRouter
+    from fastworkflow.train.model_pipeline_training import CommandRouter
 
     effective_arm = check_arm(workflow_folderpath, arm)
     version = artifact_versioning.resolve_current_version(workflow_folderpath)

@@ -1,7 +1,7 @@
 # Intent-model training: full walkthrough
 
 Companion to `../SKILL.md` §2. All line numbers refer to
-`fastworkflow/model_pipeline_training.py` unless stated. Facts verified 2026-07-09
+`fastworkflow/train/model_pipeline_training.py` unless stated. Facts verified 2026-07-09
 against v2.22.2 (commit c33b9a5).
 
 ## Who calls what
@@ -163,9 +163,9 @@ irreversible action.
 ## Re-verification
 
 ```bash
-grep -n "num_epochs\|lr=1e-4\|lr=5e-5\|test_size=0.25\|batch_size=10" fastworkflow/model_pipeline_training.py
-grep -n "linspace\|alpha = 0.15\|failed'\]\['mean'\]" fastworkflow/model_pipeline_training.py
-grep -n "ErrorCorrection" fastworkflow/model_pipeline_training.py fastworkflow/train/__main__.py
+grep -n "num_epochs\|lr=1e-4\|lr=5e-5\|test_size=0.25\|batch_size=10" fastworkflow/train/model_pipeline_training.py
+grep -n "linspace\|alpha = 0.15\|failed'\]\['mean'\]" fastworkflow/train/model_pipeline_training.py
+grep -n "ErrorCorrection" fastworkflow/train/model_pipeline_training.py fastworkflow/train/__main__.py
 python .claude/skills/fastworkflow-nlu-pipeline-reference/scripts/show_intent_thresholds.py \
   fastworkflow/_workflows/command_metadata_extraction
 ```

@@ -111,7 +111,7 @@ VERSIONS_README_FILENAME: str = "README.md"
 # therefore the only thing that makes it safe to replace on the next publish.
 COMPAT_MARKER_FILENAME: str = ".fastworkflow_compat"
 
-# Must match fastworkflow.model_pipeline_training.GLOBAL_CONTEXT_FOLDER exactly. It is
+# Must match fastworkflow.train.model_pipeline_training.GLOBAL_CONTEXT_FOLDER exactly. It is
 # duplicated rather than imported because that module pulls in torch/transformers and
 # this one must stay cheap; `test_artifact_versioning.py` asserts the two agree.
 GLOBAL_CONTEXT_FOLDER: str = "global"
@@ -926,7 +926,7 @@ def _verify_head_layouts(
     holdouts and cannot be served together. A record with no ``head_scope`` is today's layout.
     """
     # Lazy: model_pipeline_training imports torch, and this module must not.
-    from fastworkflow.model_pipeline_training import FLATTENED, HEAD_SCOPES, SCOPED
+    from fastworkflow.train.model_pipeline_training import FLATTENED, HEAD_SCOPES, SCOPED
 
     def layout_of(record: dict) -> str:
         return record.get("head_scope") or FLATTENED

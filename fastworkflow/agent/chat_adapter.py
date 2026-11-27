@@ -16,7 +16,7 @@ Usage:
 ------
 The adapter is used specifically for workflow agent calls via dspy.context():
 
-    from fastworkflow.utils.chat_adapter import CommandsSystemPreludeAdapter
+    from fastworkflow.agent.chat_adapter import CommandsSystemPreludeAdapter
     
     agent_adapter = CommandsSystemPreludeAdapter()
     available_commands = _what_can_i_do(chat_session)
@@ -153,7 +153,7 @@ class CommandsSystemPreludeAdapter(dspy.ChatAdapter):
     
     Example:
         >>> import dspy
-        >>> from fastworkflow.utils.chat_adapter import CommandsSystemPreludeAdapter
+        >>> from fastworkflow.agent.chat_adapter import CommandsSystemPreludeAdapter
         >>> dspy.settings.adapter = CommandsSystemPreludeAdapter()
     """
     

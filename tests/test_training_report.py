@@ -28,7 +28,7 @@ import litellm
 
 import fastworkflow
 from fastworkflow.utils.logging import logger as fastworkflow_logger
-from fastworkflow.model_pipeline_training import (
+from fastworkflow.train.model_pipeline_training import (
     BUILT_IN_VAGUE_REPLIES,
     TrainingDataError,
     split_training_data,

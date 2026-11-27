@@ -33,7 +33,7 @@ import pytest
 
 import fastworkflow
 from fastworkflow.intent import intent_loop
-from fastworkflow import model_pipeline_training
+from fastworkflow.train import model_pipeline_training
 from fastworkflow._workflows.command_metadata_extraction._commands import (
     wildcard as wildcard_module,
 )

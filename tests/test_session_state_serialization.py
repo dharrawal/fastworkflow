@@ -98,18 +98,18 @@ def test_serialize_restore_resume_across_contexts(
 
     monkeypatch.setattr(ctx_a, "_ensure_agent_initialized", lambda: None)
     monkeypatch.setattr(
-        "fastworkflow.workflow_agent.build_query_with_next_steps",
+        "fastworkflow.agent.workflow_agent.build_query_with_next_steps",
         lambda user_query, session, with_agent_inputs_and_trajectory=False,
         planner_lm=None, **kwargs: user_query,
     )
     monkeypatch.setattr(
-        "fastworkflow.workflow_agent._what_can_i_do",
+        "fastworkflow.agent.workflow_agent._what_can_i_do",
         lambda session: "commands",
     )
     # The planner's split (the model-backed seam before the parts are resolved): one part. With no planner model
     # the splitter raises; before, a developer's .env that litellm loaded into the process supplied one.
     monkeypatch.setattr(
-        "fastworkflow.workflow_agent.split_into_subtasks", lambda user_query, **kwargs: [user_query]
+        "fastworkflow.agent.workflow_agent.split_into_subtasks", lambda user_query, **kwargs: [user_query]
     )
     monkeypatch.setattr(
         ctx_a,

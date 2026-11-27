@@ -295,7 +295,7 @@ def embedding_settings(workflow_folderpath: Optional[str] = None) -> dict:
 def is_framework_workflow(workflow_folderpath: str) -> bool:
     """Whether *workflow_folderpath* is one of the framework's own workflows: the command
     metadata extraction workflow or the plan metadata extraction workflow."""
-    from fastworkflow.model_pipeline_training import (
+    from fastworkflow.train.model_pipeline_training import (
         is_internal_cme_folder,
         is_plan_metadata_extraction_folder,
     )

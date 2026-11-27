@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 import dspy
 
 from fastworkflow.core.turn import TurnStatus
-from fastworkflow.utils.react import fastWorkflowReAct
+from fastworkflow.agent.react import fastWorkflowReAct
 from fastworkflow.engine.workflow_execution_context import MAX_HANDOFFS
 from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 import pytest
@@ -61,13 +61,13 @@ def _fake_progress_check(monkeypatch, text="DONE SUMMARY"):
         triggers.append(trigger)
         return text
 
-    monkeypatch.setattr("fastworkflow.workflow_agent.run_progress_check", fake)
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.run_progress_check", fake)
     return triggers
 
 
 def _split(monkeypatch, subtasks):
     monkeypatch.setattr(
-        "fastworkflow.workflow_agent.split_into_subtasks",
+        "fastworkflow.agent.workflow_agent.split_into_subtasks",
         lambda *args, **kwargs: list(subtasks),
     )
 

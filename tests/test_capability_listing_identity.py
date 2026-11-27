@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
-from fastworkflow.capability_answer import what_can_i_do_data
+from fastworkflow.agent.capability_answer import what_can_i_do_data
 from fastworkflow.core.command_context_model import CommandContextModel, get_workflow_info
 from fastworkflow.core.command_metadata_api import CommandMetadataAPI
 

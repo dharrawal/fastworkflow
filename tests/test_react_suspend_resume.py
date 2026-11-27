@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from fastworkflow.utils.react import AskUserSuspend, fastWorkflowReAct
+from fastworkflow.agent.react import AskUserSuspend, fastWorkflowReAct
 
 
 def _bare_react_agent(**tools):
@@ -218,7 +218,7 @@ def test_truncation_drops_whole_steps_when_a_recovered_step_has_fewer_keys():
 
 
 def test_clear_suspension_drops_stash():
-    from fastworkflow.utils.react import NoSuspendedAgentStateError
+    from fastworkflow.agent.react import NoSuspendedAgentStateError
 
     agent = _bare_react_agent()
     agent._suspended = {"trajectory": {}, "idx": 0, "input_args": {}, "max_iters": 5}

@@ -20,7 +20,8 @@ import pytest
 from pydantic import BaseModel, Field
 
 import fastworkflow
-from fastworkflow import ModuleType, workflow_agent
+from fastworkflow import ModuleType
+from fastworkflow.agent import workflow_agent
 from fastworkflow.planning import planning_commands, command_preview
 from fastworkflow.core.command_directory import CommandDirectory, get_cached_command_directory
 from fastworkflow.core.command_metadata_api import CommandMetadataAPI

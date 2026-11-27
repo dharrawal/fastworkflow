@@ -790,7 +790,7 @@ def declared_params(plan: Optional[str] = None) -> tuple:
     folder = _folder_var.get()
     if not folder:
         return ()
-    from fastworkflow import workflow_agent
+    from fastworkflow.agent import workflow_agent
 
     commands = workflow_agent.load_planning_command_map(folder)
     chosen = [commands[plan]] if plan in commands else ([] if plan else list(commands.values()))
@@ -815,7 +815,7 @@ def draft_for(items_text: str) -> Optional["SubTaskProposal"]:
 
 def _planning_descriptions(folder: str) -> dict[str, str]:
     """``{planning command name: its one-line description}``: the first line of the description the matcher lists."""
-    from fastworkflow.workflow_agent import load_planning_commands
+    from fastworkflow.agent.workflow_agent import load_planning_commands
 
     return {name: (description.strip().splitlines() or [""])[0].strip()
             for name, description, _ in load_planning_commands(folder)}
@@ -1023,7 +1023,7 @@ def drafted_item(workflow, item: SubTask, sub_task: str, earlier: list[SubTask],
     it was drafted for (``drafted_means``). With no draft (drafting off, from scratch, a failed draft) the inputs are
     empty and a planning pick's check is ``check_planned_arguments`` of no arguments."""
     from fastworkflow.intent import intent_loop
-    from fastworkflow import run_listing
+    from fastworkflow.agent import run_listing
     from fastworkflow.planning import planning_commands
 
     check = ""
@@ -1271,7 +1271,7 @@ def _typed_fallback_values(workflow, item: SubTask, sub_task: str, values: dict,
     if command is None or not command.params:
         return None
     from fastworkflow.utils import dspy_utils
-    from fastworkflow.workflow_agent import CommandsSystemPreludeAdapter, typed_planner_commands_text
+    from fastworkflow.agent.workflow_agent import CommandsSystemPreludeAdapter, typed_planner_commands_text
 
     raw = {p.name: planning_commands._given_or_none(values.get(p.name)) for p in command.params}
     try:
@@ -2975,7 +2975,7 @@ def reviewed_arguments(workflow, command, item: SubTask, resolved: ResolvedInput
     caller hands the sub-task to the agent with it (F2) and records the deviation.
     """
     from fastworkflow.planning import planning_commands
-    from fastworkflow.run_listing import ArgumentCheck
+    from fastworkflow.agent.run_listing import ArgumentCheck
 
     reviewed = reviewed_values(workflow, item, resolved, [p.name for p in command.params if p.required],
                                earlier=earlier, answers=answers, planner_lm=planner_lm)

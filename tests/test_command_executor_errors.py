@@ -325,7 +325,7 @@ def test_failure_output_names_the_command_and_joins_its_record(monkeypatch):
     outcome.command_call_id == span attribute == ExecutionRecordRef row, the
     same invariant tests/test_dispatch_path_conformance.py pins for success.
     """
-    from fastworkflow.workflow_agent import _execute_workflow_query
+    from fastworkflow.agent.workflow_agent import _execute_workflow_query
 
     ctx, sink, app_workflow = _failing_ctx(monkeypatch, lambda: RuntimeError("boom"))
     try:
@@ -490,7 +490,7 @@ def test_a_cme_hop_failure_reaches_the_failure_output_and_the_error_span(monkeyp
     for what ran, and the CME workflow is the honest place it ran. Before the
     seam both were empty on the output and null on the span.
     """
-    from fastworkflow.workflow_agent import _execute_workflow_query
+    from fastworkflow.agent.workflow_agent import _execute_workflow_query
     from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
     fastworkflow.init({})
@@ -597,7 +597,7 @@ def test_a_hostile_getattr_cannot_mask_the_real_exception():
 
 
 def _control_signals():
-    from fastworkflow.utils.react import AskUserSuspend
+    from fastworkflow.agent.react import AskUserSuspend
     from fastworkflow.engine.workflow_execution_context import CommandCancelledError
 
     return [
@@ -651,7 +651,7 @@ def test_the_status_mapping_is_a_single_shared_function():
     Pinned as a unit test on the helper so the intent survives even if a call
     site is rewritten: control signals are not failures, everything else is.
     """
-    from fastworkflow.utils.react import AskUserSuspend
+    from fastworkflow.agent.react import AskUserSuspend
     from fastworkflow.engine.workflow_execution_context import CommandCancelledError
 
     assert tracing.status_for_dispatch_exception(AskUserSuspend("q")) == (
@@ -674,7 +674,7 @@ def test_a_span_status_of_awaiting_user_is_never_produced_for_a_dispatch():
     status, and the only thing the SPA tests for (it reads `turn.status`, never
     `span.status`). A span status describes that span's own outcome.
     """
-    from fastworkflow.utils.react import AskUserSuspend
+    from fastworkflow.agent.react import AskUserSuspend
 
     assert tracing.status_for_dispatch_exception(AskUserSuspend("q")) != (
         tracing.STATUS_AWAITING_USER
@@ -692,7 +692,7 @@ def test_the_agent_tool_span_is_closed_even_when_a_control_signal_escapes(
     for the tool leaked onto the parenting stack: every later span in the turn
     nested under it, and it never got an end time or a status.
     """
-    from fastworkflow.workflow_agent import _execute_workflow_query
+    from fastworkflow.agent.workflow_agent import _execute_workflow_query
 
     ctx, sink, _wf = _failing_ctx(monkeypatch, exc_factory)
     try:

@@ -193,9 +193,9 @@ Lifespan shutdown waits up to 30 s for active turns (`wait_for_active_turns_to_c
 __main__.py:340), finalizes conversations, stops chat sessions. Anything still running after
 30 s is lost (Step 3 durability unbuilt).
 
-## Related but different: fastworkflow/mcp_server.py
+## Related but different: fastworkflow/run_fastapi_mcp/mcp_server.py
 
-`fastworkflow/mcp_server.py` is NOT this server. It is a library-level example wrapper
+`fastworkflow/run_fastapi_mcp/mcp_server.py` is NOT this server. It is a library-level example wrapper
 (`FastWorkflowMCPServer`) exposing per-command JSON-RPC 2.0 `tools/list` / `tools/call` directly
 over `CommandExecutor.perform_mcp_tool_call`; it also fails fast if the workflow is untrained.
 The FastAPI server's MCP surface is the coarse invoke_agent/invoke_assistant tool set above.

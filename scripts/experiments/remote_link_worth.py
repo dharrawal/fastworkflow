@@ -58,7 +58,7 @@ def _train_copy(workflow: str, copy_root: str) -> str:
     """Train a temp copy of *workflow* with the product trainer, embedding layout, no model call."""
     import fastworkflow
     import single_intent_model as runner
-    from fastworkflow import model_pipeline_training as heads
+    from fastworkflow.train import model_pipeline_training as heads
     from fastworkflow.train import determinism, utterance_cache
     from fastworkflow.train import intent_model_layout as layout
     from fastworkflow.train import workflow_model as wm
@@ -114,8 +114,8 @@ def cmd_local(args) -> int:
     env["FW_LM_CACHE"] = "0"
     fastworkflow.init(env_vars=env)
     from fastworkflow.intent import intent_detector as idt
-    from fastworkflow import model_pipeline_training as heads
-    from fastworkflow import workflow_agent
+    from fastworkflow.train import model_pipeline_training as heads
+    from fastworkflow.agent import workflow_agent
     from fastworkflow.intent.nlu_labels import PARAMETER_VALUE_LABEL, is_escalation, label_of
     from fastworkflow.train import artifact_versioning
     from fastworkflow.train import heldout_evaluation as he

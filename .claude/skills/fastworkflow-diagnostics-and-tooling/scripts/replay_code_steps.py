@@ -73,7 +73,7 @@ def replay(folder, db, experiments=()):
         fastworkflow.init(env_vars=dict(dotenv_values(env)))
     else:
         fastworkflow.init(env_vars={})
-    from fastworkflow.workflow_agent import core_command_names
+    from fastworkflow.agent.workflow_agent import core_command_names
 
     routing = fastworkflow.RoutingRegistry.get_definition(folder)
     parameters = planning_phases.parameter_classes(routing)

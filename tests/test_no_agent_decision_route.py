@@ -38,7 +38,7 @@ def _no_agent_again(monkeypatch):
     """No agent model and no remote decision model again: the server's startup (inside ``TestClient``) loads the env files,
     which set ``LLM_AGENT`` and the Jev key (a reply to a decision step is read by the remote model when there is one:
     ``no_planner_key`` is this test's premise, as in ``tests/test_no_agent_mode.py``)."""
-    from fastworkflow import workflow_agent
+    from fastworkflow.agent import workflow_agent
 
     for name in ("LLM_AGENT", "JEV_API_KEY"):
         monkeypatch.delenv(name, raising=False)

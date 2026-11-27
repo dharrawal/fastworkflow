@@ -111,7 +111,7 @@ This enhances usability by enabling natural language interactions that autonomou
 - **Usage**: Called automatically by agent on context changes; available in both modes.
 
 ### 3.2 Main Agent Implementation
-- **Location**: New module `fastworkflow/workflow_agent.py`.
+- **Location**: New module `fastworkflow/agent/workflow_agent.py`.
 - **Initialization**:
   - Load static data: `workflow_description.json`, context lists/hierarchies.
   - Query runtime: Initial "what_can_i_do" for core commands/current context.
@@ -141,7 +141,7 @@ This enhances usability by enabling natural language interactions that autonomou
 ## 4. Implementation Details
 - **ChatSession Changes** (`fastworkflow/engine/chat_session.py`):
   - Add `run_as` param; mode-specific loops in `start()`.
-- **Agent Module** (`fastworkflow/workflow_agent.py`):
+- **Agent Module** (`fastworkflow/agent/workflow_agent.py`):
   - Similar to run_agent/agent_module.py, but integrated.
 - **Build Enhancements** (`build/__main__.py`):
   - Ensure GenAI post-processing generates required JSON artifacts.

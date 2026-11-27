@@ -46,7 +46,7 @@ file:line evidence. Facts verified 2026-07-09 against v2.22.2 (commit c33b9a5).
 | **wildcard** | The pseudo-command `_workflows/command_metadata_extraction/_commands/wildcard.py` whose single `ResponseGenerator` runs intent detection + parameter extraction. |
 | **Logical turn** | One user interaction end-to-end, across any number of ask_user suspensions. One turn = one `turn_key` = one record (`turn.py:240-247`). |
 | **Embedder** | Any host that owns a WEC's lifecycle (FastAPI server, ChatSession, a future Slack bot). |
-| **DSPy ReAct loop** | The forked reason/act agent loop in `fastworkflow/utils/react.py` (`fastWorkflowReAct`), a vendored modification of DSPy's ReAct. |
+| **DSPy ReAct loop** | The forked reason/act agent loop in `fastworkflow/agent/react.py` (`fastWorkflowReAct`), a vendored modification of DSPy's ReAct. |
 | **[A#] / [R#] / [X#] / Topic-n** | Traceability tags into the TurnResult docs: design-doc Amendment / adversarial-review finding / architecture-review finding / feedback-session topic (`docs/turn_result_design*.md`; process in `fastworkflow-change-control`). |
 
 ## 1. The three-phase shape
@@ -58,7 +58,7 @@ Build-time  →  Train-time  →  Run-time
 | Phase | Lives in | Input | Output |
 |---|---|---|---|
 | Build | `fastworkflow/build/` (AST introspection: `ast_class_extractor.py`, `command_file_generator.py`, `context_model_generator.py`, …) | Your Python app | `_commands/*.py` + new `_<Context>.py` files with `inherits` (printed, never written into an existing one) |
-| Train | `fastworkflow/train/` (`__main__.py`, `generate_synthetic.py`) + `fastworkflow/model_pipeline_training.py` | `_commands/` + utterances | `___command_info/` (intent models, thresholds) inside the workflow dir |
+| Train | `fastworkflow/train/` (`__main__.py`, `generate_synthetic.py`) + `fastworkflow/train/model_pipeline_training.py` | `_commands/` + utterances | `___command_info/` (intent models, thresholds) inside the workflow dir |
 | Run | `fastworkflow/engine/workflow_execution_context.py`, `command_executor.py`, the CME workflow, `run_fastapi_mcp/` | user message | `TurnOutput` / `CommandOutput` |
 
 Doc-rot warning: CLAUDE.md says intent models are trained "via scikit-learn". False —
@@ -316,7 +316,7 @@ Re-verification one-liners for every volatile fact:
 | Fact | Re-verify with |
 |---|---|
 | Version / commit | `grep '^version' pyproject.toml; git log --oneline -1` |
-| BaseException subclasses + line anchors | `grep -n 'class CommandCancelledError\|class AskUserSuspend' fastworkflow/engine/workflow_execution_context.py fastworkflow/utils/react.py` |
+| BaseException subclasses + line anchors | `grep -n 'class CommandCancelledError\|class AskUserSuspend' fastworkflow/engine/workflow_execution_context.py fastworkflow/agent/react.py` |
 | wildcard dispatch lines | `grep -n "command_name = \"wildcard\"\|command_name = 'wildcard'\|wildcard" fastworkflow/engine/command_executor.py` |
 | iteration_counter sites | `grep -rn iteration_counter fastworkflow/ --include='*.py' \| grep -v __pycache__` |
 | is_user_command still has no in-tree reader | `grep -rn is_user_command fastworkflow/ --include='*.py' \| grep -v __pycache__` |
@@ -331,5 +331,5 @@ Re-verification one-liners for every volatile fact:
 | Descriptor shadowing | `python -c "import fastworkflow; print(type(fastworkflow.engine.chat_session))"` |
 | conversation_store finally bug | `sed -n '47,54p' fastworkflow/run_fastapi_mcp/conversation_store.py` |
 | Open issue statuses (fix-5ka/cgs/4od/6b4/5fv/85g/qtq/7kp) | `bd list --status open \| grep -E 'fix-(5ka\|cgs\|4od\|6b4\|5fv\|85g\|qtq\|7kp)'` |
-| max_iters=25 default | `grep -n 'max_iters: int = 25' fastworkflow/workflow_agent.py` |
-| Training stack is torch/transformers | `sed -n '1,10p' fastworkflow/model_pipeline_training.py` |
+| max_iters=25 default | `grep -n 'max_iters: int = 25' fastworkflow/agent/workflow_agent.py` |
+| Training stack is torch/transformers | `sed -n '1,10p' fastworkflow/train/model_pipeline_training.py` |

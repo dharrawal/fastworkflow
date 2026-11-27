@@ -6,7 +6,7 @@ from __future__ import annotations
 import pytest
 
 from fastworkflow.core import turn_cache
-from fastworkflow import workflow_agent
+from fastworkflow.agent import workflow_agent
 from fastworkflow._workflows.plan_metadata_extraction import resolution
 from tests.conftest import no_local_model, script_matcher
 from tests.test_approval_binding import annotated_library, todo  # noqa: F401

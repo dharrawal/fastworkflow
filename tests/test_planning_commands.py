@@ -15,18 +15,18 @@ from pydantic import BaseModel, Field, model_validator
 
 import fastworkflow
 from fastworkflow.planning import planning_commands, command_preview
-from fastworkflow import workflow_agent
-from fastworkflow.capability_answer import context_commands
+from fastworkflow.agent import workflow_agent
+from fastworkflow.agent.capability_answer import context_commands
 from fastworkflow.engine.command_executor import CommandExecutor, CommandNotFoundError
 from fastworkflow.core.command_metadata_api import CommandMetadataAPI
 from fastworkflow.core.command_routing import RoutingRegistry
 from fastworkflow.core.context_navigation import home_contexts
-from fastworkflow.mcp_server import FastWorkflowMCPServer
-from fastworkflow.model_pipeline_training import trained_command_labels
+from fastworkflow.run_fastapi_mcp.mcp_server import FastWorkflowMCPServer
+from fastworkflow.train.model_pipeline_training import trained_command_labels
 from fastworkflow.planning.plan_frame import TURN_MAX_STEPS_ENV
 from fastworkflow.planning.planning_needs_agent import planning_command_needs_agent, refusal_message
 from fastworkflow.parameters.signatures import InputForParamExtraction
-from fastworkflow.workflow_agent import (
+from fastworkflow.agent.workflow_agent import (
     _explicit_agent_command,
     _parameter_fields,
     _what_can_i_do,
@@ -1045,8 +1045,8 @@ def planning_dispatch_library(tmp_path, initialized_fastworkflow):
     """Library copy with ``Library/count_books`` and ``Library/note_member``; real ``CommandExecutor`` dispatch."""
     from fastworkflow.core.command_metadata_api import CommandMetadataAPI
     from fastworkflow.core.command_routing import RoutingRegistry
-    from fastworkflow.mcp_server import FastWorkflowMCPServer
-    from fastworkflow.workflow_agent import _what_can_i_do
+    from fastworkflow.run_fastapi_mcp.mcp_server import FastWorkflowMCPServer
+    from fastworkflow.agent.workflow_agent import _what_can_i_do
     from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
     folder = _library_workflow(
@@ -1126,7 +1126,7 @@ def test_perform_mcp_tool_call_refuses_planning_command(planning_dispatch_librar
 def test_agent_step_runs_planning_command(planning_dispatch_library, monkeypatch):
     # Was a refusal ("it cannot be called as a step yet") before run_planning_command: an
     # agent step now extracts the arguments and runs the planning command as a nested frame.
-    from fastworkflow.workflow_agent import _execute_workflow_query
+    from fastworkflow.agent.workflow_agent import _execute_workflow_query
 
     ctx = planning_dispatch_library.ctx
     script_command_extraction(monkeypatch, planning_dispatch_library.wf)
@@ -1346,7 +1346,7 @@ def test_routing_contexts_keep_execution_commands_only(planning_catalog_library)
 
 def test_library_planning_commands_are_trained_labels_of_their_head(planning_catalog_library):
     """Phase 10 step 1 (production): a planning command labels the heads on its lookup path."""
-    from fastworkflow.model_pipeline_training import (
+    from fastworkflow.train.model_pipeline_training import (
         PLANNING_HEADS_NOT_HERE,
         experiment_planning_heads,
         experiment_reserved_class_arm,
@@ -1398,7 +1398,7 @@ def test_training_seed_collection_excludes_planning_commands(library_training_wo
 def test_trained_command_labels_hold_planning_commands_on_their_lookup_path(library_training_workflow):
     """Phase 10 step 1 (production): Library takes its planning command, never the Book one."""
     from fastworkflow.core.command_routing import RoutingRegistry
-    from fastworkflow.model_pipeline_training import (
+    from fastworkflow.train.model_pipeline_training import (
         PLANNING_HEADS_NOT_HERE,
         experiment_planning_heads,
         experiment_reserved_class_arm,
@@ -1439,7 +1439,7 @@ def test_selective_training_fingerprints_exclude_planning_commands(library_train
 
 def test_param_example_training_list_excludes_planning_commands(library_training_workflow):
     from fastworkflow.core.command_directory import CommandDirectory
-    from fastworkflow.model_pipeline_training import get_route_layer_filepath_model
+    from fastworkflow.train.model_pipeline_training import get_route_layer_filepath_model
     from fastworkflow.train.__main__ import _get_commands_with_parameters
 
     cmd_dir = CommandDirectory.load(library_training_workflow)

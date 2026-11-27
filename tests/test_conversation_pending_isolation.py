@@ -18,7 +18,7 @@ import pytest
 
 from fastworkflow.review import approval_binding as ab
 from fastworkflow.review import review_proposals
-from fastworkflow import workflow_agent
+from fastworkflow.agent import workflow_agent
 from fastworkflow.review.review_engine import AWAITING, INVALIDATED
 from fastworkflow.core.turn import TurnStatus
 from tests.test_approval_binding import (  # noqa: F401 - fixtures and the scripted agent

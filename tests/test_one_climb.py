@@ -21,7 +21,7 @@ from fastworkflow.core import context_navigation
 from fastworkflow.intent import intent_detector
 from fastworkflow.engine.command_executor import CommandExecutor
 from fastworkflow.planning import run_code
-from fastworkflow.workflow_agent import planning_scopes
+from fastworkflow.agent.workflow_agent import planning_scopes
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIBRARY = os.path.join(ROOT, "fastworkflow", "examples", "library")

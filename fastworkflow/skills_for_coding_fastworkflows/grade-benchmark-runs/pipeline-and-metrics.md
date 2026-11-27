@@ -90,7 +90,7 @@ model) or `agent` (the agent's own `ask_user`); and a `fw.ask_user` span (`agent
 
 `subtask_split` on `fw.turn` (null when the turn was not split) is `{request, raw, merged,
 changed_by, attempts}`: what the splitter saw, the model's parts, the parts the turn ran after the
-code rules (`fastworkflow/split_merge.py`), and which rules changed the list. Judge the split from
+code rules (`fastworkflow/agent/split_merge.py`), and which rules changed the list. Judge the split from
 `merged`; `raw` and `changed_by` tell you whether the model or a code rule made the mistake.
 
 | Loss | Tag |

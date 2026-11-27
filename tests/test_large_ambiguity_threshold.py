@@ -10,7 +10,7 @@ import json
 import pytest
 import torch
 
-from fastworkflow.model_pipeline_training import (
+from fastworkflow.train.model_pipeline_training import (
     CORRECT_CONFIDENCE_LOW_QUANTILE,
     LARGE_FAILED_ROWS_MIN,
     LARGE_RULE_CORRECT_QUANTILE,

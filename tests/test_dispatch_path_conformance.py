@@ -25,7 +25,7 @@ import fastworkflow
 from fastworkflow.observability import tracing
 from fastworkflow.engine.command_executor import CommandExecutor
 from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
-from fastworkflow.workflow_agent import _execute_workflow_query
+from fastworkflow.agent.workflow_agent import _execute_workflow_query
 
 from tests.todo_list_workflow.application.todo_manager import TodoListManager
 
@@ -175,7 +175,7 @@ def test_direct_action_path_via_process_action_turn(
 def hello_initialized():
     # `is_workflow_trained`, not "___command_info exists": an untrained
     # scaffold already has that directory (3.3 port adaptation).
-    from fastworkflow.model_pipeline_training import is_workflow_trained
+    from fastworkflow.train.model_pipeline_training import is_workflow_trained
 
     if not is_workflow_trained(HELLO_WORLD)[0]:
         pytest.skip("hello_world is not trained on this machine")

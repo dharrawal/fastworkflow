@@ -16,7 +16,7 @@ import pytest
 
 import fastworkflow
 from fastworkflow.core.command_routing import RoutingRegistry
-from fastworkflow.model_pipeline_training import (
+from fastworkflow.train.model_pipeline_training import (
     HOLDOUT_EXPORT_FILENAME,
     RESERVED_CLASS_ARMS,
     _export_holdout,
@@ -110,7 +110,7 @@ def _record(utterance, label, persona):
 
 
 def test_holdout_export_is_off_unless_an_arm_is_exporting(tmp_path):
-    from fastworkflow import model_pipeline_training as mpt
+    from fastworkflow.train import model_pipeline_training as mpt
 
     split = PersonaSplit(heldout=[_record("a1", "A/one", "p1")], train=[])
     assert mpt._HOLDOUT_EXPORT is None

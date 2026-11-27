@@ -28,7 +28,7 @@ from tests.test_approval_binding import (  # noqa: F401
     _finish, annotated_library, no_live_model, no_model_call_for_parameters, todo)
 from tests.test_round1_gate import EMMA, FIND, JOKE, _split_into, gated, remote_decides_emma_and_joke, no_draft_extraction  # noqa: F401
 from tests.test_turn_result_capture import initialized_fastworkflow  # noqa: F401
-from fastworkflow.workflow_agent import build_query_with_next_steps as _REAL_PLANNER   # the fixtures stub it
+from fastworkflow.agent.workflow_agent import build_query_with_next_steps as _REAL_PLANNER   # the fixtures stub it
 
 pytestmark = pytest.mark.usefixtures("initialized_fastworkflow")
 
@@ -154,9 +154,9 @@ def test_an_ad_hoc_part_has_its_plan_under_it_and_its_steps_carry_the_plan(gated
     part's child, and the steps the agent then takes are its siblings, each carrying the plan's id."""
     from dspy.utils import DummyLM
 
-    from fastworkflow import workflow_agent
+    from fastworkflow.agent import workflow_agent
 
-    monkeypatch.setattr("fastworkflow.workflow_agent.build_query_with_next_steps", _REAL_PLANNER)
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.build_query_with_next_steps", _REAL_PLANNER)
     gated.ctx._current_planner_lm = DummyLM([{"reasoning": "", "next_steps": "1. tell a joke"}] * 4)
     _split_into(monkeypatch, [JOKE])
     gated.script.steps = _finish()

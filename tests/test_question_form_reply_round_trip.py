@@ -25,7 +25,7 @@ import dspy
 import pytest
 
 from fastworkflow.planning import planning_commands as pc
-from fastworkflow import workflow_agent
+from fastworkflow.agent import workflow_agent
 from fastworkflow.core.turn import TurnStatus
 from tests.test_approval_binding import (  # noqa: F401 - the real agent on the library copy, and the guards
     annotated_library, grant_root, no_live_model, no_model_call_for_parameters, todo)

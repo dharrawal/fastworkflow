@@ -31,7 +31,7 @@ import fastworkflow
 from fastworkflow.core.command_context_model import CommandContextModel
 from fastworkflow.core.command_directory import CommandDirectory
 from fastworkflow.core.command_routing import RoutingDefinition, RoutingRegistry
-from fastworkflow.model_pipeline_training import _get_cached_command_utterances
+from fastworkflow.train.model_pipeline_training import _get_cached_command_utterances
 from fastworkflow.intent.nlu_labels import WILDCARD_LABEL
 from fastworkflow.train.determinism import (
     ContextTrainingStatus,

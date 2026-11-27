@@ -201,7 +201,7 @@ def _predict_command_short_name(router, text: str) -> str:
 
 @pytest.mark.requires_plan_head
 def test_trained_head_scores_held_out_corpus():
-    from fastworkflow.model_pipeline_training import CommandRouter
+    from fastworkflow.train.model_pipeline_training import CommandRouter
     from fastworkflow.train.artifact_versioning import require_construction_record
 
     require_construction_record(PLAN_WORKFLOW)

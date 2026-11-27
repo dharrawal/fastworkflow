@@ -19,7 +19,7 @@ import pytest
 
 import fastworkflow
 from fastworkflow.core import command_declarations, command_writes
-from fastworkflow import workflow_agent
+from fastworkflow.agent import workflow_agent
 from fastworkflow.planning import command_preview
 from fastworkflow.planning import planning_commands as pc
 from fastworkflow.core.approval_annotations import command_approval

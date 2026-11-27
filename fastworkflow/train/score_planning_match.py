@@ -651,7 +651,7 @@ def estimate(arm: str, cases: Sequence[Mapping[str, Any]], workflow_folderpath: 
         out_tokens = calls * JEV_OUTPUT_TOKENS
         note = "one matcher call per case per scope that has planning commands (case scope, then root)"
     elif arm == ARM_AGENT_PLAN:
-        from fastworkflow.workflow_agent import PLANNER_INSTRUCTIONS
+        from fastworkflow.agent.workflow_agent import PLANNER_INSTRUCTIONS
 
         calls = len(cases)
         in_chars = sum(len(PLANNER_INSTRUCTIONS) + listing + len(c["utterance"]) for c in cases)
@@ -723,7 +723,7 @@ LISTING_OUTPUT_ESTIMATE = 300
 def listing_text(opened, utterance: str, arm: str) -> str:
     """The arm's listing for one request, built by run_listing as production builds it (no provider call: the
     shortlist gathers with the trained heads' local classifiers)."""
-    from fastworkflow import run_listing
+    from fastworkflow.agent import run_listing
 
     if arm == LISTING_FULL:
         return run_listing.run_listing_text(opened.app, utterance, arm=run_listing.FULL)
@@ -761,7 +761,7 @@ def listing_workflow_rows(label: str, source: str, testset: str, context_path: O
 def listing_dry_run_totals(workflows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """Calls and prompt tokens the live run would make (the planner instructions, the listing, the request and the
     per-call overhead, at characters / 4), and the gate verdict."""
-    from fastworkflow.workflow_agent import PLANNER_INSTRUCTIONS
+    from fastworkflow.agent.workflow_agent import PLANNER_INSTRUCTIONS
 
     calls = 0
     prompt = 0
@@ -804,8 +804,8 @@ def run_listing_live(workflows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     import dspy
 
     from fastworkflow.utils import dspy_utils
-    from fastworkflow.utils.chat_adapter import CommandsSystemPreludeAdapter
-    from fastworkflow.workflow_agent import PLANNER_INSTRUCTIONS
+    from fastworkflow.agent.chat_adapter import CommandsSystemPreludeAdapter
+    from fastworkflow.agent.workflow_agent import PLANNER_INSTRUCTIONS
 
     class TaskPlannerTextSignature(dspy.Signature):
         __doc__ = PLANNER_INSTRUCTIONS
@@ -924,7 +924,7 @@ def _job_types_by_scope(workflow_folderpath: str) -> dict[str, str]:
     """The Jev matcher's job-type text per scope (``""`` for root), as ``workflow_agent._matcher_job_types``
     lays it out, read through ``resolve_field_sources`` (no write)."""
     from fastworkflow.planning.planning_commands import resolve_field_sources
-    from fastworkflow.workflow_agent import MATCHER_EXAMPLES
+    from fastworkflow.agent.workflow_agent import MATCHER_EXAMPLES
 
     resolution = resolve_field_sources(workflow_folderpath)
     by_scope: dict[str, list[str]] = {}
@@ -982,7 +982,7 @@ def _plan_names(workflow_folderpath: str) -> tuple[list[str], list[str]]:
     commands) and ``workflow_agent.core_command_names``. Needs the workflow created (routing loaded)."""
     import fastworkflow
     from fastworkflow.planning.planning_commands import resolve_field_sources
-    from fastworkflow.workflow_agent import core_command_names
+    from fastworkflow.agent.workflow_agent import core_command_names
 
     routing = fastworkflow.RoutingRegistry.get_definition(workflow_folderpath)
     names = list(routing.routing_definition_map)
@@ -1005,8 +1005,8 @@ def _agent_plans(rows: Sequence[Mapping[str, Any]], workflow_folderpath: str,
 
     import fastworkflow
     from fastworkflow.utils import dspy_utils
-    from fastworkflow.utils.chat_adapter import CommandsSystemPreludeAdapter
-    from fastworkflow.workflow_agent import PLANNER_INSTRUCTIONS, planner_commands_text
+    from fastworkflow.agent.chat_adapter import CommandsSystemPreludeAdapter
+    from fastworkflow.agent.workflow_agent import PLANNER_INSTRUCTIONS, planner_commands_text
 
     class TaskPlannerTextSignature(dspy.Signature):
         __doc__ = PLANNER_INSTRUCTIONS

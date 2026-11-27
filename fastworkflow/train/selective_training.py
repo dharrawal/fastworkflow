@@ -115,7 +115,7 @@ ARTIFACT_FORMAT_VERSION = 2
 
 # Full-module digests are intentionally conservative. A helper or comments-only edit
 # may trigger a full retrain; missing a helper edit could silently carry stale models.
-TRAINER_SOURCE_MODULE = "fastworkflow.model_pipeline_training"
+TRAINER_SOURCE_MODULE = "fastworkflow.train.model_pipeline_training"
 GENERATOR_SOURCE_MODULE = "fastworkflow.train.generate_synthetic"
 
 # Every file `train()` writes per context. All of them must exist before a context is
@@ -228,7 +228,7 @@ class ContextSignature(BaseModel):
 def resolved_arm(reserved_class_arm: Optional[str]) -> str:
     """The arm the planner trains under: the explicit one, else the experiment override, else sparse_1."""
     # Lazy: model_pipeline_training imports torch, and the planner does not need it otherwise.
-    from fastworkflow.model_pipeline_training import resolve_reserved_class_arm
+    from fastworkflow.train.model_pipeline_training import resolve_reserved_class_arm
 
     return resolve_reserved_class_arm(reserved_class_arm)
 
@@ -239,7 +239,7 @@ def sparse_arm(reserved_class_arm: Optional[str]) -> bool:
     ``None`` is the shipped construction, which is sparse, so a shipped run is sparse too. The
     internal CME's construction is ``"none"``, which is not sparse.
     """
-    from fastworkflow.model_pipeline_training import arm_construction
+    from fastworkflow.train.model_pipeline_training import arm_construction
 
     return arm_construction(resolved_arm(reserved_class_arm)) == "not_here"
 
@@ -570,13 +570,13 @@ def build_context_maps(
     scoped = head_scope == "scoped"
     if scoped:
         # Lazy: model_pipeline_training imports torch, and this module must not.
-        from fastworkflow.model_pipeline_training import own_command_names
+        from fastworkflow.train.model_pipeline_training import own_command_names
 
     context_commands: dict[str, set[str]] = {}
     unresolved: dict[str, list[str]] = {}
 
     # Lazy: model_pipeline_training imports torch, and this module must not.
-    from fastworkflow.model_pipeline_training import planning_labels_in_layout
+    from fastworkflow.train.model_pipeline_training import planning_labels_in_layout
 
     for context_name in context_names:
         if scoped:
@@ -693,7 +693,7 @@ def compute_context_signatures(
     sparse = sparse_arm(reserved_class_arm)
     if sparse and universe is None:
         universe = set().union(*context_commands.values()) if context_commands else set()
-    from fastworkflow.model_pipeline_training import BUILT_IN_VAGUE_SOURCE
+    from fastworkflow.train.model_pipeline_training import BUILT_IN_VAGUE_SOURCE
 
     signatures: dict[str, ContextSignature] = {}
     for context_name in context_names:
@@ -733,7 +733,7 @@ def compute_planning_fingerprints(workflow_folderpath: str) -> dict[str, Command
     so a seed edit made in this process would otherwise be invisible to the planner. The
     file hash also moves on a docstring edit, which is the conservative direction.
     """
-    from fastworkflow.workflow_agent import _planning_command_files
+    from fastworkflow.agent.workflow_agent import _planning_command_files
 
     workflow_folderpath = os.path.abspath(workflow_folderpath)  # see compute_command_fingerprints
     fingerprints: dict[str, CommandFingerprint] = {}
@@ -751,7 +751,7 @@ def compute_planning_fingerprints(workflow_folderpath: str) -> dict[str, Command
 
 def built_in_vague_fingerprint() -> CommandFingerprint:
     """The fingerprint of the built-in vague replies (a head's training input, fix-1hs8), by their text."""
-    from fastworkflow.model_pipeline_training import (
+    from fastworkflow.train.model_pipeline_training import (
         BUILT_IN_VAGUE_REPLIES,
         BUILT_IN_VAGUE_SOURCE,
         BUILT_IN_VAGUE_WEIGHT,
@@ -793,12 +793,12 @@ def compute_training_signature(
     context_commands, unresolved = build_context_maps(
         workflow_folderpath, contexts, head_scope=head_scope)
 
-    from fastworkflow.model_pipeline_training import (
+    from fastworkflow.train.model_pipeline_training import (
         BUILT_IN_VAGUE_SOURCE,
         not_here_construction,
     )
 
-    from fastworkflow.model_pipeline_training import arm_for_workflow
+    from fastworkflow.train.model_pipeline_training import arm_for_workflow
 
     reserved_class_arm = arm_for_workflow(workflow_folderpath, reserved_class_arm)
     command_fingerprints = compute_command_fingerprints(workflow_folderpath)
@@ -809,7 +809,7 @@ def compute_training_signature(
         command_fingerprints = {**command_fingerprints, **planning}
         universe = set().union(*context_commands.values()) | set(planning)
         # After the fingerprints, which hydrate every command the samples are read from.
-        from fastworkflow.model_pipeline_training import not_here_samples_for_context
+        from fastworkflow.train.model_pipeline_training import not_here_samples_for_context
 
         crd = fastworkflow.RoutingRegistry.get_definition(workflow_folderpath)
         not_here_samples_by_context = {
@@ -1002,7 +1002,7 @@ def context_contribution_manifest_fields(
     def _arm_fields(context_signature: ContextSignature) -> dict:
         if context_signature.reserved_class_arm is None:
             return {}  # shipped runs: the manifest is unchanged
-        from fastworkflow.model_pipeline_training import arm_construction
+        from fastworkflow.train.model_pipeline_training import arm_construction
 
         not_here = sparse_arm(context_signature.reserved_class_arm)
         own_union = set()
@@ -1236,7 +1236,7 @@ def compute_training_plan(
     and recomputing it after training could pick up a source edit made mid-run.
     """
     workflow_folderpath = os.path.abspath(workflow_folderpath)  # see compute_command_fingerprints
-    from fastworkflow.model_pipeline_training import arm_for_workflow
+    from fastworkflow.train.model_pipeline_training import arm_for_workflow
 
     candidates = sorted(candidate_contexts)
     # The internal CME keeps its control construction whatever the caller passes (see arm_for_workflow).

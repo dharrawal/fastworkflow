@@ -16,7 +16,7 @@ searches answered on valid handles, 479 of 479 observations archived.
 
 The **extract step** is a reader that cannot ask for anything. It has no tools,
 it runs once, and `trajectory` is its only evidence input
-(`fastworkflow/utils/react.py`: `self.extract = ChainOfThought(fallback_signature)`).
+(`fastworkflow/agent/react.py`: `self.extract = ChainOfThought(fallback_signature)`).
 At answer time the compaction that helped the loop is what leaves the writer
 holding pointers, and the same benchmark measured that too: 35 of 260 deliverable slots
 answered with "see Observation O23" about a listing sitting in that attempt's own
@@ -129,7 +129,7 @@ estimated.
 `fastWorkflowReAct._extract_prediction` (and `_async_extract_prediction`) is the
 single place the copy is built. Every extract call site goes through it:
 
-* `fastworkflow/utils/react.py` — `forward` (agent-selected finish and the
+* `fastworkflow/agent/react.py` — `forward` (agent-selected finish and the
   iteration ceiling), `resume` (an `ask_user` continuation), `aforward`.
 
 A failure anywhere in the copy — an unreadable or broken archive —

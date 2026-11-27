@@ -43,7 +43,7 @@ from fastworkflow.planning.planning_phases import (
 from fastworkflow.observation_offloading import finish_check
 from fastworkflow.observation_offloading.facts import MissingFactError
 from fastworkflow.core.turn import TurnStatus
-from fastworkflow.utils.react import fastWorkflowReAct
+from fastworkflow.agent.react import fastWorkflowReAct
 from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 from tests.test_turn_result_capture import no_review_gate  # noqa: F401 - the review gate is off for these turns
 from tests.test_turn_result_capture import (  # noqa: F401 - shared fixtures
@@ -886,11 +886,11 @@ def phased(initialized_fastworkflow, todo_workflow_path, monkeypatch):
         session._initial_plan_text = "1. find_book query=Dune"
         return user_query
 
-    monkeypatch.setattr("fastworkflow.workflow_agent.build_query_with_next_steps", fake_plan)
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.build_query_with_next_steps", fake_plan)
     from tests.conftest import script_plan
 
     script_plan(monkeypatch, lambda text: state.command)
-    monkeypatch.setattr("fastworkflow.workflow_agent.split_into_subtasks",
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.split_into_subtasks",
                         lambda *args, **kwargs: ["show the book Dune"])
 
     def no_hand_off(k):
@@ -2532,7 +2532,7 @@ def test_the_extra_steps_phase_is_rebuilt_after_a_restore(phased, monkeypatch):
         answer="b1 has 3 notes.")
     monkeypatch.setattr(phased.ctx, "_phase_command_names",
                         lambda: {"commands": list(COMMANDS), "core_commands": list(CORE)})
-    monkeypatch.setattr("fastworkflow.workflow_agent.load_planning_command_map",
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.load_planning_command_map",
                         lambda folder: {"show_book": phased.command})
     phased.start(suspend_in="extra_steps")
     first = phased.ctx.process_turn("show the book Dune")
@@ -2601,7 +2601,7 @@ def test_steps_before_run_first_then_the_first_phase_runs_as_without_them(phased
 
 def test_the_steps_before_phase_is_rebuilt_after_a_restore(phased, monkeypatch):
     _with_steps_before(phased, monkeypatch)
-    monkeypatch.setattr("fastworkflow.workflow_agent.load_planning_command_map",
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.load_planning_command_map",
                         lambda folder: {"show_book": phased.command})
     phased.start(suspend_in=STEPS_BEFORE_PHASE)
     first = phased.ctx.process_turn("show the book Dune")

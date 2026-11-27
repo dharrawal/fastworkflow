@@ -19,7 +19,8 @@ import dataclasses
 from typing import Optional
 import fastworkflow
 from fastworkflow.intent import intent_detector
-from fastworkflow import model_pipeline_training, run_listing
+from fastworkflow.train import model_pipeline_training
+from fastworkflow.agent import run_listing
 from fastworkflow._workflows.command_metadata_extraction import intent_detection
 from fastworkflow._workflows.command_metadata_extraction.intent_detection import CommandNamePrediction
 from fastworkflow.intent.intent_detector import (
@@ -325,7 +326,7 @@ def test_the_global_scope_reads_the_global_folder_and_an_incomplete_head_is_no_h
 
 def test_the_default_router_is_the_trainers_as_named_when_the_engine_is_built(library_copy, monkeypatch):
     """A head placed under the trainer's ``CommandRouter`` name is the one the engine asks."""
-    from fastworkflow import model_pipeline_training
+    from fastworkflow.train import model_pipeline_training
 
     _fake_head(os.path.join(library_copy, "___command_info", "Book"))
     monkeypatch.setattr(model_pipeline_training, "CommandRouter", _router(["Book/list_loans"]))
@@ -631,7 +632,7 @@ def test_detect_is_none_when_every_scope_declines_or_has_no_engine(on_a_book):
 # ---------------------------------------------------------------------------
 
 def test_head_answers_reads_each_trained_head_through_the_contract(on_a_book, monkeypatch):
-    from fastworkflow import model_pipeline_training
+    from fastworkflow.train import model_pipeline_training
 
     app, _, _, _ = on_a_book
     assert run_listing.head_answers(app, "who has this book") == {}   # no head, no answer

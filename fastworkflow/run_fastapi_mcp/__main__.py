@@ -152,7 +152,7 @@ from fastworkflow.session.conversation_labeling import (
 )
 from fastworkflow.run_chatbot import composer
 from . import compose_trace
-from fastworkflow.mcp_server import command_schema_listing
+from fastworkflow.run_fastapi_mcp.mcp_server import command_schema_listing
 from fastworkflow.observability.store import ObservabilityStore
 from fastworkflow.observability.store import get_observability_sink, writer_incarnation_id
 from fastworkflow.experiment.runner import experiment_store_readiness
@@ -424,10 +424,10 @@ def warm_first_turn(workflow_path: str) -> None:
 
         resolved = str(Path(workflow_path).resolve())
         started = time.time()
-        from fastworkflow.model_pipeline_training import warm_intent_heads
+        from fastworkflow.train.model_pipeline_training import warm_intent_heads
 
         warmed = warm_intent_heads(resolved)
-        from fastworkflow.workflow_agent import warm_planning_commands
+        from fastworkflow.agent.workflow_agent import warm_planning_commands
 
         warm_planning_commands(resolved)
         logger.info(f"first-turn warm-up done in {time.time() - started:.1f}s: intent heads {warmed}")

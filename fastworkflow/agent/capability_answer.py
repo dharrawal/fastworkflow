@@ -242,7 +242,7 @@ def other_context_commands(app_workflow) -> dict[str, list[str]]:
 def capability_turn(message: str, app_workflow, cme_workflow_folderpath: str) -> Optional[tuple[str, dict]]:
     """``(answer, data)`` when *message* is a capability question and the workflow has planning commands, else None.
     *data* is ``capability_data`` of the very arguments the answer text is rendered from."""
-    from fastworkflow.workflow_agent import planning_command_utterances
+    from fastworkflow.agent.workflow_agent import planning_command_utterances
 
     planning_commands = planning_command_utterances(app_workflow.folderpath)
     if not planning_commands or not is_capability_question(message, capability_utterances(cme_workflow_folderpath)):

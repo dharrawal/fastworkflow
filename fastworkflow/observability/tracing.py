@@ -1198,7 +1198,7 @@ STATUS_AWAITING_USER = "awaiting_user"
 #: The cap on ONE span-attribute value written to the observability store, in
 #: UTF-8 bytes. A constant: it bounds a database row, not a
 #: model prompt, so it is not one of the context-window budgets in
-#: ``fastworkflow.context_budget`` and does not scale with a model.
+#: ``fastworkflow.observation_offloading.context_budget`` and does not scale with a model.
 MAX_ATTR_BYTES = 16384
 #: The pre-rename name, kept as an alias for readers of the provenance
 #: record.
@@ -1216,7 +1216,7 @@ def is_control_signal(exc: BaseException) -> bool:
 
     Imports are deferred: both defining modules import this one.
     """
-    from fastworkflow.utils.react import AskUserSuspend
+    from fastworkflow.agent.react import AskUserSuspend
     from fastworkflow.engine.workflow_execution_context import CommandCancelledError
 
     return isinstance(exc, (AskUserSuspend, CommandCancelledError))

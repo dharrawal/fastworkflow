@@ -24,7 +24,7 @@ from fastworkflow.observation_offloading.compact import compact_trajectory
 from fastworkflow.observation_offloading.labels import (
     offload_label, label_alias, is_offload_label,
     alias_line)
-from fastworkflow import context_budget
+from fastworkflow.observation_offloading import context_budget
 from fastworkflow.observability import tracing
 from fastworkflow.observation_offloading.search import (
     SEARCH_MODEL_ENV,

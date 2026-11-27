@@ -17,13 +17,13 @@ from fastworkflow._workflows.plan_metadata_extraction import resolution
 import fastworkflow
 from tests import span_tree
 from fastworkflow.review import review_proposals
-from fastworkflow import workflow_agent
+from fastworkflow.agent import workflow_agent
 from fastworkflow.observability import tracing
 from fastworkflow.review.approval_binding import Surface
 from fastworkflow.planning.planning_commands import planning_command
 from fastworkflow.review.review_engine import AWAITING, CONFIRMED, DECLINED, EXPIRED, PROPOSAL_TTL_SECONDS, proposal_of
 from fastworkflow.review.review_proposals import SubTaskProposal
-from fastworkflow.run_listing import check_planned_arguments
+from fastworkflow.agent.run_listing import check_planned_arguments
 from fastworkflow.core.turn import TurnStatus
 from tests.test_approval_binding import (  # noqa: F401 - the real agent on the annotated library copy, and the guards
     _finish, annotated_library, no_live_model, no_model_call_for_parameters, todo)
@@ -72,7 +72,7 @@ def gated(todo):
 
 def _split_into(monkeypatch, subtasks):
     """The planner's split (the one model-backed seam before the gate): the sub-tasks it returns."""
-    monkeypatch.setattr("fastworkflow.workflow_agent.split_into_subtasks", lambda user_query, **kwargs: list(subtasks))
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.split_into_subtasks", lambda user_query, **kwargs: list(subtasks))
 
 
 def _marker(todo) -> str | None:
@@ -313,7 +313,7 @@ def _recording_split(monkeypatch, gated):
         conversations.append(kwargs.get("conversation", ""))
         return [user_query]
 
-    monkeypatch.setattr("fastworkflow.workflow_agent.split_into_subtasks", split)
+    monkeypatch.setattr("fastworkflow.agent.workflow_agent.split_into_subtasks", split)
     return seen
 
 

@@ -673,7 +673,7 @@ class DistillationSession:
         self.chat_session.get_active_workflow().context["raw_user_message"] = message
 
         # Create agent with the specified LLM
-        from fastworkflow.workflow_agent import (
+        from fastworkflow.agent.workflow_agent import (
             initialize_workflow_tool_agent,
             build_query_with_next_steps,
             _what_can_i_do,

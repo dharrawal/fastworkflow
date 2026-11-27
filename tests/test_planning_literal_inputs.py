@@ -21,7 +21,7 @@ import pytest
 from pydantic import BaseModel, Field
 
 import fastworkflow
-from fastworkflow import model_pipeline_training
+from fastworkflow.train import model_pipeline_training
 from fastworkflow.planning import planning_commands
 from fastworkflow._workflows.command_metadata_extraction import intent_detection
 from fastworkflow.engine.command_executor import CommandExecutor

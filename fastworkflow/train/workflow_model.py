@@ -55,7 +55,7 @@ from torch.utils.data import DataLoader
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 import fastworkflow
-from fastworkflow import model_pipeline_training as heads
+from fastworkflow.train import model_pipeline_training as heads
 from fastworkflow.intent.nlu_labels import (
     PARAMETER_VALUE_LABEL,
     PARAMETER_VALUE_PLACEHOLDERS,

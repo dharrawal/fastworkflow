@@ -16,7 +16,7 @@ import pytest
 from dspy.utils import DummyLM
 
 from fastworkflow.observability import tracing
-from fastworkflow import workflow_agent
+from fastworkflow.agent import workflow_agent
 from tests.test_approval_binding import (  # noqa: F401
     _finish, annotated_library, no_live_model, no_model_call_for_parameters, todo)
 from tests.test_plan_reply_policy import _wire_plan, planner, script_param_extraction  # noqa: F401

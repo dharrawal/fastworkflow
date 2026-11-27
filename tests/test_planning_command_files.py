@@ -12,7 +12,7 @@ from dspy.utils import DummyLM
 
 from fastworkflow.planning import planning_commands as sc
 from fastworkflow.planning import command_preview
-from fastworkflow import workflow_agent
+from fastworkflow.agent import workflow_agent
 from fastworkflow.planning.planning_commands import PlanningCommandCallError
 from tests.scripted_extractor import script_extractor
 from tests.test_text_planner_and_split import (  # noqa: F401 - workflow_env is a fixture

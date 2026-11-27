@@ -2110,7 +2110,7 @@ def not_here_seed_rows(
     (design 2.50). Each command's sample is ``resolve_not_here_sample``: the recorded one while
     it still holds, else chosen again. ``None`` chooses every sample afresh.
     """
-    from fastworkflow.workflow_agent import planning_command_utterances
+    from fastworkflow.agent.workflow_agent import planning_command_utterances
 
     cmd_dir = crd.command_directory
     execution: set[str] = set(cmd_dir.core_command_names)

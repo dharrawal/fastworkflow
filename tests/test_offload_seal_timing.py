@@ -35,7 +35,7 @@ import dspy
 
 import fastworkflow
 from fastworkflow.observability import tracing
-from fastworkflow.answer_rehydration import archived_observation
+from fastworkflow.observation_offloading.answer_rehydration import archived_observation
 from fastworkflow.observability import store as obs
 from fastworkflow.observation_offloading import archive as archive_module
 from fastworkflow.observation_offloading import state as offload_state
@@ -53,7 +53,7 @@ from fastworkflow.observation_offloading.state import (
     reset_observation_state,
     scope_for_host,
 )
-from fastworkflow.utils.react import AskUserSuspend
+from fastworkflow.agent.react import AskUserSuspend
 from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 REDACTION_ENV = archive_module.REDACTION_ENV

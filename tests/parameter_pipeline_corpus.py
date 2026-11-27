@@ -278,7 +278,7 @@ class Environment:
         from dspy.utils import DummyLM
 
         import fastworkflow
-        from fastworkflow import workflow_agent
+        from fastworkflow.agent import workflow_agent
         from fastworkflow.parameters import signatures
 
         fastworkflow.init({"FASTWORKFLOW_STATE_ROOT": str(self.directory / "workflow_contexts")})
@@ -362,7 +362,7 @@ class Environment:
         return workflow
 
     def command(self, name: str):
-        from fastworkflow import workflow_agent
+        from fastworkflow.agent import workflow_agent
 
         found = workflow_agent.load_planning_command_map(self.folder)[name]
         return dataclasses.replace(found, identifiers=ACCOUNTS)

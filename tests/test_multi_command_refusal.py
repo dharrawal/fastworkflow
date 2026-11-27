@@ -12,7 +12,7 @@ import pytest
 import fastworkflow
 from fastworkflow.engine.chat_session import ChatSession
 from fastworkflow.engine.command_executor import CommandExecutor
-from fastworkflow import workflow_agent
+from fastworkflow.agent import workflow_agent
 
 
 @pytest.fixture

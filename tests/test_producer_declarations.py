@@ -15,7 +15,8 @@ from dotenv import dotenv_values
 from pydantic import BaseModel, Field
 
 import fastworkflow
-from fastworkflow import ModuleType, workflow_agent
+from fastworkflow import ModuleType
+from fastworkflow.agent import workflow_agent
 from fastworkflow.planning import command_preview
 from fastworkflow.planning import planning_commands as pc
 from fastworkflow.core.command_routing import RoutingRegistry

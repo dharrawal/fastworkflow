@@ -267,7 +267,7 @@ def library_pair(tmp_path):
 
 def test_a_planning_command_with_the_declarations_loads_without_problems(library_pair):
     from fastworkflow.planning import command_preview
-    from fastworkflow.workflow_agent import load_planning_command_map
+    from fastworkflow.agent.workflow_agent import load_planning_command_map
 
     plain, declared = library_pair
     assert command_preview.load_problems(str(declared)) == command_preview.load_problems(str(plain)) == []
@@ -334,7 +334,7 @@ def _hello_copy(tmp_path, name: str, label_examples: str) -> Path:
 
 def test_an_execution_command_with_the_declarations_loads_and_its_schema_carries_them(tmp_path):
     from fastworkflow.planning import command_preview
-    from fastworkflow.mcp_server import command_schema_listing
+    from fastworkflow.run_fastapi_mcp.mcp_server import command_schema_listing
 
     folder = _hello_copy(tmp_path, "hello_declared", '["Q3 total", "Year to date"]')
     try:

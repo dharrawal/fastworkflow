@@ -18,7 +18,7 @@ import pytest
 
 import fastworkflow
 from fastworkflow.core.command_routing import RoutingRegistry
-from fastworkflow.model_pipeline_training import (
+from fastworkflow.train.model_pipeline_training import (
     PLANNING_HEADS_LABELLED,
     PLANNING_HEADS_NOT_HERE,
     active_experiment_planning_heads,

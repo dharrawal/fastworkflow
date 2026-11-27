@@ -25,7 +25,7 @@ import pytest
 
 import fastworkflow
 from fastworkflow.evaluation.distillation import DistillationSession, distill_message
-from fastworkflow.workflow_agent import _append_action_record
+from fastworkflow.agent.workflow_agent import _append_action_record
 from fastworkflow.engine.workflow_execution_context import WorkflowExecutionContext
 
 
@@ -186,14 +186,14 @@ def test_run_agent_pass_returns_a_detached_action_snapshot(
         return _ScriptedAgent(chat_session, pass_commands.pop(0))
 
     monkeypatch.setattr(
-        "fastworkflow.workflow_agent.initialize_workflow_tool_agent", scripted_agent
+        "fastworkflow.agent.workflow_agent.initialize_workflow_tool_agent", scripted_agent
     )
     monkeypatch.setattr(
-        "fastworkflow.workflow_agent.build_query_with_next_steps",
+        "fastworkflow.agent.workflow_agent.build_query_with_next_steps",
         lambda user_query, session, **kwargs: user_query,
     )
     monkeypatch.setattr(
-        "fastworkflow.workflow_agent._what_can_i_do", lambda session: "commands"
+        "fastworkflow.agent.workflow_agent._what_can_i_do", lambda session: "commands"
     )
     monkeypatch.setattr(
         "fastworkflow.utils.dspy_utils.get_lm", lambda *args, **kwargs: None

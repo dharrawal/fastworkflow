@@ -29,7 +29,7 @@ from dotenv import dotenv_values
 
 import fastworkflow
 from fastworkflow.core.command_directory import CommandDirectory
-from fastworkflow.model_pipeline_training import preflight_benchmark
+from fastworkflow.train.model_pipeline_training import preflight_benchmark
 from fastworkflow.train import heldout_evaluation
 from fastworkflow.train.__main__ import train_workflow
 

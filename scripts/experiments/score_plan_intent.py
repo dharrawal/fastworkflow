@@ -118,7 +118,7 @@ class Answers:
 def _planning_match(answers: Answers, workflow, context: str, text: str) -> tuple[str | None, dict]:
     """``(the planning command the planning matcher picked, its distribution)``: what
     ``review_proposals.planning_match`` returned before the change. ``(None, {})`` with no answer."""
-    from fastworkflow import workflow_agent
+    from fastworkflow.agent import workflow_agent
 
     def ask() -> dict:
         # The planning-command match is the intent loop's decision since bd fix-zvme.
@@ -148,7 +148,7 @@ def before(answers: Answers, workflow, context: str, text: str, mode: str) -> di
     """What the code before the change gave one part standing alone as a turn's only sub-task (``mode``
     ``no_agent`` or ``agent``), or as one of several (``no_agent_part`` / ``agent_part``: no fast path)."""
     from fastworkflow.planning import planning_commands
-    from fastworkflow import run_listing, workflow_agent
+    from fastworkflow.agent import run_listing, workflow_agent
 
     planning = set(planning_commands.resolve_field_sources(workflow.folderpath).planning_commands)
     core = workflow_agent.core_command_names()

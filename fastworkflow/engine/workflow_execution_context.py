@@ -55,7 +55,7 @@ from fastworkflow.core.turn import TurnResult, TurnStatus, mint_turn_key
 from fastworkflow.utils.logging import logger
 from fastworkflow.utils import dspy_logger, dspy_utils
 from fastworkflow.parameters.input_validation import plain_facts, stored_value, tagged_facts
-from fastworkflow.utils.react import AskUserSuspend, NoSuspendedAgentStateError
+from fastworkflow.agent.react import AskUserSuspend, NoSuspendedAgentStateError
 
 #: A sub-task that hits the ReAct step cap is continued by a fresh executor at most this many times.
 MAX_HANDOFFS = 2
@@ -2178,11 +2178,11 @@ class WorkflowExecutionContext:
         A plain goal bound to its command keeps its narrowed listing through a context switch (fix-3rsq.plan-review.2.9):
         the listing is the bound command's, re-read from the workflow now. Only the turn's own agent (the turn frame).
         """
-        from fastworkflow.workflow_agent import _refresh_agent_available_commands
+        from fastworkflow.agent.workflow_agent import _refresh_agent_available_commands
 
         bound = getattr(self, "_narrow_to", None)
         if bound is not None and self._app_workflow is not None and len(self._frame_stack()) == 1:
-            from fastworkflow import run_listing
+            from fastworkflow.agent import run_listing
 
             inputs = getattr(self._workflow_tool_agent, "inputs", None)
             if isinstance(inputs, dict) and "available_commands" in inputs:
@@ -3015,7 +3015,7 @@ class WorkflowExecutionContext:
 
     def _build_react_agent(self):
         """A workflow-tool ReAct agent for one run; its steps number from this context's next step."""
-        from fastworkflow.workflow_agent import initialize_workflow_tool_agent
+        from fastworkflow.agent.workflow_agent import initialize_workflow_tool_agent
         agent = initialize_workflow_tool_agent(self)
         agent.step_floor = lambda: self._next_step
         return agent
@@ -3086,7 +3086,7 @@ class WorkflowExecutionContext:
     def _agent_dspy_context(self):
         """Return (lm, adapter) for agent-mode dspy.context blocks."""
         lm = dspy_utils.get_lm("LLM_AGENT")
-        from fastworkflow.utils.chat_adapter import CommandsSystemPreludeAdapter
+        from fastworkflow.agent.chat_adapter import CommandsSystemPreludeAdapter
 
         return lm, CommandsSystemPreludeAdapter()
 
@@ -3184,7 +3184,7 @@ class WorkflowExecutionContext:
         self._clear_subtask_state()
 
         # A workflow with planning commands answers a plain "what can you do?" in code, with no model call.
-        from fastworkflow.capability_answer import capability_turn
+        from fastworkflow.agent.capability_answer import capability_turn
 
         if self._app_workflow and not self._turn_use_plan and (capable := capability_turn(
                 message, self._app_workflow, self._cme_workflow.folderpath)) is not None:
@@ -3192,7 +3192,7 @@ class WorkflowExecutionContext:
             return dspy.Prediction(final_answer=capable[0], exhausted=False, capabilities=capable[1])
 
         from fastworkflow.core import turn_progress
-        from fastworkflow import workflow_agent
+        from fastworkflow.agent import workflow_agent
 
         turn_progress.emit(turn_progress.STAGE_SPLIT)
         # The split's request is the user's new message; the earlier turns go in as the splitter's separate
@@ -3360,7 +3360,7 @@ class WorkflowExecutionContext:
 
     def _resolution_turn(self):
         """What the resolution's stage logic needs from this turn (``resolution.Turn``)."""
-        from fastworkflow import workflow_agent
+        from fastworkflow.agent import workflow_agent
         from fastworkflow._workflows.plan_metadata_extraction import resolution
 
         return resolution.Turn(workflow=self._app_workflow, no_agent=self.no_agent_mode,
@@ -3515,7 +3515,7 @@ class WorkflowExecutionContext:
         """The planner's text plan for an ad hoc *goal* (no-agent mode): what the client would carry out, since the item
         is not run here. One planner call (``LLM_PLANNER``, never the agent); "" when the planner gave no plan or
         failed."""
-        from fastworkflow.workflow_agent import build_query_with_next_steps
+        from fastworkflow.agent.workflow_agent import build_query_with_next_steps
 
         saved = (getattr(self, "_initial_plan_text", ""), getattr(self, "_phased_planning_command_call", None))
         try:
@@ -3597,7 +3597,7 @@ class WorkflowExecutionContext:
         ``planning_name`` names the planning command of a part whose command is already known (a part that
         resumes after its parameter question): the matcher is not asked again.
         """
-        from fastworkflow.workflow_agent import build_query_with_next_steps, sub_task_commands_text
+        from fastworkflow.agent.workflow_agent import build_query_with_next_steps, sub_task_commands_text
 
         # One planning command match gives both the template and its parsed form; a hand-off continuation
         # (query differs from its original text) plans from the template only, since the planning command
@@ -3611,7 +3611,7 @@ class WorkflowExecutionContext:
         if self._app_workflow is not None and known:
             # The client's choice (``use_plan``), or the command a part was already asked about, is the match: the
             # matcher is not called. A bound call (a refusal's fall-back) names its own command below.
-            from fastworkflow.workflow_agent import _template_text, load_planning_command_map
+            from fastworkflow.agent.workflow_agent import _template_text, load_planning_command_map
 
             planning_command = (load_planning_command_map(self._app_workflow.folderpath).get(known)
                                 if bound_command is None else None)
@@ -3620,7 +3620,7 @@ class WorkflowExecutionContext:
                 planning_distribution = {known: 1.0}
         elif self._app_workflow is not None:
             from fastworkflow._workflows.plan_metadata_extraction import resolution
-            from fastworkflow.workflow_agent import _template_text, load_planning_command_map
+            from fastworkflow.agent.workflow_agent import _template_text, load_planning_command_map
 
             intent = resolution.part_intent(self._app_workflow, template_text or query)
             if intent.outcome == resolution.MATCH and intent.kind == resolution.KIND_PLANNING:
@@ -3684,7 +3684,7 @@ class WorkflowExecutionContext:
                         f"the agent model that would carry out {bound_command} from its inputs is not set (LLM_AGENT)"),
                 suggested_plan=str(getattr(self, "_initial_plan_text", "") or "").strip())
         if bound_command is not None:
-            from fastworkflow import run_listing
+            from fastworkflow.agent import run_listing
 
             available_commands = run_listing.bound_command_listing(self._app_workflow, bound_command)
         else:
@@ -3737,7 +3737,7 @@ class WorkflowExecutionContext:
         folderpath = self._app_workflow.folderpath
 
         def review(trajectory, iters_left: int):
-            from fastworkflow.workflow_agent import core_command_names
+            from fastworkflow.agent.workflow_agent import core_command_names
 
             # The archive keeps the command text as sent; the action log says
             # which command each text resolved to (an alias, a misspelling).
@@ -3840,7 +3840,7 @@ class WorkflowExecutionContext:
             return self._phase_live
         from fastworkflow.planning.planning_commands import call_phases
         from fastworkflow.planning.planning_phases import PhaseError
-        from fastworkflow.workflow_agent import load_planning_command_map
+        from fastworkflow.agent.workflow_agent import load_planning_command_map
 
         state = self._phase_run
         folderpath = self._app_workflow.folderpath
@@ -4810,9 +4810,9 @@ class WorkflowExecutionContext:
         caller to settle, not the awaiting output (fix-3rsq.plan-review.2.8). Without it the call begins a turn of its
         own, with *unattended* (attended by default, as the review always was).
         """
-        from fastworkflow.utils.react import AskUserSuspend
+        from fastworkflow.agent.react import AskUserSuspend
 
-        from fastworkflow.workflow_agent import framework_call_scope
+        from fastworkflow.agent.workflow_agent import framework_call_scope
 
         self._ensure_agent_initialized()
         if not within_turn:
@@ -5010,7 +5010,7 @@ class WorkflowExecutionContext:
         restored frame has them, where the step's agent may not have its trajectory yet.
         """
         # inline import avoids circular import: workflow_agent imports this module at load (CommandCancelledError)
-        from fastworkflow.workflow_agent import (
+        from fastworkflow.agent.workflow_agent import (
             _append_action_record, _append_turn_output, _hold_command_run, action_record,
             command_run_response, run_observation)
 
@@ -5064,7 +5064,7 @@ class WorkflowExecutionContext:
         """``commands`` / ``core_commands`` a phase's steps are read with, as the finish check
         reads them. Without the routing definition only the runs' and the facts' commands
         are known (``planning_phases.fill_output`` adds those)."""
-        from fastworkflow.workflow_agent import core_command_names
+        from fastworkflow.agent.workflow_agent import core_command_names
 
         return {"commands": self._workflow_command_names(),
                 "core_commands": list(core_command_names())}
@@ -5126,7 +5126,7 @@ class WorkflowExecutionContext:
         from fastworkflow.planning import planning_phases
         from fastworkflow.planning.planning_commands import number
         from fastworkflow.observation_offloading.facts import FactsError, MissingFactError, fact_sources
-        from fastworkflow.workflow_agent import _what_can_i_do
+        from fastworkflow.agent.workflow_agent import _what_can_i_do
 
         state = self._phase_run
         state["missing_fact"] = False
@@ -5609,7 +5609,7 @@ class WorkflowExecutionContext:
         the run records whether they ran as shown; a refusal still falls back to the agent, recorded as a deviation."""
         from fastworkflow.planning import planning_commands
         from fastworkflow.review import review_proposals
-        from fastworkflow import run_listing
+        from fastworkflow.agent import run_listing
 
         folder = self._app_workflow.folderpath
         name = item.means.name
@@ -5676,7 +5676,8 @@ class WorkflowExecutionContext:
         When a required input is unbound (review_proposals.reviewed_values), the agent handles the sub-task as before
         (F2). When the CME refuses the values, or code cannot run the step, the agent takes over with the refusal in its
         trajectory (F2). Either is recorded as a deviation (review_proposals.binding_record)."""
-        from fastworkflow import ModuleType, run_listing
+        from fastworkflow import ModuleType
+        from fastworkflow.agent import run_listing
         from fastworkflow.review import review_proposals
         from fastworkflow.planning import run as run_step
 
@@ -5811,7 +5812,7 @@ class WorkflowExecutionContext:
             # No continuation left: the capped answer stands as partial and the turn is exhausted.
             turn.subtask_exhausted = True
             return False
-        from fastworkflow.workflow_agent import run_progress_check
+        from fastworkflow.agent.workflow_agent import run_progress_check
 
         done = run_progress_check(self, "step_limit", done_only=True).strip()
         opened = _opened_part(getattr(turn.agent, "trajectory", None) or {})
@@ -6156,7 +6157,7 @@ class WorkflowExecutionContext:
         step is the suspended agent's in-flight execute step: the nested frame's agent when the
         suspension is inside a planning command, else the turn's agent. Never raises.
         """
-        from fastworkflow.workflow_agent import _held_context, _hold_command_run
+        from fastworkflow.agent.workflow_agent import _held_context, _hold_command_run
 
         try:
             agent = self._top_frame().agent or self._workflow_tool_agent
@@ -6210,7 +6211,7 @@ class WorkflowExecutionContext:
             # read by the phase (_read_decision_reply). No planner call and no reply-intent call: yes, no, a value or
             # cancel are read in code.
             self._note_agent_resume()
-            from fastworkflow.workflow_agent import _append_action_record
+            from fastworkflow.agent.workflow_agent import _append_action_record
 
             _append_action_record(self, {"agent_query": question, "user_response": user_answer})
             self.complete_ask_user_entry(user_answer)
@@ -6219,7 +6220,7 @@ class WorkflowExecutionContext:
         else:
             self._note_agent_resume()
 
-            from fastworkflow.workflow_agent import _post_ask_user_response
+            from fastworkflow.agent.workflow_agent import _post_ask_user_response
 
             self._workflow_tool_agent.iteration_counter = -1
             observation = _post_ask_user_response(question, user_answer, self)
